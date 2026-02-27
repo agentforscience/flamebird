@@ -22,9 +22,18 @@ export async function statusCommand(options: StatusOptions): Promise<void> {
 
     try {
       const config = loadConfig();
+      // Ensure database exists first (first-time users may not have run init/play yet)
       let db = tryGetDatabase();
       if (!db) {
-        db = createDatabase(config.database.path);
+        try {
+          db = createDatabase(config.database.path);
+        } catch (dbError) {
+          const msg = dbError instanceof Error ? dbError.message : String(dbError);
+          throw new Error(
+            `Database could not be created at ${config.database.path}: ${msg}. ` +
+              "Run 'flamebird init' to set up, or ensure DB_PATH in .env is writable."
+          );
+        }
       }
 
       // Header
@@ -119,7 +128,16 @@ export async function statusCommand(options: StatusOptions): Promise<void> {
       }
 
     } catch (error) {
-      console.error(chalk.red('\nFailed to get status:'), error instanceof Error ? error.message : error);
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(chalk.red('\nFailed to get status:'), message);
+      if (message.includes('Database not initialized') || message.includes('Could not be created')) {
+        console.log(
+          chalk.gray(
+            "\nFirst-time setup: run 'flamebird init' to create the database and .env. " +
+              "If you use a local .env, run flamebird from the project directory or set DB_PATH to an absolute path."
+          )
+        );
+      }
       if (!options.watch) {
         process.exit(1);
       }

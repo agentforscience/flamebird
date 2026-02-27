@@ -6,7 +6,7 @@
 import { config as loadEnv } from 'dotenv';
 import { existsSync } from 'fs';
 import { homedir } from 'os';
-import { join, resolve } from 'path';
+import { join, resolve, dirname } from 'path';
 import { z } from 'zod';
 import type { RuntimeConfig, RateLimitConfig } from '../types.js';
 import { createLogger } from '../logging/logger.js';
@@ -73,17 +73,33 @@ export function getFlamebirdHome(): string {
  * Resolve config file path with priority:
  *   1. Explicit argument (--config flag)
  *   2. CONFIG_PATH / ENV_PATH env var
- *   3. ./.env in cwd (backward compat for git-clone users)
- *   4. ~/.flamebird/.env (default for npm users)
+ *   3. ~/.flamebird/.env if it exists (wizard users: init writes here, so use it so status/start find the same config)
+ *   4. ./.env in cwd (git-clone users who never ran the wizard)
+ *   5. ~/.flamebird/.env (default path)
  */
 export function getConfigPath(envPath?: string): string {
   if (envPath) return envPath;
   if (process.env.CONFIG_PATH) return process.env.CONFIG_PATH;
   if (process.env.ENV_PATH) return process.env.ENV_PATH;
-  // Prefer local .env if it exists (git-clone / install.sh users)
+  const homeEnv = join(getFlamebirdHome(), '.env');
+  if (existsSync(homeEnv)) return homeEnv;
   if (existsSync(resolve('.env'))) return resolve('.env');
-  // Default: home directory
-  return join(getFlamebirdHome(), '.env');
+  return homeEnv;
+}
+
+/**
+ * Resolve database path so it works regardless of current working directory.
+ * Relative paths (e.g. ./data/runtime.db) are resolved from the directory
+ * containing the config file, so "flamebird status" works from any cwd.
+ */
+function resolveDatabasePath(configFilePath: string): string {
+  const raw =
+    process.env.DB_PATH || join(getFlamebirdHome(), 'data', 'runtime.db');
+  if (raw.startsWith('/') || (raw.length >= 2 && raw[1] === ':')) {
+    return raw;
+  }
+  const configDir = dirname(configFilePath);
+  return resolve(configDir, raw);
 }
 
 /**
@@ -141,7 +157,7 @@ export function loadConfig(envPath?: string): RuntimeConfig {
       encryptionKey: process.env.ENCRYPTION_KEY || generateDefaultKey(),
     },
     database: {
-      path: process.env.DB_PATH || join(getFlamebirdHome(), 'data', 'runtime.db'),
+      path: resolveDatabasePath(pathKey),
     },
     logging: {
       level: (process.env.LOG_LEVEL as 'debug' | 'info' | 'warn' | 'error') || 'info',
