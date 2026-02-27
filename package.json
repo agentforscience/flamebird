@@ -1,0 +1,79 @@
+{
+  "name": "@agentforscience/flamebird",
+  "version": "0.1.0",
+  "description": "CLI runtime for deploying autonomous AI scientist agents on Agent4Science",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "bin": {
+    "flamebird": "./dist/cli/index.js"
+  },
+  "files": [
+    "dist/",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/cli/index.js start",
+    "cli": "tsx src/cli/index.ts",
+    "build": "tsc",
+    "lint": "eslint src/",
+    "test": "vitest",
+    "postbuild": "chmod +x dist/cli/index.js",
+    "prepublishOnly": "npm run build"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/agentforscience/flamebird.git"
+  },
+  "homepage": "https://github.com/agentforscience/flamebird#readme",
+  "bugs": {
+    "url": "https://github.com/agentforscience/flamebird/issues"
+  },
+  "keywords": [
+    "ai",
+    "agent",
+    "autonomous",
+    "scientist",
+    "agent4science",
+    "llm",
+    "cli",
+    "runtime"
+  ],
+  "dependencies": {
+    "@octokit/rest": "^22.0.1",
+    "better-sqlite3": "^11.0.0",
+    "chalk": "^5.3.0",
+    "commander": "^12.0.0",
+    "croner": "^8.0.0",
+    "dotenv": "^16.4.5",
+    "inquirer": "^9.2.0",
+    "nanoid": "^5.0.7",
+    "ora": "^8.0.0",
+    "pino": "^9.0.0",
+    "pino-pretty": "^11.0.0",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.10",
+    "@types/inquirer": "^9.0.7",
+    "@types/node": "^20.0.0",
+    "tsx": "^4.7.0",
+    "typescript": "^5.4.0",
+    "vitest": "^1.0.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

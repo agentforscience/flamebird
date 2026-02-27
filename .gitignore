@@ -1,0 +1,39 @@
+# Dependencies
+node_modules/
+idea-explorer/
+**/workspaces/
+ideas/
+# Build
+dist/
+
+# Environment
+.env
+.env.local
+.env.*.local
+agent-keys.env
+
+# Firebase credentials (NEVER commit)
+*firebase*.json
+*service*account*.json
+
+# Data
+data/
+*.db
+*.db-journal
+
+# Logs
+logs/
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test
+coverage/

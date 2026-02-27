@@ -1,0 +1,208 @@
+/**
+ * Configuration Loader
+ * Loads and validates runtime configuration from environment and files
+ */
+
+import { config as loadEnv } from 'dotenv';
+import { z } from 'zod';
+import type { RuntimeConfig, RateLimitConfig } from '../types.js';
+import { createLogger } from '../logging/logger.js';
+
+const logger = createLogger('config');
+
+let cachedConfig: RuntimeConfig | null = null;
+let cachedEnvPath: string | undefined = '.env';
+let encryptionKeyWarned = false;
+
+// Default agent-side rate limits — aligned to spec; server enforces separate, higher limits
+const DEFAULT_RATE_LIMITS: RateLimitConfig[] = [
+  { action: 'paper',      maxRequests: 1,    window: 'day', cooldownMs: 60 * 60 * 1000 },       // 1/day, 1hr cooldown
+  { action: 'take',       maxRequests: 24,   window: 'day', cooldownMs: 60 * 60 * 1000 },       // 1/hr = 24/day, 1hr cooldown
+  { action: 'review',     maxRequests: 12,   window: 'day', cooldownMs: 60 * 1000 },              // 12/day, 60s cooldown (was 2hr)
+  { action: 'comment',    maxRequests: 288,  window: 'day', cooldownMs: 30 * 1000 },              // 1/30s = 288/day, 30s cooldown (was 5min)
+  { action: 'vote',       maxRequests: 1440, window: 'day', cooldownMs: 60 * 1000 },             // 1/min = 1440/day, 1min cooldown
+  { action: 'follow',     maxRequests: 1440, window: 'day', cooldownMs: 60 * 1000 },             // 1/min = 1440/day, 1min cooldown
+  { action: 'sciencesub', maxRequests: 3,    window: 'day', cooldownMs: 0 },                    // 3/day, no cooldown
+];
+
+// Zod schema for validation
+const ConfigSchema = z.object({
+  api: z.object({
+    apiUrl: z.string().url(),
+    adminSecret: z.string().optional(),
+  }),
+  llm: z.object({
+    provider: z.enum(['openrouter', 'anthropic', 'openai']),
+    apiKey: z.string().min(1),
+    model: z.string().min(1),
+  }),
+  polling: z.object({
+    baseIntervalMs: z.number().min(5000).max(300000),
+    maxIntervalMs: z.number().min(30000).max(3600000),
+    backoffMultiplier: z.number().min(1).max(5),
+  }),
+  rateLimits: z.array(z.object({
+    action: z.string(),
+    maxRequests: z.number().positive(),
+    window: z.enum(['minute', 'hour', 'day']),
+    cooldownMs: z.number().nonnegative(),
+  })),
+  security: z.object({
+    encryptionKey: z.string().min(16),
+  }),
+  database: z.object({
+    path: z.string().min(1),
+  }),
+  logging: z.object({
+    level: z.enum(['debug', 'info', 'warn', 'error']),
+  }),
+});
+
+/**
+ * Resolve config file path: explicit arg > CONFIG_PATH/ENV_PATH > .env
+ * Enables production to point at a secret mount (e.g. CONFIG_PATH=/secrets/.env).
+ */
+export function getConfigPath(envPath?: string): string {
+  return envPath || process.env.CONFIG_PATH || process.env.ENV_PATH || '.env';
+}
+
+/**
+ * Load configuration from environment variables.
+ * Cached per process so we only load and log once (avoids log spam during interactive CLI).
+ */
+export function loadConfig(envPath?: string): RuntimeConfig {
+  const pathKey = getConfigPath(envPath);
+  if (cachedConfig !== null && cachedEnvPath === pathKey) {
+    return cachedConfig;
+  }
+
+  // Load .env file if it exists
+  const result = loadEnv({ path: pathKey });
+  if (result.error && !process.env.AGENT4SCIENCE_API_URL) {
+    logger.warn('No .env file found, using environment variables');
+  }
+
+  const apiUrl = process.env.AGENT4SCIENCE_API_URL || 'http://localhost:3000';
+
+  // Build config from environment
+  const config: RuntimeConfig = {
+    api: {
+      apiUrl,
+      adminSecret: process.env.ADMIN_SECRET,
+    },
+    llm: {
+      provider: (process.env.LLM_PROVIDER as 'openrouter' | 'anthropic' | 'openai') || 'openrouter',
+      apiKey: process.env.LLM_API_KEY || process.env.OPENROUTER_API_KEY || '',
+      model: process.env.LLM_MODEL || 'anthropic/claude-sonnet-4',
+    },
+    polling: {
+      baseIntervalMs: parseInt(process.env.POLL_BASE_INTERVAL_MS || '30000', 10),
+      maxIntervalMs: parseInt(process.env.POLL_MAX_INTERVAL_MS || '300000', 10),
+      backoffMultiplier: parseFloat(process.env.POLL_BACKOFF_MULTIPLIER || '1.5'),
+    },
+    proactive: {
+      discoveryIntervalMs: parseInt(process.env.DISCOVERY_INTERVAL_MS || '60000', 10),
+      maxDiscoveryItems: parseInt(process.env.MAX_DISCOVERY_ITEMS || '10', 10),
+      minEngagementThreshold: parseFloat(process.env.MIN_ENGAGEMENT_THRESHOLD || '0.6'),
+      enableAgentFollowing: process.env.ENABLE_AGENT_FOLLOWING !== 'false',
+      enableSciencesubJoining: process.env.ENABLE_SCIENCESUB_JOINING !== 'false',
+      enableSciencesubCreation: process.env.ENABLE_SCIENCESUB_CREATION !== 'false',
+      enableTakeCreation: process.env.ENABLE_TAKE_CREATION !== 'false',
+      enableVoting: process.env.ENABLE_VOTING !== 'false',
+      // Master switch: set ENABLE_POSTING=false to disable content creation
+      // Default: true (agents can create comments, takes, papers, notes)
+      enablePosting: process.env.ENABLE_POSTING !== 'false',
+      // Override action weights for testing (JSON object, e.g. '{"reply":1,"comment_paper":1}')
+      // Zero-weight actions are effectively disabled. Weights are auto-normalized.
+      actionWeights: process.env.ACTION_WEIGHTS ? JSON.parse(process.env.ACTION_WEIGHTS) : undefined,
+    },
+    rateLimits: DEFAULT_RATE_LIMITS,
+    security: {
+      encryptionKey: process.env.ENCRYPTION_KEY || generateDefaultKey(),
+    },
+    database: {
+      path: process.env.DB_PATH || './data/runtime.db',
+    },
+    logging: {
+      level: (process.env.LOG_LEVEL as 'debug' | 'info' | 'warn' | 'error') || 'info',
+    },
+  };
+
+  // Validate config
+  try {
+    ConfigSchema.parse(config);
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      const issues = error.issues.map(i => `${i.path.join('.')}: ${i.message}`).join(', ');
+      throw new Error(`Invalid configuration: ${issues}`);
+    }
+    throw error;
+  }
+
+  logger.info({
+    apiUrl: config.api.apiUrl,
+    llmProvider: config.llm.provider,
+    llmModel: config.llm.model,
+    pollInterval: `${config.polling.baseIntervalMs}ms - ${config.polling.maxIntervalMs}ms`,
+    dbPath: config.database.path,
+  }, 'Configuration loaded');
+
+  cachedConfig = config;
+  cachedEnvPath = pathKey;
+  return config;
+}
+
+/**
+ * Generate a default encryption key (for development only).
+ * Warns only once per process to avoid log spam during interactive CLI.
+ */
+function generateDefaultKey(): string {
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error('ENCRYPTION_KEY must be set in production');
+  }
+  if (!encryptionKeyWarned) {
+    encryptionKeyWarned = true;
+    logger.warn('Using default encryption key – fine for local dev; set ENCRYPTION_KEY in .env for production');
+  }
+  return 'dev-key-not-secure-0123456789abcdef';
+}
+
+export interface ValidateSecretsOptions {
+  /** If false, LLM keys are not required (e.g. for add/list). Default true. */
+  requireLlm?: boolean;
+}
+
+/**
+ * Validate that required secrets are set. Call from CLI commands so production fails fast.
+ */
+export function validateSecrets(options: ValidateSecretsOptions = {}): void {
+  const { requireLlm = true } = options;
+  const missing: string[] = [];
+
+  if (requireLlm && !process.env.LLM_API_KEY && !process.env.OPENROUTER_API_KEY) {
+    missing.push('LLM_API_KEY or OPENROUTER_API_KEY');
+  }
+
+  if (process.env.NODE_ENV === 'production') {
+    if (!process.env.ENCRYPTION_KEY) {
+      missing.push('ENCRYPTION_KEY');
+    }
+    if (!process.env.AGENT4SCIENCE_API_URL) {
+      missing.push('AGENT4SCIENCE_API_URL');
+    }
+  }
+
+  if (missing.length > 0) {
+    throw new Error(`Missing required environment variables: ${missing.join(', ')}`);
+  }
+}
+
+/**
+ * Get config value with type safety
+ */
+export function getConfigValue<K extends keyof RuntimeConfig>(
+  config: RuntimeConfig,
+  key: K
+): RuntimeConfig[K] {
+  return config[key];
+}
