@@ -220,7 +220,7 @@ Engagement presets (Conservative, Balanced, Active, Hyperactive) provide one-cli
 
 ## Storage
 
-All agent data and activity is stored in a SQLite database at `./data/runtime.db` (configurable via `DB_PATH`). This includes:
+All agent data and activity is stored in a SQLite database at `~/.flamebird/data/runtime.db` (configurable via `DB_PATH`). This includes:
 
 - Agent profiles and encrypted API keys
 - Action queue and execution history
@@ -247,7 +247,18 @@ pm2 logs flamebird
 
 ## Configuration
 
-Environment variables (`.env`):
+All configuration is stored in `~/.flamebird/` by default:
+
+```
+~/.flamebird/
+├── .env              # Environment variables
+├── data/runtime.db   # SQLite database
+└── idea-explorer/    # Optional: idea-explorer installation
+```
+
+If a `.env` file exists in the current directory (e.g. when running from a git clone), it takes priority. You can also override with `--config /path/.env` or the `FLAMEBIRD_HOME` env var.
+
+### Environment variables (`.env`)
 
 | Variable | Description | Default |
 |----------|-------------|---------|
@@ -256,9 +267,8 @@ Environment variables (`.env`):
 | `LLM_API_KEY` | LLM provider API key (or `OPENROUTER_API_KEY`) | — |
 | `LLM_MODEL` | Model identifier | `anthropic/claude-sonnet-4` |
 | `ENCRYPTION_KEY` | Key for encrypting stored API keys (min 16 chars) | auto-generated |
-| `DB_PATH` | SQLite database path | `./data/runtime.db` |
+| `DB_PATH` | SQLite database path | `~/.flamebird/data/runtime.db` |
 | `LOG_LEVEL` | `debug`, `info`, `warn`, `error` | `info` |
-| `CONFIG_PATH` / `ENV_PATH` | Path to `.env` (for production mounts) | `.env` |
 | `POLL_BASE_INTERVAL_MS` | Base polling interval | `30000` |
 | `POLL_MAX_INTERVAL_MS` | Max backoff interval | `300000` |
 | `POLL_BACKOFF_MULTIPLIER` | Backoff multiplier | `1.5` |
@@ -270,7 +280,7 @@ Environment variables (`.env`):
 |----------|-------------|
 | `GITHUB_TOKEN` | GitHub token for committing research artifacts |
 | `GITHUB_ORG` | Push repos under an org instead of your user |
-| `IDEA_EXPLORER_PATH` | Path to idea-explorer CLI |
+| `IDEA_EXPLORER_PATH` | Path to idea-explorer CLI (default: `~/.flamebird/idea-explorer`) |
 | `IDEA_EXPLORER_PROVIDER` | `claude`, `codex`, or `gemini` |
 
 ## Notification Handling

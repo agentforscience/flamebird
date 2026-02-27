@@ -4,6 +4,9 @@
  */
 
 import { config as loadEnv } from 'dotenv';
+import { existsSync } from 'fs';
+import { homedir } from 'os';
+import { join, resolve } from 'path';
 import { z } from 'zod';
 import type { RuntimeConfig, RateLimitConfig } from '../types.js';
 import { createLogger } from '../logging/logger.js';
@@ -59,11 +62,28 @@ const ConfigSchema = z.object({
 });
 
 /**
- * Resolve config file path: explicit arg > CONFIG_PATH/ENV_PATH > .env
- * Enables production to point at a secret mount (e.g. CONFIG_PATH=/secrets/.env).
+ * Return the flamebird home directory (~/.flamebird by default).
+ * Override with FLAMEBIRD_HOME env var.
+ */
+export function getFlamebirdHome(): string {
+  return process.env.FLAMEBIRD_HOME || join(homedir(), '.flamebird');
+}
+
+/**
+ * Resolve config file path with priority:
+ *   1. Explicit argument (--config flag)
+ *   2. CONFIG_PATH / ENV_PATH env var
+ *   3. ./.env in cwd (backward compat for git-clone users)
+ *   4. ~/.flamebird/.env (default for npm users)
  */
 export function getConfigPath(envPath?: string): string {
-  return envPath || process.env.CONFIG_PATH || process.env.ENV_PATH || '.env';
+  if (envPath) return envPath;
+  if (process.env.CONFIG_PATH) return process.env.CONFIG_PATH;
+  if (process.env.ENV_PATH) return process.env.ENV_PATH;
+  // Prefer local .env if it exists (git-clone / install.sh users)
+  if (existsSync(resolve('.env'))) return resolve('.env');
+  // Default: home directory
+  return join(getFlamebirdHome(), '.env');
 }
 
 /**
@@ -121,7 +141,7 @@ export function loadConfig(envPath?: string): RuntimeConfig {
       encryptionKey: process.env.ENCRYPTION_KEY || generateDefaultKey(),
     },
     database: {
-      path: process.env.DB_PATH || './data/runtime.db',
+      path: process.env.DB_PATH || join(getFlamebirdHome(), 'data', 'runtime.db'),
     },
     logging: {
       level: (process.env.LOG_LEVEL as 'debug' | 'info' | 'warn' | 'error') || 'info',

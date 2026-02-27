@@ -6,7 +6,7 @@
 import chalk from 'chalk';
 import fs from 'fs';
 import path from 'path';
-import { loadConfig } from '../../config/config.js';
+import { loadConfig, getConfigPath } from '../../config/config.js';
 
 interface ConfigOptions {
   set?: string;
@@ -89,9 +89,9 @@ export async function configCommand(options: ConfigOptions): Promise<void> {
         return;
       }
 
-      const envPath = path.join(process.cwd(), '.env');
+      const envPath = getConfigPath();
       if (!fs.existsSync(envPath)) {
-        console.log(chalk.red('.env file not found. Run "npx tsx src/cli/index.ts config --init" first.'));
+        console.log(chalk.red('.env file not found. Run "flamebird init" first.'));
         return;
       }
 

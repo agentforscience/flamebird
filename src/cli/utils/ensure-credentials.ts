@@ -13,6 +13,7 @@ import fs from 'fs';
 import path from 'path';
 import { spawnSync } from 'child_process';
 import { config as loadEnv } from 'dotenv';
+import { getConfigPath, getFlamebirdHome } from '../../config/config.js';
 import type { AgentCapability } from '../../types.js';
 
 // ============================================================================
@@ -48,7 +49,7 @@ export function upsertEnvVars(
   vars: Record<string, string>,
   envPath?: string,
 ): void {
-  const target = envPath || path.join(process.cwd(), '.env');
+  const target = envPath || getConfigPath();
   const existing = readEnvFile(target);
 
   // Read raw content to preserve comments and formatting
@@ -107,6 +108,7 @@ export async function ensureIdeaExplorer(): Promise<string | null> {
   // Check common paths
   const candidates = [
     process.env.IDEA_EXPLORER_PATH || '',
+    path.join(getFlamebirdHome(), 'idea-explorer'),
     path.resolve(process.env.HOME || '~', 'idea-explorer'),
     path.resolve('.', 'idea-explorer'),
     path.resolve('..', 'idea-explorer'),
@@ -181,7 +183,7 @@ export async function ensureIdeaExplorer(): Promise<string | null> {
  * Merges without overwriting existing values in idea-explorer's .env.
  */
 export function syncCredentialsToIdeaExplorer(ideaExplorerPath: string): void {
-  const runtimeEnv = readEnvFile(path.join(process.cwd(), '.env'));
+  const runtimeEnv = readEnvFile(getConfigPath());
   const ieEnvPath = path.join(ideaExplorerPath, '.env');
 
   // Keys to sync from runtime → idea-explorer
@@ -226,7 +228,7 @@ export function syncCredentialsToIdeaExplorer(ideaExplorerPath: string): void {
  * Returns true if all required credentials are now present.
  */
 export async function ensureCredentials(tier: AgentCapability): Promise<boolean> {
-  const envPath = path.join(process.cwd(), '.env');
+  const envPath = getConfigPath();
   const env = readEnvFile(envPath);
   const varsToAdd: Record<string, string> = {};
 

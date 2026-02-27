@@ -1,25 +1,26 @@
 /**
  * Init Command
  * One-liner setup wizard for new users:
- *   npx agent4science-agent-runtime init
+ *   npx @agentforscience/flamebird init
  *
  * Steps:
  *   1. Choose agent tier (base / idea-explorer)
  *   2. Collect credentials per tier
  *   3. Create agent persona
  *   4. Register agent on Agent4Science
- *   5. Write .env
+ *   5. Write .env to ~/.flamebird/
  *   6. (idea-explorer tier) Run idea-explorer installer
  */
 
 import chalk from 'chalk';
 import inquirer from 'inquirer';
 import ora from 'ora';
-import { existsSync, writeFileSync } from 'fs';
-import { resolve } from 'path';
+import { existsSync, mkdirSync, writeFileSync } from 'fs';
+import { join, resolve } from 'path';
 import { spawnSync } from 'child_process';
 import { createDatabase, getDatabase } from '../../db/database.js';
 import { encryptApiKey } from '../../agents/agent-manager.js';
+import { getFlamebirdHome, getConfigPath } from '../../config/config.js';
 import { saveLocalAgent } from '../utils/local-agents.js';
 import type { AgentCapability, AgentPersona, PersonaVoice, EpistemicStyle } from '../../types.js';
 
@@ -401,10 +402,12 @@ async function installIdeaExplorer(): Promise<string | null> {
   console.log(chalk.bold('\n  Idea Explorer Setup\n'));
 
   // Check if already installed
+  const defaultIePath = join(getFlamebirdHome(), 'idea-explorer');
   const commonPaths = [
+    process.env.IDEA_EXPLORER_PATH || '',
+    defaultIePath,
     resolve(process.env.HOME || '~', 'idea-explorer'),
     resolve('.', 'idea-explorer'),
-    process.env.IDEA_EXPLORER_PATH || '',
   ].filter(Boolean);
 
   const isIeDir = (dir: string) =>
@@ -440,16 +443,33 @@ async function installIdeaExplorer(): Promise<string | null> {
     return null;
   }
 
-  console.log(chalk.gray('\n  Running idea-explorer installer...\n'));
+  // Ask where to install idea-explorer
+  const { installPath } = await inquirer.prompt<{ installPath: string }>([{
+    type: 'input',
+    name: 'installPath',
+    message: 'Where should idea-explorer be installed?',
+    default: defaultIePath,
+    prefix: '  📁 ',
+  }]);
+
+  const resolvedInstallPath = resolve(installPath);
+  console.log(chalk.gray(`\n  Installing idea-explorer to ${resolvedInstallPath}...\n`));
 
   try {
-    // Run the installer in interactive mode (inherits stdio for user input)
+    // Run the installer with INSTALL_DIR set to the chosen path
     spawnSync('bash', ['-c', 'curl -fsSL https://raw.githubusercontent.com/ChicagoHAI/idea-explorer/main/install.sh | bash'], {
       stdio: 'inherit',
       timeout: 600000, // 10 minutes
+      env: { ...process.env, INSTALL_DIR: resolvedInstallPath },
     });
 
-    // Check common install location
+    // Check if it installed at the chosen path
+    if (isIeDir(resolvedInstallPath)) {
+      console.log(chalk.green(`\n  Idea Explorer installed at ${resolvedInstallPath}`));
+      return resolvedInstallPath;
+    }
+
+    // Check common fallback location
     const homePath = resolve(process.env.HOME || '~', 'idea-explorer');
     if (isIeDir(homePath)) {
       console.log(chalk.green(`\n  Idea Explorer installed at ${homePath}`));
@@ -461,7 +481,7 @@ async function installIdeaExplorer(): Promise<string | null> {
       type: 'input',
       name: 'iePath',
       message: 'Where was idea-explorer installed?',
-      default: homePath,
+      default: resolvedInstallPath,
     }]);
     return iePath;
   } catch {
@@ -477,8 +497,8 @@ async function installIdeaExplorer(): Promise<string | null> {
 export async function initCommand(): Promise<void> {
   banner();
 
-  // Check if .env already exists
-  const envPath = resolve('.env');
+  // Check if .env already exists (check cwd first, then home dir)
+  const envPath = getConfigPath();
   if (existsSync(envPath)) {
     const { overwrite } = await inquirer.prompt<{ overwrite: boolean }>([{
       type: 'confirm',
@@ -548,9 +568,13 @@ export async function initCommand(): Promise<void> {
     }
   }
 
-  // Step 6: Generate and write .env
+  // Step 6: Generate and write .env to ~/.flamebird/
+  const flamebirdHome = getFlamebirdHome();
+  mkdirSync(flamebirdHome, { recursive: true });
+
   const encryptionKey = generateEncryptionKey();
-  const dbPath = './data/runtime.db';
+  const dbPath = join(flamebirdHome, 'data', 'runtime.db');
+  const targetEnvPath = join(flamebirdHome, '.env');
 
   const envContent = generateEnvFile({
     apiUrl: AGENT4SCIENCE_PROD_URL,
@@ -564,8 +588,8 @@ export async function initCommand(): Promise<void> {
     ideaExplorerProvider: creds.ideaExplorerProvider,
   });
 
-  writeFileSync(envPath, envContent);
-  console.log(chalk.green('  .env written'));
+  writeFileSync(targetEnvPath, envContent);
+  console.log(chalk.green(`  Configuration saved to ${targetEnvPath}`));
 
   // Step 7: Save agent(s) to database
   try {

@@ -7,7 +7,7 @@ import chalk from 'chalk';
 import inquirer from 'inquirer';
 import fs from 'fs';
 import path from 'path';
-import { loadConfig } from '../../config/config.js';
+import { loadConfig, getConfigPath } from '../../config/config.js';
 import { getDatabase } from '../../db/database.js';
 // Local agents file no longer used - database is single source of truth
 import { createAgentCommand, quickCreateAgentCommand } from './create-agent.js';
@@ -42,7 +42,7 @@ interface SetupStatus {
  * Check if the environment is properly configured
  */
 function checkSetupStatus(): SetupStatus {
-  const envPath = path.join(process.cwd(), '.env');
+  const envPath = getConfigPath();
   const envExists = fs.existsSync(envPath);
 
   // Load env if it exists
@@ -77,7 +77,7 @@ async function runSetupWizard(): Promise<boolean> {
   console.log(chalk.bold.cyan('\n    🔧 AGENT4SCIENCE SETUP WIZARD\n'));
   console.log(chalk.gray('    Let\'s get your environment configured!\n'));
 
-  const envPath = path.join(process.cwd(), '.env');
+  const envPath = getConfigPath();
 
   // ── Step 1: LLM Configuration ──
   console.log(chalk.cyan('    📝 LLM Configuration\n'));
