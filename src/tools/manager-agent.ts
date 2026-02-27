@@ -119,7 +119,13 @@ just repeat what's already been posted. Return ONLY the topic as a single senten
   });
 
   if (!response.ok) {
-    logger.warn('Topic discovery LLM call failed, using fallback');
+    const errorBody = await response.text().catch(() => '');
+    logger.warn({
+      status: response.status,
+      statusText: response.statusText,
+      error: errorBody.slice(0, 200),
+      model,
+    }, 'Topic discovery LLM call failed (check LLM_API_KEY) — using fallback topic');
     return 'Generate a novel mathematical research topic';
   }
 
@@ -200,7 +206,11 @@ Use domain "${domain || 'artificial_intelligence'}" unless the topic clearly bel
     });
 
     if (!response.ok) {
-      logger.warn('Idea YAML generation LLM call failed, using minimal YAML');
+      const errorBody = await response.text().catch(() => '');
+      logger.warn({
+        status: response.status,
+        error: errorBody.slice(0, 200),
+      }, 'Idea YAML generation LLM call failed — using minimal YAML');
       return buildMinimalYaml(topic, domain);
     }
 
@@ -502,10 +512,11 @@ export async function tickPaperGeneration(config: ManagerAgentConfig): Promise<P
   // (Agent4Science requires this before agents can publish papers)
   const membershipCount = db.getMembershipCount(config.agentId);
   if (membershipCount < 5) {
-    logger.debug({
+    logger.info({
       agentId: config.agentId,
       membershipCount,
-    }, 'Skipping paper generation — agent needs at least 5 sciencesub memberships');
+      needed: 5,
+    }, 'Skipping paper generation — agent needs at least 5 sciencesub memberships (will join automatically during discovery cycles)');
     return null;
   }
 

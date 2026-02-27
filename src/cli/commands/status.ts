@@ -5,8 +5,8 @@
 
 import chalk from 'chalk';
 import { loadConfig } from '../../config/config.js';
-import { createDatabase, getDatabase } from '../../db/database.js';
-import { createAgentManager, getAgentManager } from '../../agents/agent-manager.js';
+import { createDatabase, tryGetDatabase } from '../../db/database.js';
+import { tryGetAgentManager } from '../../agents/agent-manager.js';
 import { getEventLoop } from '../../runtime/event-loop.js';
 
 interface StatusOptions {
@@ -22,14 +22,9 @@ export async function statusCommand(options: StatusOptions): Promise<void> {
 
     try {
       const config = loadConfig();
-      let db = getDatabase();
+      let db = tryGetDatabase();
       if (!db) {
         db = createDatabase(config.database.path);
-      }
-
-      let manager = getAgentManager();
-      if (!manager) {
-        manager = createAgentManager(config.security.encryptionKey);
       }
 
       // Header
@@ -57,14 +52,13 @@ export async function statusCommand(options: StatusOptions): Promise<void> {
         console.log(`  Status:     ${chalk.gray('○ Stopped')}`);
       }
 
-      // Agent status
+      // Agent status — use live manager if available, otherwise read from DB
       console.log('\n' + chalk.bold('Agents:'));
-      const agentIds = manager.getAgentIds();
+      const manager = tryGetAgentManager();
 
-      if (agentIds.length === 0) {
-        console.log(chalk.gray('  No agents configured'));
-      } else {
-        for (const agentId of agentIds) {
+      if (manager && manager.getAgentIds().length > 0) {
+        // Live runtime — show live state
+        for (const agentId of manager.getAgentIds()) {
           const runtime = manager.getRuntime(agentId);
           if (!runtime) continue;
 
@@ -82,7 +76,6 @@ export async function statusCommand(options: StatusOptions): Promise<void> {
 
           console.log(`  ${status} ${chalk.cyan('@' + agentConfig.handle)} ${stateEmoji} ${state}`);
 
-          // Activity summary
           const activity = db.getAgentActivitySummary(agentConfig.id);
           const lastPoll = lastPollTime ? formatTimeAgo(lastPollTime) : 'never';
           const lastAction = lastActionTime ? formatTimeAgo(lastActionTime) : 'never';
@@ -93,6 +86,24 @@ export async function statusCommand(options: StatusOptions): Promise<void> {
             chalk.cyan(`${activity.takes} takes`) + chalk.gray(' | ') +
             chalk.blue(`${activity.comments} comments`) + chalk.gray(' | ') +
             chalk.green(`${activity.votes} votes`));
+        }
+      } else {
+        // No live runtime — read from database
+        const agents = db.getAllAgents();
+        if (agents.length === 0) {
+          console.log(chalk.gray('  No agents configured'));
+        } else {
+          for (const agent of agents) {
+            const status = agent.enabled ? chalk.green('●') : chalk.gray('○');
+            console.log(`  ${status} ${chalk.cyan('@' + agent.handle)} 💤 idle`);
+
+            const activity = db.getAgentActivitySummary(agent.id);
+            console.log(chalk.gray(`      Generated: `) +
+              chalk.magenta(`${activity.papers} papers`) + chalk.gray(' | ') +
+              chalk.cyan(`${activity.takes} takes`) + chalk.gray(' | ') +
+              chalk.blue(`${activity.comments} comments`) + chalk.gray(' | ') +
+              chalk.green(`${activity.votes} votes`));
+          }
         }
       }
 

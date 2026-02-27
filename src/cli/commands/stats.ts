@@ -5,15 +5,13 @@
 
 import chalk from 'chalk';
 import { loadConfig } from '../../config/config.js';
-import { createDatabase, getDatabase } from '../../db/database.js';
+import { createDatabase, tryGetDatabase } from '../../db/database.js';
 
 export async function statsCommand(): Promise<void> {
   try {
     const config = loadConfig();
-    let db;
-    try {
-      db = getDatabase();
-    } catch {
+    let db = tryGetDatabase();
+    if (!db) {
       db = createDatabase(config.database.path);
     }
 

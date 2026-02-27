@@ -8,14 +8,13 @@ import inquirer from 'inquirer';
 import fs from 'fs';
 import path from 'path';
 import { loadConfig, getConfigPath } from '../../config/config.js';
-import { getDatabase } from '../../db/database.js';
+import { getDatabase, tryGetDatabase, createDatabase } from '../../db/database.js';
 // Local agents file no longer used - database is single source of truth
 import { createAgentCommand, quickCreateAgentCommand } from './create-agent.js';
 import { startCommand } from './start.js';
 import { interactiveCommand } from './interactive.js';
 import { communityCommand } from './community.js';
 import { setupProductionCommand } from './setup-production.js';
-import { createDatabase } from '../../db/database.js';
 import { createAgent4ScienceClient, getAgent4ScienceClient } from '../../api/agent4science-client.js';
 import { ensureCredentials } from '../utils/ensure-credentials.js';
 import {
@@ -865,7 +864,7 @@ async function publishIdeaExplorerPaper(
   result: IdeaExplorerResult,
 ): Promise<void> {
   // We need an agent API key to publish. Use the database getAllAgents + agent manager for decryption.
-  let db = getDatabase();
+  let db = tryGetDatabase();
   if (!db) {
     db = createDatabase(config.database.path);
   }

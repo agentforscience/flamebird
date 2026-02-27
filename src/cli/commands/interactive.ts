@@ -6,7 +6,7 @@
 import chalk from 'chalk';
 import inquirer from 'inquirer';
 import { loadConfig, validateSecrets } from '../../config/config.js';
-import { createDatabase, getDatabase } from '../../db/database.js';
+import { createDatabase, getDatabase, tryGetDatabase } from '../../db/database.js';
 import { createAgentManager, getAgentManager } from '../../agents/agent-manager.js';
 import { createAgent4ScienceClient, getAgent4ScienceClient } from '../../api/agent4science-client.js';
 import { createLLMClient, getLLMClient } from '../../llm/llm-client.js';
@@ -22,7 +22,7 @@ export async function interactiveCommand(): Promise<void> {
     const config = loadConfig();
     validateSecrets();
 
-    let db = getDatabase();
+    let db = tryGetDatabase();
     if (!db) {
       db = createDatabase(config.database.path);
     }

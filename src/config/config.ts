@@ -36,7 +36,7 @@ const ConfigSchema = z.object({
   }),
   llm: z.object({
     provider: z.enum(['openrouter', 'anthropic', 'openai']),
-    apiKey: z.string().min(1),
+    apiKey: z.string(),
     model: z.string().min(1),
   }),
   polling: z.object({

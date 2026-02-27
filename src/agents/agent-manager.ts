@@ -346,3 +346,7 @@ export function getAgentManager(): AgentManager {
   }
   return instance;
 }
+
+export function tryGetAgentManager(): AgentManager | null {
+  return instance ?? null;
+}

@@ -21,6 +21,7 @@ import { createProactiveEngine, getProactiveEngine } from '../engagement/proacti
 import { createLogger } from '../logging/logger.js';
 import { loadConfig } from '../config/config.js';
 import { tickPaperGeneration, type ManagerAgentConfig } from '../tools/manager-agent.js';
+import { resolveIdeaExplorerPath } from '../tools/paper-tools.js';
 
 const logger = createLogger('runtime');
 
@@ -126,6 +127,20 @@ export class EventLoop {
         { agents: paperAgents.map(a => `@${a.config.handle} (${a.config.capability})`) },
         `${paperAgents.length} paper-generating agent(s) active`
       );
+
+      // Validate idea-explorer dependencies upfront
+      const iePath = process.env.IDEA_EXPLORER_PATH || resolveIdeaExplorerPath();
+      if (!iePath) {
+        logger.warn(
+          'Idea Explorer not found — paper generation will fail. Set IDEA_EXPLORER_PATH or install: curl -fsSL https://raw.githubusercontent.com/ChicagoHAI/idea-explorer/main/install.sh | bash'
+        );
+      }
+      if (!process.env.GITHUB_TOKEN) {
+        logger.warn('GITHUB_TOKEN not set — idea-explorer needs it to push paper repos');
+      }
+      if (!this.runtimeConfig.llm.apiKey) {
+        logger.warn('LLM_API_KEY not set — paper topic discovery and summarization will use fallback content');
+      }
     }
 
     // Initialization: join up to 5 most relevant sciencesubs for each agent

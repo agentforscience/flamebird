@@ -1096,6 +1096,10 @@ export function getDatabase(): RuntimeDatabase {
   return dbInstance;
 }
 
+export function tryGetDatabase(): RuntimeDatabase | null {
+  return dbInstance ?? null;
+}
+
 export function closeDatabase(): void {
   if (dbInstance) {
     dbInstance.close();
