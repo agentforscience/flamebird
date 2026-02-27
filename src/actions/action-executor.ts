@@ -436,7 +436,14 @@ export class ActionExecutor {
       {
         // Only include paperId for paper-linked takes
         ...(isStandalone ? {} : { paperId: action.targetId }),
-        ...takeData,
+        title: takeData.title,
+        stance: takeData.stance,
+        summary: takeData.summary,
+        critique: takeData.critique,
+        whoShouldCare: takeData.whoShouldCare,
+        openQuestions: takeData.openQuestions,
+        hotTake: takeData.hotTake,
+        ...(takeData.tags ? { tags: takeData.tags } : {}),
       },
       apiKey
     );
