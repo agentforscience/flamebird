@@ -201,7 +201,7 @@ Use domain "${domain || 'artificial_intelligence'}" unless the topic clearly bel
           { role: 'user', content: topic },
         ],
         temperature: 0.7,
-        max_tokens: 1024,
+        max_tokens: 2048,
       }),
     });
 
@@ -292,24 +292,37 @@ async function summarizeReportForPost(
         messages: [
           {
             role: 'system',
-            content: `You are writing a post for a scientific discussion platform (like academic Twitter/Reddit).
-Given a research report, produce a JSON object with:
-- "title": A clear, engaging paper title (max 120 chars)
-- "tldr": A single-sentence summary of the paper (min 10 chars, max 200 chars)
-- "abstract": A concise summary (2-3 paragraphs, ~200-400 words) that covers the research question, methodology, key findings, and significance. Write in an accessible academic style.
-- "hypothesis": The main hypothesis or research question (1-2 sentences)
-- "experimentPlan": Brief description of how the hypothesis was tested (1-2 sentences)
-- "conclusion": The main conclusion from the research (1-2 sentences)
+            content: `You are writing a post for a scientific discussion platform. You will receive a full research REPORT.md.
+
+The report typically follows this structure (section names may vary slightly):
+- "## Executive Summary" — overview of the study, key findings, and significance
+- "## Goal" — research question/hypothesis (often has a "### Research Question" sub-heading)
+- "## Data Construction" — how data/experiments were set up
+- "## Experiment Description" — methodology, approach, and experimental design
+- "## Results" or "## Key Findings" — empirical results with statistics and findings
+- "## Limitations" — known limitations of the work
+- "## Conclusions" — summary conclusions and implications
+- "## References" — cited works (ignore these, they are handled separately)
+
+Extract information from these sections to produce a JSON object. Be faithful to the report's actual content — preserve specific numbers, statistics, p-values, and findings rather than paraphrasing generically.
+
+Required JSON fields:
+- "title": The paper title — use the report's own title (from the # heading) if suitable, or write a clear, engaging title (max 200 chars)
+- "tldr": A single-sentence summary capturing the most important finding (min 10 chars, max 300 chars). Look for bold "Key finding" text in the Executive Summary.
+- "abstract": A thorough summary (3-5 paragraphs, 300-800 words) covering the research question, methodology, key findings (with specific numbers), and significance. Extract primarily from the Executive Summary and Results sections. Write in accessible academic style.
+- "hypothesis": The main hypothesis or research question (1-3 sentences). Extract from the "Goal" section, especially any "Research Question" sub-heading.
+- "experimentPlan": Description of the experimental methodology (2-4 sentences). Extract from "Experiment Description" or "Data Construction". Include key details like sample sizes, models used, and variables tested.
+- "conclusion": The main conclusions and implications (2-4 sentences). Extract from "Conclusions" section.
 ${tagsInstruction}
-- "claims": An array of 2-5 key claims or findings from the research (each a single sentence, max 100 chars)
-- "limitations": An array of 1-3 limitations of the work (each a single sentence)
+- "claims": An array of 3-10 key findings from the research. Extract these directly from the Results section — each should be a specific, substantive finding with numbers where available (e.g., "Context poisoning achieved 75% persistence rate, the highest among all injection types"). Each claim can be up to 500 chars.
+- "limitations": An array of 1-5 limitations. Extract from the "Limitations" section if present.
 
 Output ONLY valid JSON, no markdown fences.`,
           },
           { role: 'user', content: reportContent },
         ],
         temperature: 0.3,
-        max_tokens: 1500,
+        max_tokens: 8192,
       }),
     });
 
@@ -322,7 +335,10 @@ Output ONLY valid JSON, no markdown fences.`,
     const content = data.choices[0]?.message?.content?.trim();
     if (!content) return null;
 
-    const parsed = JSON.parse(content) as Partial<ReportSummary>;
+    // Strip markdown fences if the LLM added them despite instructions
+    const jsonContent = content.replace(/^```(?:json)?\s*\n?/, '').replace(/\n?\s*```$/, '');
+
+    const parsed = JSON.parse(jsonContent) as Partial<ReportSummary>;
     if (!parsed.abstract) return null;
 
     return {
@@ -390,6 +406,8 @@ async function runIdeaExplorerFlow(config: ManagerAgentConfig): Promise<PaperGen
   }
 
   // Step 4: Summarize REPORT.md via LLM for a quality post
+  // Keep the deterministic title from REPORT.md — it's more accurate than LLM-generated titles
+  const deterministicTitle = ieResult.title;
   let postTitle = ieResult.title || topic;
   let postAbstract = ieResult.abstract || `Research on: ${topic}`;
   let postTags = ieResult.tags || ['ai', 'research'];
@@ -419,7 +437,9 @@ async function runIdeaExplorerFlow(config: ManagerAgentConfig): Promise<PaperGen
       sciencesubs,
     );
     if (summary) {
-      postTitle = summary.title || postTitle;
+      // Prefer the deterministic title from REPORT.md over LLM-generated title
+      // (LLM may rephrase it; the actual report heading is more accurate)
+      postTitle = deterministicTitle || summary.title || postTitle;
       postAbstract = summary.abstract;
       postTldr = summary.tldr || postTldr;
       postHypothesis = summary.hypothesis || postHypothesis;
@@ -467,6 +487,7 @@ async function runIdeaExplorerFlow(config: ManagerAgentConfig): Promise<PaperGen
     limitations: postLimitations,
     githubUrl,
     pdfUrl,
+    references: ieResult.references,
   }, config.apiKey);
 
   if (!postResult.success) {

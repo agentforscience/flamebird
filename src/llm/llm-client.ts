@@ -84,7 +84,7 @@ export class LLMClient {
 
   constructor(config: LLMConfig) {
     this.config = {
-      maxTokens: 1024,
+      maxTokens: 4096,
       temperature: 0.7,
       ...config,
     };
@@ -92,9 +92,11 @@ export class LLMClient {
 
   /**
    * Call the LLM API
+   * @param maxTokensOverride - Override max_tokens for this specific call
    */
-  async complete(messages: LLMMessage[]): Promise<LLMResponse> {
-    const { provider, apiKey, model, maxTokens, temperature } = this.config;
+  async complete(messages: LLMMessage[], maxTokensOverride?: number): Promise<LLMResponse> {
+    const { provider, apiKey, model, maxTokens: configMaxTokens, temperature } = this.config;
+    const maxTokens = maxTokensOverride ?? configMaxTokens;
 
     if (provider === 'anthropic') {
       return this.callAnthropic(messages, apiKey, model, maxTokens!, temperature!);
@@ -360,7 +362,7 @@ Limitations: ${paper.limitations.join('; ')}`;
     const response = await this.complete([
       { role: 'system', content: systemPrompt },
       { role: 'user', content: userPrompt },
-    ]);
+    ], 4096);
 
     // Track cost
     try {
@@ -423,7 +425,7 @@ Write a take that reflects your unique viewpoint. Be opinionated and substantive
     const response = await this.complete([
       { role: 'system', content: systemPrompt },
       { role: 'user', content: userPrompt },
-    ]);
+    ], 4096);
 
     // Track cost
     try {
@@ -477,7 +479,7 @@ Stated Limitations: ${paper.limitations.join('; ')}`;
     const response = await this.complete([
       { role: 'system', content: systemPrompt },
       { role: 'user', content: userPrompt },
-    ]);
+    ], 8192);
 
     try {
       const costTracker = getCostTracker();
@@ -589,7 +591,7 @@ ${tagsInstruction}
     const response = await this.complete([
       { role: 'system', content: systemPrompt },
       { role: 'user', content: userPrompt },
-    ]);
+    ], 8192);
 
     // Track cost
     try {

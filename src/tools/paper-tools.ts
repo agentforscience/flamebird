@@ -47,6 +47,7 @@ export interface IdeaExplorerResult {
   abstract?: string;
   domain?: string;
   tags?: string[];
+  references?: Array<{ authors: string; year: number; title: string; venue?: string; arxivId?: string }>;
   error?: string;
 }
 
@@ -361,23 +362,14 @@ function findLatestIdeaId(submittedDir: string): string | null {
  *
  * The runner outputs container paths (e.g. /workspaces/...) so we translate
  * them to host paths using the workspace mount point.
+ *
+ * GitHub URL priority:
+ *   1. idea.yaml `github_repo_url` field (most reliable)
+ *   2. LAST match in stdout (runner.py prints the correct URL at the end,
+ *      but earlier output from resource_finder may contain unrelated GitHub URLs
+ *      from paper abstracts / search results)
  */
 function parseIdeaExplorerOutput(stdout: string, basePath: string): IdeaExplorerResult {
-  // Look for GitHub URL in output (specific patterns first, then broad match)
-  // Exclude known boilerplate URLs (e.g. ChicagoHAI/idea-explorer from runner output)
-  const githubMatch = stdout.match(/GitHub:\s*(https:\/\/github\.com\/[^\s]+)/i)
-    || stdout.match(/github_repo_url:\s*(https:\/\/github\.com\/[^\s]+)/i)
-    || stdout.match(/Results published to GitHub!\s*\n?\s*(https:\/\/github\.com\/[^\s]+)/i);
-  let githubUrl = githubMatch?.[1];
-
-  // Strip trailing punctuation that might have been captured
-  if (githubUrl) {
-    githubUrl = githubUrl.replace(/[)}\].,;]+$/, '');
-  }
-
-  // Construct pdfUrl from githubUrl (paper is always at paper_draft/main.pdf)
-  const pdfUrl = githubUrl ? `${githubUrl}/blob/main/paper_draft/main.pdf` : undefined;
-
   // Look for workspace location (container path like /workspaces/<name>)
   const locationMatch = stdout.match(/Location:\s*(.+)/);
   const containerWorkDir = locationMatch?.[1]?.trim();
@@ -391,45 +383,64 @@ function parseIdeaExplorerOutput(stdout: string, basePath: string): IdeaExplorer
     const workspaceName = containerWorkDir.replace(/^\/workspaces\//, '');
     hostWorkDir = path.join(hostWorkspacesDir, workspaceName);
     if (!fs.existsSync(hostWorkDir)) {
-      // Fallback: try finding the most recent workspace directory
       hostWorkDir = findLatestWorkspace(hostWorkspacesDir);
     }
   } else {
-    // No Location in output — try finding the most recent workspace
     hostWorkDir = findLatestWorkspace(hostWorkspacesDir);
   }
 
-  // Try to read structured output from the workspace
+  // ── Read workspace files for metadata ──
   let title: string | undefined;
   let abstract: string | undefined;
   let domain: string | undefined;
   let tags: string[] | undefined;
+  let githubUrl: string | undefined;
+  let references: Array<{ authors: string; year: number; title: string; venue?: string; arxivId?: string }> | undefined;
 
   if (hostWorkDir && fs.existsSync(hostWorkDir)) {
     logger.info({ hostWorkDir }, 'Reading workspace files');
 
-    // Try idea.yaml for metadata
+    // ── idea.yaml — primary source for GitHub URL, title, domain ──
     const ideaYamlPath = path.join(hostWorkDir, '.idea-explorer', 'idea.yaml');
     if (fs.existsSync(ideaYamlPath)) {
       try {
         const ideaContent = fs.readFileSync(ideaYamlPath, 'utf-8');
+        githubUrl = extractYamlField(ideaContent, 'github_repo_url');
         title = extractYamlField(ideaContent, 'title');
         domain = extractYamlField(ideaContent, 'domain');
         const hypothesis = extractYamlField(ideaContent, 'hypothesis');
         if (hypothesis) abstract = hypothesis;
+
+        // Extract tags list from YAML
+        const tagsMatch = ideaContent.match(/tags:\s*\n((?:\s*-\s*.+\n?)+)/);
+        if (tagsMatch) {
+          tags = tagsMatch[1]
+            .split('\n')
+            .map(line => line.replace(/^\s*-\s*["']?/, '').replace(/["']?\s*$/, '').trim())
+            .filter(t => t.length > 0);
+        }
       } catch { /* ignore */ }
     }
 
-    // Read REPORT.md — this is the primary source for post content
-    // (will be LLM-summarized by the manager agent)
+    // ── REPORT.md — primary source for post content, title, and references ──
     const reportPath = path.join(hostWorkDir, 'REPORT.md');
     if (fs.existsSync(reportPath)) {
       try {
         const report = fs.readFileSync(reportPath, 'utf-8');
-        // Use the full report as abstract — the manager agent will LLM-summarize it
         if (report.trim().length > 0) {
+          // Use the full report as abstract — the manager agent will LLM-summarize it
           abstract = report;
           logger.info({ length: report.length }, 'Found REPORT.md');
+
+          // Extract title from the first `# Title` heading (more accurate than idea.yaml)
+          const reportTitle = extractReportTitle(report);
+          if (reportTitle) title = reportTitle;
+
+          // Extract references deterministically (LLMs are bad at precise reference parsing)
+          references = extractReportReferences(report);
+          if (references.length > 0) {
+            logger.info({ count: references.length }, 'Extracted references from REPORT.md');
+          }
         }
       } catch { /* ignore */ }
     }
@@ -445,23 +456,22 @@ function parseIdeaExplorerOutput(stdout: string, basePath: string): IdeaExplorer
         } catch { /* ignore */ }
       }
     }
-
-    // Extract tags from idea.yaml metadata
-    const ideaYamlForTags = path.join(hostWorkDir, '.idea-explorer', 'idea.yaml');
-    if (fs.existsSync(ideaYamlForTags)) {
-      try {
-        const content = fs.readFileSync(ideaYamlForTags, 'utf-8');
-        // Extract tags list from YAML
-        const tagsMatch = content.match(/tags:\s*\n((?:\s*-\s*.+\n?)+)/);
-        if (tagsMatch) {
-          tags = tagsMatch[1]
-            .split('\n')
-            .map(line => line.replace(/^\s*-\s*["']?/, '').replace(/["']?\s*$/, '').trim())
-            .filter(t => t.length > 0);
-        }
-      } catch { /* ignore */ }
-    }
   }
+
+  // ── Fallback GitHub URL: use LAST match in stdout ──
+  // The runner.py prints the correct URL at the end, but earlier output
+  // (resource_finder agent output, search results) may contain unrelated GitHub URLs.
+  if (!githubUrl) {
+    githubUrl = extractLastGithubUrl(stdout);
+  }
+
+  // Strip trailing punctuation/quotes that might have been captured
+  if (githubUrl) {
+    githubUrl = githubUrl.replace(/[)}\].,;"']+$/, '');
+  }
+
+  // Construct pdfUrl from githubUrl (paper is always at paper_draft/main.pdf)
+  const pdfUrl = githubUrl ? `${githubUrl}/blob/main/paper_draft/main.pdf` : undefined;
 
   if (!hostWorkDir && !githubUrl) {
     return {
@@ -479,7 +489,115 @@ function parseIdeaExplorerOutput(stdout: string, basePath: string): IdeaExplorer
     abstract,
     domain,
     tags: tags || (domain ? [domain] : undefined),
+    references: references && references.length > 0 ? references : undefined,
   };
+}
+
+/**
+ * Extract the LAST GitHub URL from stdout using multiple patterns.
+ * We want the last match because runner.py prints the correct URL at the end,
+ * while earlier output may contain unrelated GitHub URLs from search results.
+ */
+function extractLastGithubUrl(stdout: string): string | undefined {
+  const patterns = [
+    /GitHub:\s*(https:\/\/github\.com\/[^\s]+)/gi,
+    /github_repo_url:\s*(https:\/\/github\.com\/[^\s]+)/gi,
+    /Results published to GitHub!\s*\n?\s*(https:\/\/github\.com\/[^\s]+)/gi,
+  ];
+
+  let lastUrl: string | undefined;
+  for (const pattern of patterns) {
+    for (const match of stdout.matchAll(pattern)) {
+      // Skip the ChicagoHAI/idea-explorer boilerplate URL
+      if (match[1] && !match[1].includes('ChicagoHAI/idea-explorer')) {
+        lastUrl = match[1];
+      }
+    }
+    // If we found matches with this pattern, use the last one
+    if (lastUrl) return lastUrl;
+  }
+  return undefined;
+}
+
+/** Extract the title from a REPORT.md's first `# Title` heading. */
+function extractReportTitle(report: string): string | undefined {
+  for (const line of report.split('\n')) {
+    if (line.startsWith('# ') && !line.startsWith('## ')) {
+      return line.replace(/^#\s+/, '').trim();
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Extract the `## References` section from REPORT.md and parse into structured objects.
+ * Handles formats like:
+ *   1. Author (Year). Title. Venue. arXiv:ID
+ *   - Author (Year). Title. arXiv:ID
+ *
+ * Ported from flamebird_old/scripts/prefill.ts parseReferences().
+ */
+function extractReportReferences(report: string): Array<{ authors: string; year: number; title: string; venue?: string; arxivId?: string }> {
+  const lines = report.split('\n');
+
+  // Find the ## References section
+  const startIdx = lines.findIndex(l => /^##\s+(\d+\.\s+)?Reference/i.test(l));
+  if (startIdx < 0) return [];
+
+  // Collect lines until next ## heading
+  const refLines: string[] = [];
+  for (let i = startIdx + 1; i < lines.length; i++) {
+    if (/^##\s/.test(lines[i])) break;
+    refLines.push(lines[i]);
+  }
+
+  // Parse each reference line
+  const refs: Array<{ authors: string; year: number; title: string; venue?: string; arxivId?: string }> = [];
+
+  for (const line of refLines) {
+    const trimmed = line.trim();
+    const stripped = trimmed.replace(/^[-*]\s+/, '').replace(/^\d+\.\s+/, '');
+    if (stripped.length < 10) continue;
+
+    // Pattern: "Authors (Year). Title. Venue."
+    const match = stripped.match(/^(.+?)\s*\((\d{4})\)\.\s*(.+)/);
+    if (!match) continue;
+
+    const authors = match[1].trim();
+    const year = parseInt(match[2], 10);
+    let rest = match[3].trim().replace(/\.$/, '');
+
+    // Extract arXiv ID if present
+    let arxivId: string | undefined;
+    const arxivMatch = rest.match(/arXiv:(\d+\.\d+)/i);
+    if (arxivMatch) {
+      arxivId = arxivMatch[1];
+      rest = rest.replace(/\.?\s*arXiv:\d+\.\d+\.?/i, '').trim();
+    }
+
+    // Split remaining into title and venue on the last period
+    let refTitle = rest;
+    let venue: string | undefined;
+    const lastDot = rest.lastIndexOf('.');
+    if (lastDot > 0 && lastDot < rest.length - 1) {
+      refTitle = rest.slice(0, lastDot).trim();
+      venue = rest.slice(lastDot + 1).trim();
+    } else if (lastDot === rest.length - 1) {
+      refTitle = rest.slice(0, lastDot).trim();
+    }
+
+    if (!refTitle || refTitle.length < 5) continue;
+
+    refs.push({
+      authors,
+      year,
+      title: refTitle,
+      ...(venue ? { venue } : {}),
+      ...(arxivId ? { arxivId } : {}),
+    });
+  }
+
+  return refs;
 }
 
 /** Find the most recently modified workspace directory. */
