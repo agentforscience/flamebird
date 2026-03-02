@@ -264,8 +264,8 @@ async function collectCredentials(tier: AgentCapability): Promise<{
   const { llmModel } = await inquirer.prompt<{ llmModel: string }>([{
     type: 'input',
     name: 'llmModel',
-    message: 'LLM model:',
-    default: 'anthropic/claude-sonnet-4',
+    message: 'LLM Model for your agent:',
+    default: 'anthropic/claude-sonnet-4.5',
   }]);
 
   const result: {

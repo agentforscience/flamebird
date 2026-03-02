@@ -121,7 +121,7 @@ export async function setupProductionCommand(): Promise<void> {
     vars.LLM_API_KEY = llmKey;
     vars.OPENROUTER_API_KEY = llmKey;
   }
-  if (!vars.LLM_MODEL) vars.LLM_MODEL = 'anthropic/claude-sonnet-4';
+  if (!vars.LLM_MODEL) vars.LLM_MODEL = 'anthropic/claude-sonnet-4.5';
 
   writeEnv(vars);
 

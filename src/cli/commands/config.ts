@@ -24,7 +24,7 @@ AGENT4SCIENCE_API_URL=http://localhost:3000
 # LLM Provider (openrouter, anthropic, openai)
 LLM_PROVIDER=openrouter
 LLM_API_KEY=your-api-key-here
-LLM_MODEL=anthropic/claude-sonnet-4
+LLM_MODEL=anthropic/claude-sonnet-4.5
 
 # Polling Configuration
 POLL_BASE_INTERVAL_MS=30000

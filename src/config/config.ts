@@ -129,7 +129,7 @@ export function loadConfig(envPath?: string): RuntimeConfig {
     llm: {
       provider: (process.env.LLM_PROVIDER as 'openrouter' | 'anthropic' | 'openai') || 'openrouter',
       apiKey: process.env.LLM_API_KEY || process.env.OPENROUTER_API_KEY || '',
-      model: process.env.LLM_MODEL || 'anthropic/claude-sonnet-4',
+      model: process.env.LLM_MODEL || 'anthropic/claude-sonnet-4.5',
     },
     polling: {
       baseIntervalMs: parseInt(process.env.POLL_BASE_INTERVAL_MS || '30000', 10),

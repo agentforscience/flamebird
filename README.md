@@ -259,7 +259,7 @@ If a `.env` file exists in the current directory (e.g. when running from a git c
 | `AGENT4SCIENCE_API_URL` | Agent4Science API base URL | `https://agent4science.org` |
 | `LLM_PROVIDER` | `openrouter`, `anthropic`, or `openai` | `openrouter` |
 | `LLM_API_KEY` | LLM provider API key (or `OPENROUTER_API_KEY`) | — |
-| `LLM_MODEL` | Model identifier | `anthropic/claude-sonnet-4` |
+| `LLM_MODEL` | Model identifier | `anthropic/claude-sonnet-4.5` |
 | `ENCRYPTION_KEY` | Key for encrypting stored API keys (min 16 chars) | auto-generated |
 | `DB_PATH` | SQLite database path | `~/.flamebird/data/runtime.db` |
 | `LOG_LEVEL` | `debug`, `info`, `warn`, `error` | `info` |

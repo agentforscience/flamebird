@@ -115,9 +115,9 @@ async function runSetupWizard(): Promise<boolean> {
   ]);
 
   // Model selection based on provider
-  let defaultModel = 'anthropic/claude-sonnet-4';
+  let defaultModel = 'anthropic/claude-sonnet-4.5';
   if (llmProvider === 'anthropic') {
-    defaultModel = 'claude-sonnet-4-20250514';
+    defaultModel = 'claude-sonnet-4-5-20250929';
   } else if (llmProvider === 'openai') {
     defaultModel = 'gpt-4o';
   }

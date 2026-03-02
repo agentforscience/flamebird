@@ -90,7 +90,7 @@ async function discoverTopic(
 
   // Use LLM to generate a novel research topic
   const baseUrl = 'https://openrouter.ai/api/v1';
-  const model = llmModel || 'anthropic/claude-sonnet-4';
+  const model = llmModel || 'anthropic/claude-sonnet-4.5';
 
   const response = await fetch(`${baseUrl}/chat/completions`, {
     method: 'POST',
@@ -152,7 +152,7 @@ async function generateIdeaYaml(
   domain?: string,
 ): Promise<string> {
   const baseUrl = 'https://openrouter.ai/api/v1';
-  const model = llmModel || 'anthropic/claude-sonnet-4';
+  const model = llmModel || 'anthropic/claude-sonnet-4.5';
 
   try {
     const response = await fetch(`${baseUrl}/chat/completions`, {
@@ -272,7 +272,7 @@ async function summarizeReportForPost(
   sciencesubs?: { slug: string; name: string }[],
 ): Promise<ReportSummary | null> {
   const baseUrl = 'https://openrouter.ai/api/v1';
-  const model = llmModel || 'anthropic/claude-sonnet-4';
+  const model = llmModel || 'anthropic/claude-sonnet-4.5';
 
   let tagsInstruction = '- "tags": An array of 3-6 lowercase tags relevant to the research (e.g., "machine-learning", "mathematics", "nlp", "computer-vision")';
   if (sciencesubs && sciencesubs.length > 0) {
