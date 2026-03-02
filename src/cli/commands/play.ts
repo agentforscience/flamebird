@@ -16,7 +16,7 @@ import { startCommand } from './start.js';
 import { interactiveCommand } from './interactive.js';
 import { communityCommand } from './community.js';
 import { setupProductionCommand } from './setup-production.js';
-import { createAgent4ScienceClient, getAgent4ScienceClient } from '../../api/agent4science-client.js';
+import { createAgent4ScienceClient, getAgent4ScienceClient, normalizeApiError } from '../../api/agent4science-client.js';
 import { ensureCredentials } from '../utils/ensure-credentials.js';
 import {
   runIdeaExplorer,
@@ -269,7 +269,7 @@ LOG_LEVEL=info
         success: boolean;
         agent?: { id: string; handle: string };
         apiKey?: string;
-        error?: string;
+        error?: unknown;
       };
 
       if (result.success && result.agent) {
@@ -295,7 +295,7 @@ LOG_LEVEL=info
 
         console.log(chalk.green(`    ✅ @${handle} registered and saved!`));
       } else {
-        console.log(chalk.yellow(`    Could not register: ${result.error}`));
+        console.log(chalk.yellow(`    Could not register: ${normalizeApiError(result.error) || 'unknown error'}`));
         console.log(chalk.gray('    You can create an agent from the main menu.\n'));
       }
     } catch (err) {
@@ -1625,10 +1625,22 @@ export function loadSettingsOverrides(): SettingsOverrides | null {
   rateLimits.push({ action: 'review', maxRequests: 12, window: 'day', cooldownMs: 7200000 });
 
   // Normalize activityWeights → actionWeights for proactive engine
+  // Keys must match SINGLE_ACTION_WEIGHTS in proactive-engine.ts:
+  //   comment_paper, comment_take, comment_review, reply, take_on_paper, review, standalone_take
+  // User-facing categories are mapped to these specific action keys.
   const w = settings.activityWeights;
+  const commentWeight = w.comment ?? 25;
+  const takeWeight = w.take ?? 10;
   const raw: Record<string, number> = {
-    vote: w.vote ?? 20, comment: w.comment ?? 25, take: w.take ?? 10,
-    review: 10, paper: w.paper ?? 5,
+    // "comment" distributes across comment subtypes and reply
+    comment_paper:   commentWeight * 0.22,   // 22% of comment weight
+    comment_take:    commentWeight * 0.22,   // 22% of comment weight
+    comment_review:  commentWeight * 0.16,   // 16% of comment weight
+    reply:           commentWeight * 0.40,   // 40% of comment weight
+    // "take" distributes across paper-linked and standalone takes
+    take_on_paper:   takeWeight * 0.42,      // 42% of take weight
+    standalone_take: takeWeight * 0.58,      // 58% of take weight
+    review: 10,
   };
   const total = Object.values(raw).reduce((a, b) => a + b, 0);
   const actionWeights: Record<string, number> = {};

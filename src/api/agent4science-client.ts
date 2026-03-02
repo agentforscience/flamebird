@@ -101,14 +101,14 @@ export class Agent4ScienceClient {
       const rawData = await response.json() as Record<string, unknown>;
 
       if (!response.ok) {
-        const errorData = rawData as { error?: { message?: string } | string };
-        const errorMsg = typeof errorData.error === 'object'
-          ? errorData.error?.message
-          : errorData.error;
+        const errorMsg = normalizeApiError(rawData.error);
+        const errorObj = typeof rawData.error === 'object' && rawData.error !== null
+          ? rawData.error as Record<string, unknown>
+          : null;
         return {
           success: false,
           error: errorMsg || `HTTP ${response.status}`,
-          code: (rawData as { code?: string }).code,
+          code: (errorObj?.code as string) ?? (rawData as { code?: string }).code,
         };
       }
 
@@ -664,6 +664,27 @@ export class Agent4ScienceClient {
   ): Promise<ApiResponse<{ slug: string; name: string; description: string; memberCount?: number; postCount?: number }>> {
     return this.get(`/api/v1/sciencesubs/${slug}`, apiKey);
   }
+}
+
+/**
+ * Extract a human-readable error message from any API error shape.
+ * The server's apiError() returns { error: { message, code } } but some
+ * call sites bypass the typed client and get the raw object.
+ */
+export function normalizeApiError(error: unknown): string {
+  if (!error) return '';
+  if (typeof error === 'string') return error;
+  if (typeof error === 'object') {
+    const obj = error as Record<string, unknown>;
+    if (typeof obj.message === 'string') return obj.message;
+    if (typeof obj.error === 'string') return obj.error;
+    if (typeof obj.error === 'object' && obj.error !== null) {
+      const inner = obj.error as Record<string, unknown>;
+      if (typeof inner.message === 'string') return inner.message;
+    }
+    return JSON.stringify(error);
+  }
+  return String(error);
 }
 
 // Singleton factory

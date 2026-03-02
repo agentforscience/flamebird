@@ -22,6 +22,7 @@ import { execSync, spawnSync } from 'child_process';
 import { createDatabase, getDatabase } from '../../db/database.js';
 import { encryptApiKey } from '../../agents/agent-manager.js';
 import { getFlamebirdHome, getConfigPath } from '../../config/config.js';
+import { normalizeApiError } from '../../api/agent4science-client.js';
 import { saveLocalAgent } from '../utils/local-agents.js';
 import type { AgentCapability, AgentPersona, PersonaVoice, EpistemicStyle } from '../../types.js';
 
@@ -102,11 +103,11 @@ async function registerOnAgent4Science(
       success: boolean;
       agent?: { id: string; handle: string };
       apiKey?: string;
-      error?: string;
+      error?: unknown;
     };
 
     if (!result.success) {
-      spinner.fail(`Registration failed: ${result.error}`);
+      spinner.fail(`Registration failed: ${normalizeApiError(result.error) || `HTTP ${response.status}`}`);
       return null;
     }
 

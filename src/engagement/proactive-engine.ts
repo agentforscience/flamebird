@@ -1303,58 +1303,63 @@ export class ProactiveEngine {
     const client = getAgent4ScienceClient();
     const executor = getActionExecutor();
 
-    // Build browsing context from snapshot
-    const recentPaperTitles = snapshot.papers.slice(0, 5).map(p => p.title);
-    const trendingTags = new Map<string, number>();
-    for (const paper of snapshot.papers) {
-      for (const tag of paper.tags || []) {
-        trendingTags.set(tag, (trendingTags.get(tag) || 0) + 1);
-      }
-    }
-    const topTags = Array.from(trendingTags.entries())
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 5)
-      .map(([tag]) => tag);
-
-    // Fetch sciencesubs for tag selection
-    let sciencesubs: { slug: string; name: string; description: string }[] = [];
     try {
-      sciencesubs = await client.getCachedSciencesubs(apiKey);
-    } catch {
-      logger.debug({ agentId }, 'Failed to fetch sciencesubs for standalone take');
-    }
-
-    const take = await llm.generateStandaloneTake(persona, {
-      recentPaperTitles,
-      trendingTags: topTags,
-      personaTopics: persona.preferredTopics,
-    }, sciencesubs);
-
-    // Enrich tags with matching sciencesub slugs (same as paper flow)
-    if (sciencesubs.length > 0) {
-      const existingSlugs = sciencesubs.map(s => s.slug);
-      const takeTags = new Set(take.tags.map((t: string) => t.toLowerCase()));
-      for (const tag of [...takeTags]) {
-        const { match } = findMatchingCategory(tag, existingSlugs);
-        if (match && !takeTags.has(match)) {
-          takeTags.add(match);
+      // Build browsing context from snapshot
+      const recentPaperTitles = snapshot.papers.slice(0, 5).map(p => p.title);
+      const trendingTags = new Map<string, number>();
+      for (const paper of snapshot.papers) {
+        for (const tag of paper.tags || []) {
+          trendingTags.set(tag, (trendingTags.get(tag) || 0) + 1);
         }
       }
-      take.tags = Array.from(takeTags).slice(0, 10);
+      const topTags = Array.from(trendingTags.entries())
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 5)
+        .map(([tag]) => tag);
+
+      // Fetch sciencesubs for tag selection
+      let sciencesubs: { slug: string; name: string; description: string }[] = [];
+      try {
+        sciencesubs = await client.getCachedSciencesubs(apiKey);
+      } catch {
+        logger.debug({ agentId }, 'Failed to fetch sciencesubs for standalone take');
+      }
+
+      const take = await llm.generateStandaloneTake(persona, {
+        recentPaperTitles,
+        trendingTags: topTags,
+        personaTopics: persona.preferredTopics,
+      }, sciencesubs);
+
+      // Enrich tags with matching sciencesub slugs (same as paper flow)
+      if (sciencesubs.length > 0) {
+        const existingSlugs = sciencesubs.map(s => s.slug);
+        const takeTags = new Set(take.tags.map((t: string) => t.toLowerCase()));
+        for (const tag of [...takeTags]) {
+          const { match } = findMatchingCategory(tag, existingSlugs);
+          if (match && !takeTags.has(match)) {
+            takeTags.add(match);
+          }
+        }
+        take.tags = Array.from(takeTags).slice(0, 10);
+      }
+
+      // Ensure first tag is a valid sciencesub slug
+      // Pass trending tags from snapshot as contextTags fallback (like paper.tags for paper-linked takes)
+      take.tags = ensureFirstTagIsSciencesub(take.tags, sciencesubs, topTags);
+
+      if (take.tags.length === 0) {
+        logger.warn({ agentId }, 'Standalone take has no valid tags after enrichment, skipping');
+        return;
+      }
+
+      // Queue with synthetic targetId (standalone takes use 'take' targetType)
+      const targetId = `standalone_${Date.now().toString(36)}`;
+      executor.queueAction(agentId, 'take', targetId, 'take', take as unknown as Record<string, unknown>, 'normal');
+      logger.info({ agentId, tags: take.tags }, 'Queued standalone take');
+    } catch (error) {
+      logger.error({ err: error, agentId }, 'Failed to generate standalone take');
     }
-
-    // Ensure first tag is a valid sciencesub slug
-    take.tags = ensureFirstTagIsSciencesub(take.tags, sciencesubs);
-
-    if (take.tags.length === 0) {
-      logger.warn({ agentId }, 'Standalone take has no valid tags after enrichment, skipping');
-      return;
-    }
-
-    // Queue with synthetic targetId (standalone takes use 'take' targetType)
-    const targetId = `standalone_${Date.now().toString(36)}`;
-    executor.queueAction(agentId, 'take', targetId, 'take', take as unknown as Record<string, unknown>, 'normal');
-    logger.info({ agentId, tags: take.tags }, 'Queued standalone take');
   }
 
   /**

@@ -13,6 +13,7 @@ import { createDatabase, getDatabase } from '../../db/database.js';
 import { encryptApiKey } from '../../agents/agent-manager.js';
 import type { AgentPersona, PersonaVoice, EpistemicStyle, AgentCapability } from '../../types.js';
 import { ensureCredentials } from '../utils/ensure-credentials.js';
+import { normalizeApiError } from '../../api/agent4science-client.js';
 
 // Large pixel art characters for each personality - game style!
 const PERSONALITY_ART: Record<string, string> = {
@@ -627,11 +628,11 @@ ${chalk.yellow('  └───────────────────�
       success: boolean;
       agent?: { id: string; handle: string };
       apiKey?: string;
-      error?: string;
+      error?: unknown;
     };
 
     if (!result.success) {
-      console.error(chalk.red(`\n  ❌ Failed: ${result.error}\n`));
+      console.error(chalk.red(`\n  ❌ Failed: ${normalizeApiError(result.error) || `HTTP ${response.status}`}\n`));
       return;
     }
 
@@ -1702,7 +1703,7 @@ export async function quickCreateAgentCommand(): Promise<void> {
           success: boolean;
           agent?: { id: string; handle: string };
           apiKey?: string;
-          error?: string;
+          error?: unknown;
         };
 
         if (result.success) {
@@ -1711,7 +1712,8 @@ export async function quickCreateAgentCommand(): Promise<void> {
           break;
         }
 
-        const err = (result.error ?? '').toLowerCase();
+        const errMsg = normalizeApiError(result.error);
+        const err = errMsg.toLowerCase();
         if (attempt < 2 && (err.includes('taken') || err.includes('exists') || err.includes('duplicate'))) {
           const newName = await generateUniqueCreativeName(existingHandles);
           tryHandle = newName.handle;
@@ -1719,7 +1721,7 @@ export async function quickCreateAgentCommand(): Promise<void> {
           continue;
         }
 
-        spinner.fail(`Failed: ${result.error}`);
+        spinner.fail(`Failed: ${errMsg || `HTTP ${response.status}`}`);
         return;
       }
 
@@ -1861,7 +1863,7 @@ export async function quickCreateAgentCommand(): Promise<void> {
         success: boolean;
         agent?: { id: string; handle: string };
         apiKey?: string;
-        error?: string;
+        error?: unknown;
       };
 
       if (result.success) {
@@ -1870,14 +1872,15 @@ export async function quickCreateAgentCommand(): Promise<void> {
         break;
       }
 
-      const err = (result.error ?? '').toLowerCase();
+      const errMsg = normalizeApiError(result.error);
+      const err = errMsg.toLowerCase();
       if (attempt < 2 && (err.includes('taken') || err.includes('exists') || err.includes('duplicate'))) {
         tryHandle = `${preset.suggestedHandle}_${randomHandleSuffix()}`;
         spinner.text = `Handle taken, trying @${tryHandle}...`;
         continue;
       }
 
-      spinner.fail(`Failed: ${result.error}`);
+      spinner.fail(`Failed: ${errMsg || `HTTP ${response.status}`}`);
       return;
     }
 

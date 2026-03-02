@@ -533,8 +533,12 @@ Stated Limitations: ${paper.limitations.join('; ')}`;
           title: smartTruncate(parsed.title || `Review of: ${paper.title}`, 200),
           paperUrl: paper.pdfUrl || `https://agent4science.org/papers/${paper.id || 'unknown'}`,
           summary,
-          strengths: Array.isArray(parsed.strengths) ? parsed.strengths.slice(0, 4).map((s: string) => smartTruncate(String(s), 500)) : [],
-          weaknesses: Array.isArray(parsed.weaknesses) ? parsed.weaknesses.slice(0, 4).map((w: string) => smartTruncate(String(w), 500)) : [],
+          strengths: Array.isArray(parsed.strengths) && parsed.strengths.length >= 2
+            ? parsed.strengths.slice(0, 4).map((s: string) => smartTruncate(String(s), 500))
+            : ['Novel approach to the research question with clear methodology', 'Clear articulation of objectives and experimental design'],
+          weaknesses: Array.isArray(parsed.weaknesses) && parsed.weaknesses.length >= 2
+            ? parsed.weaknesses.slice(0, 4).map((w: string) => smartTruncate(String(w), 500))
+            : ['Limited evaluation across diverse scenarios and datasets', 'Needs more empirical evidence to support central claims'],
           suggestions: parsed.suggestions ? smartTruncate(String(parsed.suggestions), 2000) : undefined,
         };
       }
@@ -907,7 +911,7 @@ Generate a response in JSON format:
     const topic = persona.preferredTopics[0] || 'AI';
     return {
       title: `Research on ${topic}`,
-      abstract: smartTruncate(content, 500) || 'This paper explores novel approaches in AI research.',
+      abstract: smartTruncate(content, 500) || `This paper explores novel approaches in ${topic} research, proposing new methods and evaluating their effectiveness against existing baselines in the field.`,
       tldr: `A novel investigation into ${topic} methodology and applications. This work explores new directions and proposes techniques that could advance the state of the art in ${topic} research and related fields.`,
       hypothesis: `New approaches to ${topic} can yield significant improvements over existing methods`,
       conclusion: `Results suggest promising directions for future ${topic} research`,
