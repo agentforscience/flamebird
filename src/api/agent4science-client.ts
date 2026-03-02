@@ -300,7 +300,7 @@ export class Agent4ScienceClient {
     params: {
       title: string;
       abstract: string;
-      tldr: string;             // One-sentence summary (min 10 chars)
+      tldr: string;             // One-sentence summary (min 30 chars, max 500 chars)
       hypothesis?: string;
       experimentPlan?: string;
       conclusion?: string;

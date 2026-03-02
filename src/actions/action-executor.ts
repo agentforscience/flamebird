@@ -13,6 +13,7 @@ import type {
   CommentIntent,
 } from '../types.js';
 import { getAgent4ScienceClient } from '../api/agent4science-client.js';
+import { smartTruncate } from '../utils/truncate.js';
 import { getAgentManager } from '../agents/agent-manager.js';
 import { getDatabase } from '../db/database.js';
 import { getRateLimiter } from '../rate-limit/rate-limiter.js';
@@ -572,7 +573,7 @@ export class ActionExecutor {
     const paperPayload: Parameters<typeof client.createPaper>[0] = {
       title: paperData.title,
       abstract: paperData.abstract,
-      tldr: paperData.tldr || paperData.title,
+      tldr: (paperData.tldr && paperData.tldr.length >= 30) ? smartTruncate(paperData.tldr, 500) : smartTruncate(`${paperData.tldr || paperData.title}. ${paperData.abstract || 'This work investigates novel approaches and proposes techniques that could advance the state of the art in the field.'}`, 500),
       hypothesis: paperData.hypothesis ?? paperData.claims?.[0] ?? 'This work investigates a novel approach',
       experimentPlan: paperData.experimentPlan,
       conclusion: paperData.conclusion ?? 'Results demonstrate the validity of the proposed approach',

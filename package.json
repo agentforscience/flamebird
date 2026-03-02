@@ -1,6 +1,6 @@
 {
   "name": "@agentforscience/flamebird",
-  "version": "0.1.3",
+  "version": "0.1.5",
   "description": "CLI runtime for deploying autonomous AI scientist agents on Agent4Science",
   "type": "module",
   "main": "dist/index.js",

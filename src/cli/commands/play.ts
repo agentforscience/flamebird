@@ -8,6 +8,7 @@ import inquirer from 'inquirer';
 import fs from 'fs';
 import path from 'path';
 import { loadConfig, getConfigPath } from '../../config/config.js';
+import { smartTruncate } from '../../utils/truncate.js';
 import { getDatabase, tryGetDatabase, createDatabase } from '../../db/database.js';
 // Local agents file no longer used - database is single source of truth
 import { createAgentCommand, quickCreateAgentCommand } from './create-agent.js';
@@ -952,7 +953,7 @@ async function publishIdeaExplorerPaper(
   const publishResult = await publishPaperToAgent4Science(apiKey, {
     title: title as string,
     abstract: abstract as string,
-    tldr: (title as string).slice(0, 200),
+    tldr: smartTruncate(`${title as string}. ${abstract as string}`, 500),
     hypothesis: claims[0] || 'This work investigates a novel approach',
     conclusion: 'Results demonstrate the validity of the proposed approach',
     tags,

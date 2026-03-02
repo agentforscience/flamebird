@@ -6,6 +6,7 @@
 import type { AgentPersona, CommentIntent } from '../types.js';
 import { createLogger } from '../logging/logger.js';
 import { getCostTracker } from '../utils/cost-tracker.js';
+import { smartTruncate, repairJSON } from '../utils/truncate.js';
 
 const logger = createLogger('llm');
 
@@ -55,7 +56,7 @@ export interface GeneratedTake {
 export interface GeneratedPaper {
   title: string;
   abstract: string;
-  tldr: string;           // One-sentence summary (required by API)
+  tldr: string;           // One-sentence summary (required by API, min 30 chars, max 500 chars)
   hypothesis: string;     // Main research hypothesis (required by API)
   conclusion: string;     // Main conclusion (required by API)
   tags: string[];
@@ -489,10 +490,24 @@ Stated Limitations: ${paper.limitations.join('; ')}`;
     }
 
     try {
-      const jsonMatch = response.content.match(/\{[\s\S]*\}/);
+      let jsonMatch = response.content.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) {
+        const braceStart = response.content.indexOf('{');
+        if (braceStart >= 0) {
+          const repaired = repairJSON(response.content.slice(braceStart));
+          if (repaired) jsonMatch = [repaired];
+        }
+      }
       if (jsonMatch) {
-        const parsed = JSON.parse(jsonMatch[0]);
-        let summary = (parsed.summary || '').slice(0, 5000);
+        let parsed;
+        try {
+          parsed = JSON.parse(jsonMatch[0]);
+        } catch {
+          const repaired = repairJSON(jsonMatch[0]);
+          if (!repaired) throw new Error('JSON repair failed');
+          parsed = JSON.parse(repaired);
+        }
+        let summary = smartTruncate(parsed.summary || '', 5000);
 
         // Production API requires at least 1200 chars — pad if LLM fell short
         if (summary.length < 1200) {
@@ -515,12 +530,12 @@ Stated Limitations: ${paper.limitations.join('; ')}`;
         }
 
         return {
-          title: (parsed.title || `Review of: ${paper.title}`).slice(0, 200),
+          title: smartTruncate(parsed.title || `Review of: ${paper.title}`, 200),
           paperUrl: paper.pdfUrl || `https://agent4science.org/papers/${paper.id || 'unknown'}`,
           summary,
-          strengths: Array.isArray(parsed.strengths) ? parsed.strengths.slice(0, 4).map((s: string) => String(s).slice(0, 500)) : [],
-          weaknesses: Array.isArray(parsed.weaknesses) ? parsed.weaknesses.slice(0, 4).map((w: string) => String(w).slice(0, 500)) : [],
-          suggestions: parsed.suggestions ? String(parsed.suggestions).slice(0, 2000) : undefined,
+          strengths: Array.isArray(parsed.strengths) ? parsed.strengths.slice(0, 4).map((s: string) => smartTruncate(String(s), 500)) : [],
+          weaknesses: Array.isArray(parsed.weaknesses) ? parsed.weaknesses.slice(0, 4).map((w: string) => smartTruncate(String(w), 500)) : [],
+          suggestions: parsed.suggestions ? smartTruncate(String(parsed.suggestions), 2000) : undefined,
         };
       }
     } catch {
@@ -528,14 +543,14 @@ Stated Limitations: ${paper.limitations.join('; ')}`;
     }
 
     // Fallback: construct a review from the raw LLM response
-    const fallbackSummary = `This paper, "${paper.title}", presents research that merits careful examination. ${paper.abstract.slice(0, 500)} The key claims include: ${paper.claims.slice(0, 3).join('; ')}. The authors note limitations such as ${paper.limitations.slice(0, 2).join(' and ')}. While the work makes a meaningful contribution, additional empirical validation and broader evaluation would strengthen the overall impact. The methodology shows promise but would benefit from comparison with existing approaches in the field. Further work should address the noted limitations and explore the generalizability of the findings to related domains.`;
+    const fallbackSummary = `This paper, "${paper.title}", presents research that merits careful examination. ${smartTruncate(paper.abstract, 500)} The key claims include: ${paper.claims.slice(0, 3).join('; ')}. The authors note limitations such as ${paper.limitations.slice(0, 2).join(' and ')}. While the work makes a meaningful contribution, additional empirical validation and broader evaluation would strengthen the overall impact. The methodology shows promise but would benefit from comparison with existing approaches in the field. Further work should address the noted limitations and explore the generalizability of the findings to related domains.`;
     return {
-      title: `Review of: ${paper.title}`.slice(0, 200),
+      title: smartTruncate(`Review of: ${paper.title}`, 200),
       paperUrl: paper.pdfUrl || `https://agent4science.org/papers/${paper.id || 'unknown'}`,
-      summary: fallbackSummary.slice(0, 5000),
+      summary: smartTruncate(fallbackSummary, 5000),
       strengths: ['Novel approach to the research question', 'Clear articulation of methodology and objectives'],
       weaknesses: ['Limited evaluation across diverse scenarios', 'Needs more empirical evidence to support central claims'],
-      suggestions: response.content.slice(0, 2000),
+      suggestions: smartTruncate(response.content, 2000),
     };
   }
 
@@ -566,7 +581,7 @@ This is for sharing ideas and sparking discussion - no code or PDF required.
 Respond in JSON format with these fields:
 - title: string (compelling, specific research title, 10-200 chars)
 - abstract: string (200-500 word summary of your research idea)
-- tldr: string (one-sentence summary of the paper, min 10 chars)
+- tldr: string (one-sentence summary of the paper, min 30 chars, max 500 chars)
 - hypothesis: string (main research hypothesis or question, min 10 chars)
 - conclusion: string (main conclusion or finding, min 10 chars)
 ${tagsInstruction}
@@ -793,7 +808,7 @@ Generate a response in JSON format:
     // Fallback: treat entire response as comment body
     return {
       intent: 'clarify',
-      body: content.slice(0, 500),
+      body: smartTruncate(content, 500),
       confidence: 0.5,
     };
   }
@@ -809,7 +824,7 @@ Generate a response in JSON format:
         return {
           title: parsed.title || 'Quick Take',
           stance: parsed.stance || 'neutral',
-          summary: Array.isArray(parsed.summary) ? parsed.summary : [content.slice(0, 200)],
+          summary: Array.isArray(parsed.summary) ? parsed.summary : [smartTruncate(content, 200)],
           critique: Array.isArray(parsed.critique) ? parsed.critique : ['Further analysis needed'],
           whoShouldCare: parsed.whoShouldCare || 'Researchers in this area',
           openQuestions: Array.isArray(parsed.openQuestions) ? parsed.openQuestions : ['What are the implications?'],
@@ -825,7 +840,7 @@ Generate a response in JSON format:
     return {
       title: 'Quick Take',
       stance: 'neutral',
-      summary: [content.slice(0, 200)],
+      summary: [smartTruncate(content, 200)],
       critique: ['Further analysis needed'],
       whoShouldCare: 'Researchers in this area',
       openQuestions: ['What are the implications?'],
@@ -839,17 +854,32 @@ Generate a response in JSON format:
    */
   private parsePaperResponse(content: string, persona: AgentPersona): GeneratedPaper {
     try {
-      const jsonMatch = content.match(/\{[\s\S]*\}/);
+      let jsonMatch = content.match(/\{[\s\S]*\}/);
+      // If regex match fails or JSON is broken, try to repair truncated output
+      if (!jsonMatch) {
+        const braceStart = content.indexOf('{');
+        if (braceStart >= 0) {
+          const repaired = repairJSON(content.slice(braceStart));
+          if (repaired) jsonMatch = [repaired];
+        }
+      }
       if (jsonMatch) {
-        const parsed = JSON.parse(jsonMatch[0]);
+        let parsed;
+        try {
+          parsed = JSON.parse(jsonMatch[0]);
+        } catch {
+          const repaired = repairJSON(jsonMatch[0]);
+          if (!repaired) throw new Error('JSON repair failed');
+          parsed = JSON.parse(repaired);
+        }
 
         // Validate required fields - URLs are optional for research ideas
         const paper: GeneratedPaper = {
-          title: parsed.title?.slice(0, 200) || 'Untitled Research',
-          abstract: parsed.abstract?.slice(0, 2000) || content.slice(0, 500),
-          tldr: parsed.tldr?.slice(0, 500) || parsed.title?.slice(0, 200) || 'A novel research contribution',
-          hypothesis: parsed.hypothesis?.slice(0, 1000) || parsed.claims?.[0] || 'This work investigates a novel approach',
-          conclusion: parsed.conclusion?.slice(0, 1000) || 'Results demonstrate the validity of the proposed approach',
+          title: smartTruncate(parsed.title, 200) || 'Untitled Research',
+          abstract: smartTruncate(parsed.abstract, 2000) || smartTruncate(content, 500),
+          tldr: smartTruncate(parsed.tldr, 500) || smartTruncate(parsed.abstract, 500) || 'A novel research contribution',
+          hypothesis: smartTruncate(parsed.hypothesis, 1000) || parsed.claims?.[0] || 'This work investigates a novel approach',
+          conclusion: smartTruncate(parsed.conclusion, 1000) || 'Results demonstrate the validity of the proposed approach',
           tags: Array.isArray(parsed.tags) ? parsed.tags.slice(0, 5).map((t: string) => t.toLowerCase().slice(0, 50)) : ['research'],
           claims: Array.isArray(parsed.claims) ? parsed.claims.slice(0, 5) : ['Novel contribution to the field'],
           limitations: Array.isArray(parsed.limitations) ? parsed.limitations.slice(0, 5) : ['Further validation required'],
@@ -877,8 +907,8 @@ Generate a response in JSON format:
     const topic = persona.preferredTopics[0] || 'AI';
     return {
       title: `Research on ${topic}`,
-      abstract: content.slice(0, 500) || 'This paper explores novel approaches in AI research.',
-      tldr: `A novel investigation into ${topic} methodology and applications`,
+      abstract: smartTruncate(content, 500) || 'This paper explores novel approaches in AI research.',
+      tldr: `A novel investigation into ${topic} methodology and applications. This work explores new directions and proposes techniques that could advance the state of the art in ${topic} research and related fields.`,
       hypothesis: `New approaches to ${topic} can yield significant improvements over existing methods`,
       conclusion: `Results suggest promising directions for future ${topic} research`,
       tags: persona.preferredTopics.slice(0, 3).map(t => t.toLowerCase().replace(/\s+/g, '-')) || ['research'],

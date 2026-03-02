@@ -13,6 +13,7 @@
 
 import { createLogger } from '../logging/logger.js';
 import { getAgent4ScienceClient } from '../api/agent4science-client.js';
+import { smartTruncate, repairJSON } from '../utils/truncate.js';
 import { ensureFirstTagIsSciencesub } from '../engagement/proactive-engine.js';
 import { runIdeaExplorer, resolveIdeaExplorerPath, type IdeaExplorerResult } from './paper-tools.js';
 import { getDatabase } from '../db/database.js';
@@ -308,7 +309,7 @@ Extract information from these sections to produce a JSON object. Be faithful to
 
 Required JSON fields:
 - "title": The paper title — use the report's own title (from the # heading) if suitable, or write a clear, engaging title (max 200 chars)
-- "tldr": A single-sentence summary capturing the most important finding (min 10 chars, max 300 chars). Look for bold "Key finding" text in the Executive Summary.
+- "tldr": A single-sentence summary capturing the most important finding (min 30 chars, max 500 chars). Look for bold "Key finding" text in the Executive Summary.
 - "abstract": A thorough summary (3-5 paragraphs, 300-800 words) covering the research question, methodology, key findings (with specific numbers), and significance. Extract primarily from the Executive Summary and Results sections. Write in accessible academic style.
 - "hypothesis": The main hypothesis or research question (1-3 sentences). Extract from the "Goal" section, especially any "Research Question" sub-heading.
 - "experimentPlan": Description of the experimental methodology (2-4 sentences). Extract from "Experiment Description" or "Data Construction". Include key details like sample sizes, models used, and variables tested.
@@ -336,9 +337,17 @@ Output ONLY valid JSON, no markdown fences.`,
     if (!content) return null;
 
     // Strip markdown fences if the LLM added them despite instructions
-    const jsonContent = content.replace(/^```(?:json)?\s*\n?/, '').replace(/\n?\s*```$/, '');
+    let jsonContent = content.replace(/^```(?:json)?\s*\n?/, '').replace(/\n?\s*```$/, '');
 
-    const parsed = JSON.parse(jsonContent) as Partial<ReportSummary>;
+    let parsed: Partial<ReportSummary>;
+    try {
+      parsed = JSON.parse(jsonContent) as Partial<ReportSummary>;
+    } catch {
+      // LLM may have been cut off by token limit — try to repair incomplete JSON
+      const repaired = repairJSON(jsonContent);
+      if (!repaired) return null;
+      parsed = JSON.parse(repaired) as Partial<ReportSummary>;
+    }
     if (!parsed.abstract) return null;
 
     return {
@@ -451,10 +460,13 @@ async function runIdeaExplorerFlow(config: ManagerAgentConfig): Promise<PaperGen
     }
   }
 
-  // Ensure tldr is present (required by API, min 10 chars)
-  if (!postTldr || postTldr.length < 10) {
-    postTldr = postTitle.length >= 10 ? postTitle : `Research on ${topic}`;
+  // Ensure tldr is present (required by API, min 30 chars, max 500 chars)
+  if (!postTldr || postTldr.length < 30) {
+    // Build a tldr from available content
+    const baseTldr = postTldr || postTitle || `Research on ${topic}`;
+    postTldr = `${baseTldr}. ${postAbstract || postHypothesis || `This work explores new directions in ${topic} research.`}`;
   }
+  postTldr = smartTruncate(postTldr, 500);
 
   // Ensure required URLs are present
   const githubUrl = ieResult.githubUrl || '';
