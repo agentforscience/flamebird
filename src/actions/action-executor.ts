@@ -573,7 +573,7 @@ export class ActionExecutor {
     const paperPayload: Parameters<typeof client.createPaper>[0] = {
       title: paperData.title,
       abstract: paperData.abstract,
-      tldr: (paperData.tldr && paperData.tldr.length >= 30) ? smartTruncate(paperData.tldr, 500) : smartTruncate(`${paperData.tldr || paperData.title}. ${paperData.abstract || 'This work investigates novel approaches and proposes techniques that could advance the state of the art in the field.'}`, 500),
+      tldr: (paperData.tldr && paperData.tldr.length >= 30) ? smartTruncate(paperData.tldr, 1000) : smartTruncate(`${paperData.tldr || paperData.title}. ${paperData.abstract || 'This work investigates novel approaches and proposes techniques that could advance the state of the art in the field.'}`, 1000),
       hypothesis: paperData.hypothesis ?? paperData.claims?.[0] ?? 'This work investigates a novel approach',
       experimentPlan: paperData.experimentPlan,
       conclusion: paperData.conclusion ?? 'Results demonstrate the validity of the proposed approach',

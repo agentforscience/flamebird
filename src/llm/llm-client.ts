@@ -56,7 +56,7 @@ export interface GeneratedTake {
 export interface GeneratedPaper {
   title: string;
   abstract: string;
-  tldr: string;           // One-sentence summary (required by API, min 30 chars, max 500 chars)
+  tldr: string;           // One-sentence summary (required by API, min 30 chars, max 1000 chars)
   hypothesis: string;     // Main research hypothesis (required by API)
   conclusion: string;     // Main conclusion (required by API)
   tags: string[];
@@ -351,7 +351,9 @@ Respond in JSON format with these fields:
 - whoShouldCare: string (who this research matters to)
 - openQuestions: string[] (2-3 questions raised by this work)
 - hotTake: string (your spicy opinion in 1-2 sentences)
-${tagsInstruction}${differentiationInstruction}`;
+${tagsInstruction}
+
+CRITICAL: You MUST complete every field fully. Do NOT leave any sentence unfinished or cut off mid-thought. Finish every sentence before moving to the next field. If you are running low on space, keep individual points concise rather than leaving them incomplete.${differentiationInstruction}`;
 
     const userPrompt = `Review this paper:
 
@@ -363,7 +365,7 @@ Limitations: ${paper.limitations.join('; ')}`;
     const response = await this.complete([
       { role: 'system', content: systemPrompt },
       { role: 'user', content: userPrompt },
-    ], 4096);
+    ], 8192);
 
     // Track cost
     try {
@@ -407,7 +409,9 @@ Respond in JSON format with these fields:
 - whoShouldCare: string (who this matters to)
 - openQuestions: string[] (2-3 questions you're wrestling with)
 - hotTake: string (your spicy opinion in 1-2 sentences)
-${tagsInstruction}`;
+${tagsInstruction}
+
+CRITICAL: You MUST complete every field fully. Do NOT leave any sentence unfinished or cut off mid-thought. Finish every sentence before moving to the next field. If you are running low on space, keep individual points concise rather than leaving them incomplete.`;
 
     const topicsStr = context.personaTopics.length > 0
       ? context.personaTopics.join(', ')
@@ -426,7 +430,7 @@ Write a take that reflects your unique viewpoint. Be opinionated and substantive
     const response = await this.complete([
       { role: 'system', content: systemPrompt },
       { role: 'user', content: userPrompt },
-    ], 4096);
+    ], 8192);
 
     // Track cost
     try {
@@ -468,7 +472,9 @@ Respond in JSON format with these fields:
 - summary: string (a thorough, detailed assessment of what the paper does, its methodology, contributions, and your overall evaluation — MUST be at least 1500 characters long, this is a HARD MINIMUM enforced by the API. Write 4-6 substantial paragraphs covering: (1) what the paper does and why it matters, (2) methodology analysis, (3) key results and their significance, (4) limitations and concerns, (5) comparison to related work, (6) overall assessment. Aim for 2000+ characters.)
 - strengths: string[] (3-4 specific strengths of the paper, each at least 80 characters with concrete details)
 - weaknesses: string[] (3-4 specific weaknesses or concerns, each at least 80 characters with concrete details)
-- suggestions: string (optional constructive suggestions for improvement)`;
+- suggestions: string (optional constructive suggestions for improvement)
+
+CRITICAL: You MUST complete every field fully. Do NOT leave any sentence unfinished or cut off mid-thought. Finish every sentence and every paragraph completely before moving to the next field. If you are running low on space, be more concise rather than leaving text incomplete.`;
 
     const userPrompt = `Write a peer review of this paper:
 
@@ -480,7 +486,7 @@ Stated Limitations: ${paper.limitations.join('; ')}`;
     const response = await this.complete([
       { role: 'system', content: systemPrompt },
       { role: 'user', content: userPrompt },
-    ], 8192);
+    ], 16384);
 
     try {
       const costTracker = getCostTracker();
@@ -585,13 +591,15 @@ This is for sharing ideas and sparking discussion - no code or PDF required.
 Respond in JSON format with these fields:
 - title: string (compelling, specific research title, 10-200 chars)
 - abstract: string (200-500 word summary of your research idea)
-- tldr: string (one-sentence summary of the paper, min 30 chars, max 500 chars)
+- tldr: string (one-sentence summary of the paper, min 30 chars, max 1000 chars)
 - hypothesis: string (main research hypothesis or question, min 10 chars)
 - conclusion: string (main conclusion or finding, min 10 chars)
 ${tagsInstruction}
 - claims: string[] (3-5 key claims or hypotheses)
 - limitations: string[] (2-3 honest limitations or open questions)
-- inspirations: optional array of related works with { title, note }`;
+- inspirations: optional array of related works with { title, note }
+
+CRITICAL: You MUST complete every field fully. Do NOT leave any sentence unfinished or cut off mid-thought. Finish every sentence completely before moving to the next field. If you are running low on space, be more concise rather than leaving text incomplete.`;
 
     const topics = context?.topics?.join(', ') || persona.preferredTopics.join(', ') || 'AI research';
 
@@ -610,7 +618,7 @@ ${tagsInstruction}
     const response = await this.complete([
       { role: 'system', content: systemPrompt },
       { role: 'user', content: userPrompt },
-    ], 8192);
+    ], 16384);
 
     // Track cost
     try {
@@ -822,9 +830,24 @@ Generate a response in JSON format:
    */
   private parseTakeResponse(content: string): GeneratedTake {
     try {
-      const jsonMatch = content.match(/\{[\s\S]*\}/);
+      let jsonMatch = content.match(/\{[\s\S]*\}/);
+      // If regex match fails, try to repair truncated JSON
+      if (!jsonMatch) {
+        const braceStart = content.indexOf('{');
+        if (braceStart >= 0) {
+          const repaired = repairJSON(content.slice(braceStart));
+          if (repaired) jsonMatch = [repaired];
+        }
+      }
       if (jsonMatch) {
-        const parsed = JSON.parse(jsonMatch[0]);
+        let parsed;
+        try {
+          parsed = JSON.parse(jsonMatch[0]);
+        } catch {
+          const repaired = repairJSON(jsonMatch[0]);
+          if (!repaired) throw new Error('JSON repair failed');
+          parsed = JSON.parse(repaired);
+        }
         return {
           title: parsed.title || 'Quick Take',
           stance: parsed.stance || 'neutral',
@@ -880,10 +903,10 @@ Generate a response in JSON format:
         // Validate required fields - URLs are optional for research ideas
         const paper: GeneratedPaper = {
           title: smartTruncate(parsed.title, 200) || 'Untitled Research',
-          abstract: smartTruncate(parsed.abstract, 2000) || smartTruncate(content, 500),
-          tldr: smartTruncate(parsed.tldr, 500) || smartTruncate(parsed.abstract, 500) || 'A novel research contribution',
-          hypothesis: smartTruncate(parsed.hypothesis, 1000) || parsed.claims?.[0] || 'This work investigates a novel approach',
-          conclusion: smartTruncate(parsed.conclusion, 1000) || 'Results demonstrate the validity of the proposed approach',
+          abstract: smartTruncate(parsed.abstract, 5000) || smartTruncate(content, 500),
+          tldr: smartTruncate(parsed.tldr, 1000) || smartTruncate(parsed.abstract, 500) || 'A novel research contribution',
+          hypothesis: smartTruncate(parsed.hypothesis, 3000) || parsed.claims?.[0] || 'This work investigates a novel approach',
+          conclusion: smartTruncate(parsed.conclusion, 3000) || 'Results demonstrate the validity of the proposed approach',
           tags: Array.isArray(parsed.tags) ? parsed.tags.slice(0, 5).map((t: string) => t.toLowerCase().slice(0, 50)) : ['research'],
           claims: Array.isArray(parsed.claims) ? parsed.claims.slice(0, 5) : ['Novel contribution to the field'],
           limitations: Array.isArray(parsed.limitations) ? parsed.limitations.slice(0, 5) : ['Further validation required'],

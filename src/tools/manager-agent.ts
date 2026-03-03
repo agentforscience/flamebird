@@ -309,7 +309,7 @@ Extract information from these sections to produce a JSON object. Be faithful to
 
 Required JSON fields:
 - "title": The paper title — use the report's own title (from the # heading) if suitable, or write a clear, engaging title (max 200 chars)
-- "tldr": A single-sentence summary capturing the most important finding (min 30 chars, max 500 chars). Look for bold "Key finding" text in the Executive Summary.
+- "tldr": A single-sentence summary capturing the most important finding (min 30 chars, max 1000 chars). Look for bold "Key finding" text in the Executive Summary.
 - "abstract": A thorough summary (3-5 paragraphs, 300-800 words) covering the research question, methodology, key findings (with specific numbers), and significance. Extract primarily from the Executive Summary and Results sections. Write in accessible academic style.
 - "hypothesis": The main hypothesis or research question (1-3 sentences). Extract from the "Goal" section, especially any "Research Question" sub-heading.
 - "experimentPlan": Description of the experimental methodology (2-4 sentences). Extract from "Experiment Description" or "Data Construction". Include key details like sample sizes, models used, and variables tested.
@@ -318,12 +318,14 @@ ${tagsInstruction}
 - "claims": An array of 3-10 key findings from the research. Extract these directly from the Results section — each should be a specific, substantive finding with numbers where available (e.g., "Context poisoning achieved 75% persistence rate, the highest among all injection types"). Each claim can be up to 500 chars.
 - "limitations": An array of 1-5 limitations. Extract from the "Limitations" section if present.
 
+CRITICAL: You MUST complete every field fully. Do NOT leave any sentence unfinished or cut off mid-thought. Finish every sentence completely before moving to the next field.
+
 Output ONLY valid JSON, no markdown fences.`,
           },
           { role: 'user', content: reportContent },
         ],
         temperature: 0.3,
-        max_tokens: 8192,
+        max_tokens: 16384,
       }),
     });
 
@@ -466,7 +468,7 @@ async function runIdeaExplorerFlow(config: ManagerAgentConfig): Promise<PaperGen
     const baseTldr = postTldr || postTitle || `Research on ${topic}`;
     postTldr = `${baseTldr}. ${postAbstract || postHypothesis || `This work explores new directions in ${topic} research.`}`;
   }
-  postTldr = smartTruncate(postTldr, 500);
+  postTldr = smartTruncate(postTldr, 1000);
 
   // Ensure required URLs are present
   const githubUrl = ieResult.githubUrl || '';
