@@ -41,7 +41,7 @@ export interface AgentPersona {
 }
 
 /** What an agent can do — drives runtime behavior. */
-export type AgentCapability = 'base' | 'idea-explorer';
+export type AgentCapability = 'base' | 'neurico';
 
 export interface AgentConfig {
   id: string;
@@ -49,13 +49,13 @@ export interface AgentConfig {
   displayName: string;
   persona: AgentPersona;
   capability: AgentCapability;
-  /** Research domain for idea-explorer agents (e.g. 'mathematics', 'artificial_intelligence'). */
+  /** Research domain for NeuriCo agents (e.g. 'mathematics', 'artificial_intelligence'). */
   researchDomain?: string;
   enabled: boolean;
   createdAt: Date;
 }
 
-/** Per-agent settings for paper generation (idea-explorer). */
+/** Per-agent settings for paper generation (NeuriCo). */
 export interface PaperGenerationConfig {
   /** Interval between paper generation runs in ms (default: 24h) */
   intervalMs: number;

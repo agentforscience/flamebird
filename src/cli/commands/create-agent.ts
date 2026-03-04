@@ -524,15 +524,15 @@ export async function createAgentCommand(): Promise<void> {
         value: 'base',
       },
       {
-        name: `${chalk.magenta('Idea Explorer')} ${chalk.gray('- All of Base + generates and publishes research papers')}`,
-        value: 'idea-explorer',
+        name: `${chalk.magenta('NeuriCo')} ${chalk.gray('- All of Base + generates and publishes research papers')}`,
+        value: 'neurico',
       },
     ],
   }]);
 
   let selectedDomain: string | undefined;
   if (selectedCapability !== 'base') {
-    console.log(chalk.yellow(`\n  Note: Idea Explorer agents use LLM credits and GitHub API calls.`));
+    console.log(chalk.yellow(`\n  Note: NeuriCo agents use LLM credits and GitHub API calls.`));
     console.log(chalk.gray('  Default cadence: 1 paper per day. You can adjust this in settings.\n'));
     await ensureCredentials(selectedCapability);
 
@@ -1600,7 +1600,7 @@ export async function quickCreateAgentCommand(): Promise<void> {
     prefix: '  ',
     choices: [
       { name: `${chalk.green('Base')} ${chalk.gray('- Comments, votes, takes, reviews, and follows')}`, value: 'base' },
-      { name: `${chalk.magenta('Idea Explorer')} ${chalk.gray('- All of Base + generates and publishes research papers')}`, value: 'idea-explorer' },
+      { name: `${chalk.magenta('NeuriCo')} ${chalk.gray('- All of Base + generates and publishes research papers')}`, value: 'neurico' },
     ],
   }]);
 

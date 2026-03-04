@@ -21,7 +21,7 @@ import { createProactiveEngine, getProactiveEngine } from '../engagement/proacti
 import { createLogger } from '../logging/logger.js';
 import { loadConfig } from '../config/config.js';
 import { tickPaperGeneration, type ManagerAgentConfig } from '../tools/manager-agent.js';
-import { resolveIdeaExplorerPath } from '../tools/paper-tools.js';
+import { resolveNeuricoPath } from '../tools/paper-tools.js';
 
 const logger = createLogger('runtime');
 
@@ -120,7 +120,7 @@ export class EventLoop {
 
     // Log paper-capable agents
     const paperAgents = manager.getEnabledAgents().filter(
-      a => a.config.capability === 'idea-explorer'
+      a => a.config.capability === 'neurico'
     );
     if (paperAgents.length > 0) {
       logger.info(
@@ -128,15 +128,15 @@ export class EventLoop {
         `${paperAgents.length} paper-generating agent(s) active`
       );
 
-      // Validate idea-explorer dependencies upfront
-      const iePath = process.env.IDEA_EXPLORER_PATH || resolveIdeaExplorerPath();
+      // Validate NeuriCo dependencies upfront
+      const iePath = process.env.NEURICO_PATH || resolveNeuricoPath();
       if (!iePath) {
         logger.warn(
-          'Idea Explorer not found — paper generation will fail. Set IDEA_EXPLORER_PATH or install: curl -fsSL https://raw.githubusercontent.com/ChicagoHAI/idea-explorer/main/install.sh | bash'
+          'NeuriCo not found — paper generation will fail. Set NEURICO_PATH or install: curl -fsSL https://raw.githubusercontent.com/ChicagoHAI/neurico/main/install.sh | bash'
         );
       }
       if (!process.env.GITHUB_TOKEN) {
-        logger.warn('GITHUB_TOKEN not set — idea-explorer needs it to push paper repos');
+        logger.warn('GITHUB_TOKEN not set — NeuriCo needs it to push paper repos');
       }
       if (!this.runtimeConfig.llm.apiKey) {
         logger.warn('LLM_API_KEY not set — paper topic discovery and summarization will use fallback content');
@@ -410,7 +410,7 @@ export class EventLoop {
       actionsExecuted++;
     }
 
-    // Phase 4: Paper generation for idea-explorer agents
+    // Phase 4: Paper generation for NeuriCo agents
     for (const agentId of manager.getAgentIds()) {
       const agent = manager.getRuntime(agentId);
       if (!agent || !agent.config.enabled) continue;
@@ -428,8 +428,8 @@ export class EventLoop {
         llmModel: this.runtimeConfig.llm.model,
         githubToken: process.env.GITHUB_TOKEN,
         githubOrg: process.env.GITHUB_ORG,
-        ideaExplorerPath: process.env.IDEA_EXPLORER_PATH,
-        ideaExplorerProvider: (process.env.IDEA_EXPLORER_PROVIDER as 'claude' | 'codex' | 'gemini') || undefined,
+        neuricoPath: process.env.NEURICO_PATH,
+        neuricoProvider: (process.env.NEURICO_PROVIDER as 'claude' | 'codex' | 'gemini') || undefined,
       };
 
       try {

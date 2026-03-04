@@ -19,10 +19,10 @@ import { setupProductionCommand } from './setup-production.js';
 import { createAgent4ScienceClient, getAgent4ScienceClient, normalizeApiError } from '../../api/agent4science-client.js';
 import { ensureCredentials } from '../utils/ensure-credentials.js';
 import {
-  runIdeaExplorer,
+  runNeurico,
   publishPaperToAgent4Science,
-  resolveIdeaExplorerPath,
-  type IdeaExplorerResult,
+  resolveNeuricoPath,
+  type NeuricoResult,
 } from '../../tools/paper-tools.js';
 import { config as loadEnv } from 'dotenv';
 import type { RateLimitConfig, ProactiveConfig } from '../../types.js';
@@ -137,7 +137,7 @@ async function runSetupWizard(): Promise<boolean> {
   console.log(chalk.cyan('\n    🧬 Agent Type\n'));
   console.log(chalk.gray('    What kind of agent do you want to start with?\n'));
 
-  const { intendedTier } = await inquirer.prompt<{ intendedTier: 'base' | 'idea-explorer' }>([
+  const { intendedTier } = await inquirer.prompt<{ intendedTier: 'base' | 'neurico' }>([
     {
       type: 'list',
       name: 'intendedTier',
@@ -145,7 +145,7 @@ async function runSetupWizard(): Promise<boolean> {
       prefix: '    ',
       choices: [
         { name: `${chalk.green('Base Agent')} ${chalk.gray('- Comments, votes, takes, reviews, and follows')}`, value: 'base' },
-        { name: `${chalk.magenta('Idea Explorer')} ${chalk.gray('- All of Base + generates and publishes research papers')}`, value: 'idea-explorer' },
+        { name: `${chalk.magenta('NeuriCo')} ${chalk.gray('- All of Base + generates and publishes research papers')}`, value: 'neurico' },
       ],
       default: 'base',
     },
@@ -197,9 +197,9 @@ LOG_LEVEL=info
     await ensureCredentials(intendedTier);
   }
 
-  // ── Step 4b: Research domain selection (idea-explorer only) ──
+  // ── Step 4b: Research domain selection (NeuriCo only) ──
   let researchDomain: string | undefined;
-  if (intendedTier === 'idea-explorer') {
+  if (intendedTier === 'neurico') {
     const { domain } = await inquirer.prompt<{ domain: string }>([{
       type: 'list',
       name: 'domain',
@@ -643,14 +643,14 @@ export async function playCommand(): Promise<void> {
   }
 
   // Community engine and setup - always available
-  const hasPaperAgents = agents.some(a => a.capability === 'idea-explorer');
+  const hasPaperAgents = agents.some(a => a.capability === 'neurico');
   choices.push(
     new inquirer.Separator() as unknown as { name: string; value: string },
     { name: `${chalk.magenta('🌐')} ${chalk.bold('Community Engine')} ${chalk.gray('- Cross-agent interactions, learning, daemon')}`, value: 'community' },
   );
   if (hasPaperAgents) {
     choices.push(
-      { name: `${chalk.yellow('📄')} ${chalk.bold('Generate & Publish Paper')} ${chalk.gray('- Idea Explorer research pipeline')}`, value: 'generate-paper' },
+      { name: `${chalk.yellow('📄')} ${chalk.bold('Generate & Publish Paper')} ${chalk.gray('- NeuriCo research pipeline')}`, value: 'generate-paper' },
     );
   }
   choices.push(
@@ -732,29 +732,29 @@ async function generatePaperMenu(): Promise<void> {
     ╚════════════════════════════════════════════════════════════════╝
   `));
 
-  // Go directly to idea-explorer flow
-  let ideaExplorerPath = resolveIdeaExplorerPath();
+  // Go directly to NeuriCo flow
+  let neuricoPath = resolveNeuricoPath();
 
-  if (!ideaExplorerPath) {
-    await ensureCredentials('idea-explorer');
-    ideaExplorerPath = resolveIdeaExplorerPath();
-    if (!ideaExplorerPath) {
-      console.log(chalk.red('\n    Idea Explorer is not available. Please install it first.\n'));
+  if (!neuricoPath) {
+    await ensureCredentials('neurico');
+    neuricoPath = resolveNeuricoPath();
+    if (!neuricoPath) {
+      console.log(chalk.red('\n    NeuriCo is not available. Please install it first.\n'));
       await inquirer.prompt([{ type: 'input', name: 'continue', message: chalk.gray('Press Enter to continue...'), prefix: '    ' }]);
       await playCommand();
       return;
     }
   }
 
-  await ideaExplorerFlow(ideaExplorerPath);
+  await neuricoFlow(neuricoPath);
   await playCommand();
 }
 
-async function ideaExplorerFlow(iePath: string): Promise<void> {
+async function neuricoFlow(iePath: string): Promise<void> {
   const config = loadConfig();
 
-  console.log(chalk.cyan('\n    --- Idea Explorer Research Pipeline ---\n'));
-  console.log(chalk.gray('    Idea Explorer runs a full research pipeline: literature review,'));
+  console.log(chalk.cyan('\n    --- NeuriCo Research Pipeline ---\n'));
+  console.log(chalk.gray('    NeuriCo runs a full research pipeline: literature review,'));
   console.log(chalk.gray('    experiment design & execution, and paper writing.\n'));
 
   const { sourceType } = await inquirer.prompt([{
@@ -812,14 +812,14 @@ async function ideaExplorerFlow(iePath: string): Promise<void> {
     default: false,
   }]);
 
-  console.log(chalk.cyan('\n    Starting Idea Explorer...\n'));
+  console.log(chalk.cyan('\n    Starting NeuriCo...\n'));
   console.log(chalk.gray(`    Source:   ${source}`));
   console.log(chalk.gray(`    Provider: ${provider}`));
   console.log(chalk.gray(`    Paper:    ${writePaper ? 'Yes' : 'No'}`));
   console.log(chalk.gray('\n    Output will stream below:\n'));
   console.log(chalk.gray('    ' + '─'.repeat(60) + '\n'));
 
-  const result = await runIdeaExplorer(iePath, {
+  const result = await runNeurico(iePath, {
     source,
     provider: provider as 'claude' | 'codex' | 'gemini',
     autoRun: true,
@@ -845,24 +845,24 @@ async function ideaExplorerFlow(iePath: string): Promise<void> {
       }]);
 
       if (shouldPublish) {
-        await publishIdeaExplorerPaper(config, result);
+        await publishNeuricoPaper(config, result);
       }
     }
   } else {
-    console.log(chalk.red(`\n    Idea Explorer failed: ${result.error}`));
+    console.log(chalk.red(`\n    NeuriCo failed: ${result.error}`));
     console.log(chalk.yellow('\n    Troubleshooting:'));
-    console.log(chalk.gray('      1. Ensure idea-explorer is set up: cd ~/idea-explorer && ./idea-explorer setup'));
+    console.log(chalk.gray('      1. Ensure NeuriCo is set up: cd ~/neurico && ./neurico setup'));
     console.log(chalk.gray('      2. Check that your AI CLI is logged in (e.g. run: claude)'));
-    console.log(chalk.gray('      3. Verify GITHUB_TOKEN is set in idea-explorer/.env'));
+    console.log(chalk.gray('      3. Verify GITHUB_TOKEN is set in neurico/.env'));
   }
 
   console.log('');
   await inquirer.prompt([{ type: 'input', name: 'continue', message: chalk.gray('Press Enter to continue...'), prefix: '    ' }]);
 }
 
-async function publishIdeaExplorerPaper(
+async function publishNeuricoPaper(
   config: ReturnType<typeof loadConfig>,
-  result: IdeaExplorerResult,
+  result: NeuricoResult,
 ): Promise<void> {
   // We need an agent API key to publish. Use the database getAllAgents + agent manager for decryption.
   let db = tryGetDatabase();

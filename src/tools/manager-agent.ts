@@ -1,10 +1,10 @@
 /**
  * Manager Agent
  *
- * Orchestrates the paper generation lifecycle for idea-explorer agents:
+ * Orchestrates the paper generation lifecycle for NeuriCo agents:
  *   1. Discover interesting topics from Agent4Science (trending papers, discussions)
  *   2. Use LLM to formulate a research idea
- *   3. Invoke idea-explorer CLI
+ *   3. Invoke NeuriCo CLI
  *   4. Post the results to Agent4Science via normal API (using agent's own API key)
  *
  * This runs on a schedule (default: once per 24h per agent) as part of the
@@ -15,7 +15,7 @@ import { createLogger } from '../logging/logger.js';
 import { getAgent4ScienceClient } from '../api/agent4science-client.js';
 import { smartTruncate, repairJSON } from '../utils/truncate.js';
 import { ensureFirstTagIsSciencesub } from '../engagement/proactive-engine.js';
-import { runIdeaExplorer, resolveIdeaExplorerPath, type IdeaExplorerResult } from './paper-tools.js';
+import { runNeurico, resolveNeuricoPath, type NeuricoResult } from './paper-tools.js';
 import { getDatabase } from '../db/database.js';
 import type { AgentCapability, Agent4SciencePaper } from '../types.js';
 
@@ -38,14 +38,14 @@ export interface ManagerAgentConfig {
   llmApiKey: string;
   /** LLM model */
   llmModel?: string;
-  /** GitHub Personal Access Token (needed for idea-explorer) */
+  /** GitHub Personal Access Token (needed for NeuriCo) */
   githubToken?: string;
   /** GitHub org name */
   githubOrg?: string;
-  /** Path to idea-explorer installation */
-  ideaExplorerPath?: string;
-  /** AI provider for idea-explorer (default: claude) */
-  ideaExplorerProvider?: 'claude' | 'codex' | 'gemini';
+  /** Path to NeuriCo installation */
+  neuricoPath?: string;
+  /** AI provider for NeuriCo (default: claude) */
+  neuricoProvider?: 'claude' | 'codex' | 'gemini';
 }
 
 export interface PaperGenerationResult {
@@ -143,7 +143,7 @@ just repeat what's already been posted. Return ONLY the topic as a single senten
 
 /**
  * Use LLM to generate a structured idea YAML from a topic string.
- * Produces a YAML that matches idea-explorer's schema (title, domain, hypothesis,
+ * Produces a YAML that matches NeuriCo's schema (title, domain, hypothesis,
  * background, methodology).
  */
 async function generateIdeaYaml(
@@ -372,20 +372,20 @@ Output ONLY valid JSON, no markdown fences.`,
 }
 
 /**
- * Run the full idea-explorer paper generation flow:
+ * Run the full NeuriCo paper generation flow:
  * discover topic → generate idea YAML → submit + run → post to Agent4Science
  */
-async function runIdeaExplorerFlow(config: ManagerAgentConfig): Promise<PaperGenerationResult> {
-  const iePath = config.ideaExplorerPath || resolveIdeaExplorerPath();
+async function runNeuricoFlow(config: ManagerAgentConfig): Promise<PaperGenerationResult> {
+  const iePath = config.neuricoPath || resolveNeuricoPath();
   if (!iePath) {
     return {
       success: false,
-      error: 'Idea Explorer not found. Install it: curl -fsSL https://raw.githubusercontent.com/ChicagoHAI/idea-explorer/main/install.sh | bash',
+      error: 'NeuriCo not found. Install it: curl -fsSL https://raw.githubusercontent.com/ChicagoHAI/neurico/main/install.sh | bash',
     };
   }
 
   // Step 1: Discover topic from Agent4Science
-  logger.info({ agentId: config.agentId }, 'Discovering research topic for Idea Explorer');
+  logger.info({ agentId: config.agentId }, 'Discovering research topic for NeuriCo');
   const topic = await discoverTopic(config.apiKey, config.llmApiKey, config.llmModel);
   logger.info({ topic }, 'Topic selected');
 
@@ -402,10 +402,10 @@ async function runIdeaExplorerFlow(config: ManagerAgentConfig): Promise<PaperGen
   fs.writeFileSync(yamlPath, ideaYaml);
   logger.info({ yamlPath }, 'Idea YAML written');
 
-  // Step 3: Run idea-explorer (submit + run via Docker)
-  const ieResult: IdeaExplorerResult = await runIdeaExplorer(iePath, {
+  // Step 3: Run NeuriCo (submit + run via Docker)
+  const ieResult: NeuricoResult = await runNeurico(iePath, {
     source: yamlPath,
-    provider: config.ideaExplorerProvider || 'claude',
+    provider: config.neuricoProvider || 'claude',
     autoRun: true,
   });
 
@@ -413,7 +413,7 @@ async function runIdeaExplorerFlow(config: ManagerAgentConfig): Promise<PaperGen
   try { fs.unlinkSync(yamlPath); } catch { /* ignore */ }
 
   if (!ieResult.success) {
-    return { success: false, error: ieResult.error || 'Idea Explorer run failed' };
+    return { success: false, error: ieResult.error || 'NeuriCo run failed' };
   }
 
   // Step 4: Summarize REPORT.md via LLM for a quality post
@@ -435,7 +435,7 @@ async function runIdeaExplorerFlow(config: ManagerAgentConfig): Promise<PaperGen
   try {
     sciencesubs = await client.getCachedSciencesubs(config.apiKey);
   } catch {
-    logger.debug('Failed to fetch sciencesubs for idea-explorer post tags');
+    logger.debug('Failed to fetch sciencesubs for NeuriCo post tags');
   }
 
   // If abstract is the full REPORT.md (long), use LLM to summarize
@@ -527,10 +527,10 @@ async function runIdeaExplorerFlow(config: ManagerAgentConfig): Promise<PaperGen
 
 /**
  * Check if an agent is due for paper generation and run it if so.
- * Called by the event loop on each tick for idea-explorer agents.
+ * Called by the event loop on each tick for NeuriCo agents.
  */
 export async function tickPaperGeneration(config: ManagerAgentConfig): Promise<PaperGenerationResult | null> {
-  if (config.capability !== 'idea-explorer') return null;
+  if (config.capability !== 'neurico') return null;
 
   const db = getDatabase();
   const genConfig = db.getPaperGenerationConfig(config.agentId);
@@ -563,7 +563,7 @@ export async function tickPaperGeneration(config: ManagerAgentConfig): Promise<P
   let result: PaperGenerationResult;
 
   try {
-    result = await runIdeaExplorerFlow(config);
+    result = await runNeuricoFlow(config);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     logger.error({ error: msg, agentId: config.agentId }, 'Paper generation failed');

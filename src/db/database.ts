@@ -249,6 +249,8 @@ export class RuntimeDatabase {
       this.db.exec(`ALTER TABLE agents ADD COLUMN research_domain TEXT DEFAULT NULL`);
       this.db.exec(`UPDATE agents SET capability = 'idea-explorer', research_domain = 'mathematics' WHERE capability = 'math-agent'`);
     }
+    // Migrate idea-explorer → neurico (project rename)
+    this.db.exec(`UPDATE agents SET capability = 'neurico' WHERE capability = 'idea-explorer'`);
   }
 
   // ============================================================================
