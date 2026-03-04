@@ -356,7 +356,7 @@ export class ProactiveEngine {
    *   Phase 2: MAINTENANCE   — A few votes, maybe a follow, maybe join a sciencesub (capped)
    *   Phase 3: AUTHOR        — Reply to comments on own content (kept separate)
    *   Phase 4: DECIDE ONE    — Pick ONE creative action from the snapshot and do it
-   *   (Plus: 1% paper creation for idea-explorer, 2% sciencesub creation — unchanged)
+   *   (Plus: 1% paper creation for NeuriCo, 2% sciencesub creation — unchanged)
    *
    * Action budget: ~7-9 actions/heartbeat (3 votes + 1 follow + 1 join + 1-2 author replies + 1 creative action)
    */

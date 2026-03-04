@@ -5,7 +5,7 @@
  * so agents can publish research papers to Agent4Science.
  *
  * Math Agent  – embedded in Flamebird runtime (see math-paper-generator.ts)
- * Idea Explorer – spawns the CLI subprocess, parses the resulting workspace
+ * NeuriCo     – spawns the CLI subprocess, parses the resulting workspace
  */
 
 import { spawn, execSync } from 'child_process';
@@ -19,13 +19,13 @@ import type { ApiResponse } from '../api/agent4science-client.js';
 
 const logger = createLogger('paper-tools');
 
-const DOCKER_IMAGE = 'chicagohai/idea-explorer:latest';
+const DOCKER_IMAGE = 'chicagohai/neurico:latest';
 
 // ============================================================================
 // Types
 // ============================================================================
 
-export interface IdeaExplorerParams {
+export interface NeuricoParams {
   /** Local YAML path for the idea */
   source: string;
   /** AI provider to use */
@@ -38,7 +38,7 @@ export interface IdeaExplorerParams {
   noGithub?: boolean;
 }
 
-export interface IdeaExplorerResult {
+export interface NeuricoResult {
   success: boolean;
   workDir?: string;
   githubUrl?: string;
@@ -67,15 +67,15 @@ export interface PublishPaperParams {
 }
 
 // ============================================================================
-// Idea Explorer Integration
+// NeuriCo Integration
 // ============================================================================
 
 /**
- * Build the common Docker args that mirror idea-explorer's docker/run.sh.
+ * Build the common Docker args that mirror NeuriCo's docker/run.sh.
  * We call docker directly (instead of the bash wrapper) to avoid the `-t`
  * TTY flag that breaks non-interactive spawning.
  */
-function buildDockerArgs(ideaExplorerPath: string): string[] {
+function buildDockerArgs(neuricoPath: string): string[] {
   const args: string[] = ['run', '-i', '--rm'];
 
   // User ID mapping (same as the wrapper's get_user_flags)
@@ -94,38 +94,38 @@ function buildDockerArgs(ideaExplorerPath: string): string[] {
   } catch { /* no GPU */ }
 
   // Environment file
-  const envFile = path.join(ideaExplorerPath, '.env');
+  const envFile = path.join(neuricoPath, '.env');
   if (fs.existsSync(envFile)) {
     args.push('--env-file', envFile);
   }
 
   // Workspace env var
-  args.push('-e', 'IDEA_EXPLORER_WORKSPACE=/workspaces');
+  args.push('-e', 'NEURICO_WORKSPACE=/workspaces');
 
   // Resolve workspace dir from config or default
-  const workspaceDir = resolveWorkspaceDir(ideaExplorerPath);
+  const workspaceDir = resolveWorkspaceDir(neuricoPath);
   fs.mkdirSync(workspaceDir, { recursive: true });
 
   // Standard volume mounts (mirrors docker/run.sh)
   args.push('-v', `${workspaceDir}:/workspaces`);
 
   // Ensure ideas subdirectories exist on the host so the container user can write to them
-  const ideasDir = path.join(ideaExplorerPath, 'ideas');
+  const ideasDir = path.join(neuricoPath, 'ideas');
   for (const sub of ['submitted', 'running', 'completed', 'failed']) {
     fs.mkdirSync(path.join(ideasDir, sub), { recursive: true });
   }
   args.push('-v', `${ideasDir}:/app/ideas`);
 
-  const logsDir = path.join(ideaExplorerPath, 'logs');
+  const logsDir = path.join(neuricoPath, 'logs');
   fs.mkdirSync(logsDir, { recursive: true });
   args.push('-v', `${logsDir}:/app/logs`);
 
-  const configDir = path.join(ideaExplorerPath, 'config');
+  const configDir = path.join(neuricoPath, 'config');
   if (fs.existsSync(configDir)) {
     args.push('-v', `${configDir}:/app/config:ro`);
   }
 
-  const templatesDir = path.join(ideaExplorerPath, 'templates');
+  const templatesDir = path.join(neuricoPath, 'templates');
   if (fs.existsSync(templatesDir)) {
     args.push('-v', `${templatesDir}:/app/templates:ro`);
   }
@@ -144,22 +144,22 @@ function buildDockerArgs(ideaExplorerPath: string): string[] {
   return args;
 }
 
-/** Resolve the workspace directory from idea-explorer's config. */
-function resolveWorkspaceDir(ideaExplorerPath: string): string {
+/** Resolve the workspace directory from NeuriCo's config. */
+function resolveWorkspaceDir(neuricoPath: string): string {
   // Try workspace.yaml, then workspace.yaml.example
   for (const fname of ['config/workspace.yaml', 'config/workspace.yaml.example']) {
-    const configPath = path.join(ideaExplorerPath, fname);
+    const configPath = path.join(neuricoPath, fname);
     if (fs.existsSync(configPath)) {
       const content = fs.readFileSync(configPath, 'utf-8');
       const match = content.match(/parent_dir:\s*["']?([^"'\n]+)/);
       if (match) {
         const dir = match[1].trim();
         if (path.isAbsolute(dir)) return dir;
-        return path.join(ideaExplorerPath, dir);
+        return path.join(neuricoPath, dir);
       }
     }
   }
-  return path.join(ideaExplorerPath, 'workspaces');
+  return path.join(neuricoPath, 'workspaces');
 }
 
 /**
@@ -202,17 +202,17 @@ function spawnDocker(
 }
 
 /**
- * Run Idea Explorer via Docker, using the two-step flow:
+ * Run NeuriCo via Docker, using the two-step flow:
  *   1. submit <yaml>  – registers the idea, creates GitHub repo
  *   2. run <idea_id>  – runs the research agent
  *
  * Calls docker directly (bypassing the bash wrapper) so we can omit the -t
  * flag that causes "not a TTY" errors when running as a daemon.
  */
-export async function runIdeaExplorer(
-  ideaExplorerPath: string,
-  params: IdeaExplorerParams,
-): Promise<IdeaExplorerResult> {
+export async function runNeurico(
+  neuricoPath: string,
+  params: NeuricoParams,
+): Promise<NeuricoResult> {
   const {
     source,
     provider = 'claude',
@@ -225,7 +225,7 @@ export async function runIdeaExplorer(
   try {
     execSync('docker info', { stdio: 'ignore' });
   } catch {
-    return { success: false, error: 'Docker is not available. idea-explorer requires Docker.' };
+    return { success: false, error: 'Docker is not available. NeuriCo requires Docker.' };
   }
 
   // Verify Docker image exists
@@ -234,14 +234,14 @@ export async function runIdeaExplorer(
   } catch {
     return {
       success: false,
-      error: `Docker image ${DOCKER_IMAGE} not found. Run: docker pull ghcr.io/chicagohai/idea-explorer:latest && docker tag ghcr.io/chicagohai/idea-explorer:latest ${DOCKER_IMAGE}`,
+      error: `Docker image ${DOCKER_IMAGE} not found. Run: docker pull ghcr.io/chicagohai/neurico:latest && docker tag ghcr.io/chicagohai/neurico:latest ${DOCKER_IMAGE}`,
     };
   }
 
-  const baseArgs = buildDockerArgs(ideaExplorerPath);
+  const baseArgs = buildDockerArgs(neuricoPath);
 
   // ── Step 1: Submit the idea YAML ──
-  logger.info({ source }, 'Submitting idea to Idea Explorer');
+  logger.info({ source }, 'Submitting idea to NeuriCo');
 
   const yamlDir = path.dirname(source);
   const yamlName = path.basename(source);
@@ -257,10 +257,10 @@ export async function runIdeaExplorer(
   const submitResult = await spawnDocker(submitArgs, 120_000); // 2 min for submit
 
   if (submitResult.code !== 0) {
-    logger.error({ code: submitResult.code }, 'Idea Explorer submit failed');
+    logger.error({ code: submitResult.code }, 'NeuriCo submit failed');
     return {
       success: false,
-      error: `idea-explorer submit failed (code ${submitResult.code}): ${submitResult.stderr.slice(-500)}`,
+      error: `NeuriCo submit failed (code ${submitResult.code}): ${submitResult.stderr.slice(-500)}`,
     };
   }
 
@@ -268,17 +268,17 @@ export async function runIdeaExplorer(
   const ideaId = parseIdeaId(submitResult.stdout);
   if (!ideaId) {
     // If we can't parse the ID, try to find the most recent idea in ideas/submitted/
-    const submittedDir = path.join(ideaExplorerPath, 'ideas', 'submitted');
+    const submittedDir = path.join(neuricoPath, 'ideas', 'submitted');
     const fallbackId = findLatestIdeaId(submittedDir);
     if (!fallbackId) {
       return {
         success: false,
-        error: 'Could not determine idea ID after submit. Check idea-explorer logs.',
+        error: 'Could not determine idea ID after submit. Check NeuriCo logs.',
       };
     }
     logger.info({ ideaId: fallbackId }, 'Found idea ID from submitted directory');
     return autoRun
-      ? runIdeaById(ideaExplorerPath, baseArgs, fallbackId, provider, writePaper, noGithub)
+      ? runIdeaById(neuricoPath, baseArgs, fallbackId, provider, writePaper, noGithub)
       : { success: true, title: fallbackId };
   }
 
@@ -289,19 +289,19 @@ export async function runIdeaExplorer(
   }
 
   // ── Step 2: Run the idea ──
-  return runIdeaById(ideaExplorerPath, baseArgs, ideaId, provider, writePaper, noGithub);
+  return runIdeaById(neuricoPath, baseArgs, ideaId, provider, writePaper, noGithub);
 }
 
 /** Run an already-submitted idea by its ID. */
 async function runIdeaById(
-  ideaExplorerPath: string,
+  neuricoPath: string,
   baseArgs: string[],
   ideaId: string,
   provider: string,
   writePaper: boolean,
   noGithub: boolean,
-): Promise<IdeaExplorerResult> {
-  logger.info({ ideaId, provider, writePaper }, 'Running Idea Explorer research agent');
+): Promise<NeuricoResult> {
+  logger.info({ ideaId, provider, writePaper }, 'Running NeuriCo research agent');
 
   const runArgs = [
     ...baseArgs,
@@ -313,19 +313,19 @@ async function runIdeaById(
   if (writePaper) runArgs.push('--write-paper');
   if (noGithub) runArgs.push('--no-github');
 
-  // No explicit timeout — let idea-explorer run to completion
+  // No explicit timeout — let NeuriCo run to completion
   // Use a generous 6-hour cap to prevent zombie processes
   const runResult = await spawnDocker(runArgs, 6 * 3600 * 1000);
 
   if (runResult.code !== 0 && runResult.code !== null) {
-    logger.error({ code: runResult.code }, 'Idea Explorer run failed');
+    logger.error({ code: runResult.code }, 'NeuriCo run failed');
     return {
       success: false,
-      error: `idea-explorer run failed (code ${runResult.code}): ${runResult.stderr.slice(-500)}`,
+      error: `NeuriCo run failed (code ${runResult.code}): ${runResult.stderr.slice(-500)}`,
     };
   }
 
-  return parseIdeaExplorerOutput(runResult.stdout, ideaExplorerPath);
+  return parseNeuricoOutput(runResult.stdout, neuricoPath);
 }
 
 /** Parse the idea ID from submit.py output. */
@@ -358,7 +358,7 @@ function findLatestIdeaId(submittedDir: string): string | null {
 }
 
 /**
- * Parse Idea Explorer output and workspace files to extract paper metadata.
+ * Parse NeuriCo output and workspace files to extract paper metadata.
  *
  * The runner outputs container paths (e.g. /workspaces/...) so we translate
  * them to host paths using the workspace mount point.
@@ -369,7 +369,7 @@ function findLatestIdeaId(submittedDir: string): string | null {
  *      but earlier output from resource_finder may contain unrelated GitHub URLs
  *      from paper abstracts / search results)
  */
-function parseIdeaExplorerOutput(stdout: string, basePath: string): IdeaExplorerResult {
+function parseNeuricoOutput(stdout: string, basePath: string): NeuricoResult {
   // Look for workspace location (container path like /workspaces/<name>)
   const locationMatch = stdout.match(/Location:\s*(.+)/);
   const containerWorkDir = locationMatch?.[1]?.trim();
@@ -401,7 +401,7 @@ function parseIdeaExplorerOutput(stdout: string, basePath: string): IdeaExplorer
     logger.info({ hostWorkDir }, 'Reading workspace files');
 
     // ── idea.yaml — primary source for GitHub URL, title, domain ──
-    const ideaYamlPath = path.join(hostWorkDir, '.idea-explorer', 'idea.yaml');
+    const ideaYamlPath = path.join(hostWorkDir, '.neurico', 'idea.yaml');
     if (fs.existsSync(ideaYamlPath)) {
       try {
         const ideaContent = fs.readFileSync(ideaYamlPath, 'utf-8');
@@ -476,7 +476,7 @@ function parseIdeaExplorerOutput(stdout: string, basePath: string): IdeaExplorer
   if (!hostWorkDir && !githubUrl) {
     return {
       success: false,
-      error: 'Could not find workspace or GitHub URL in idea-explorer output',
+      error: 'Could not find workspace or GitHub URL in NeuriCo output',
     };
   }
 
@@ -508,8 +508,8 @@ function extractLastGithubUrl(stdout: string): string | undefined {
   let lastUrl: string | undefined;
   for (const pattern of patterns) {
     for (const match of stdout.matchAll(pattern)) {
-      // Skip the ChicagoHAI/idea-explorer boilerplate URL
-      if (match[1] && !match[1].includes('ChicagoHAI/idea-explorer')) {
+      // Skip the ChicagoHAI/NeuriCo boilerplate URL
+      if (match[1] && !match[1].includes('ChicagoHAI/NeuriCo')) {
         lastUrl = match[1];
       }
     }
@@ -630,7 +630,7 @@ function extractYamlField(content: string, field: string): string | undefined {
 
 /**
  * Publish a paper to Agent4Science using the existing Agent4ScienceClient.
- * This is the final step after either Math Agent or Idea Explorer produces results.
+ * This is the final step after either Math Agent or NeuriCo produces results.
  */
 export async function publishPaperToAgent4Science(
   apiKey: string,
@@ -645,32 +645,32 @@ export async function publishPaperToAgent4Science(
 // Path Resolution
 // ============================================================================
 
-/** Resolve the idea-explorer installation path from env or defaults. */
-export function resolveIdeaExplorerPath(): string | null {
-  /** Check if a directory looks like an idea-explorer installation. */
-  const isIdeaExplorerDir = (dir: string) =>
+/** Resolve the NeuriCo installation path from env or defaults. */
+export function resolveNeuricoPath(): string | null {
+  /** Check if a directory looks like a NeuriCo installation. */
+  const isNeuricoDir = (dir: string) =>
     fs.existsSync(path.join(dir, 'pyproject.toml')) &&
     fs.existsSync(path.join(dir, 'src', 'core', 'runner.py'));
 
   // Check env var first
-  if (process.env.IDEA_EXPLORER_PATH) {
-    const p = process.env.IDEA_EXPLORER_PATH;
-    // Direct path to idea-explorer dir (preferred)
-    if (isIdeaExplorerDir(p)) return p;
-    // Parent dir containing idea-explorer/ subdir (backward compat)
-    const sub = path.join(p, 'idea-explorer');
-    if (isIdeaExplorerDir(sub)) return sub;
+  if (process.env.NEURICO_PATH) {
+    const p = process.env.NEURICO_PATH;
+    // Direct path to NeuriCo dir (preferred)
+    if (isNeuricoDir(p)) return p;
+    // Parent dir containing neurico/ subdir (backward compat)
+    const sub = path.join(p, 'neurico');
+    if (isNeuricoDir(sub)) return sub;
   }
 
   // Common locations
   const candidates = [
-    path.join(process.env.HOME || '', 'idea-explorer'),
-    path.join(process.cwd(), 'idea-explorer'),
-    path.join(process.cwd(), '..', 'idea-explorer'),
+    path.join(process.env.HOME || '', 'neurico'),
+    path.join(process.cwd(), 'neurico'),
+    path.join(process.cwd(), '..', 'neurico'),
   ];
 
   for (const p of candidates) {
-    if (isIdeaExplorerDir(p)) return p;
+    if (isNeuricoDir(p)) return p;
   }
 
   return null;

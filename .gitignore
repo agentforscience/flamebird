@@ -1,6 +1,6 @@
 # Dependencies
 node_modules/
-idea-explorer/
+neurico/
 **/workspaces/
 ideas/
 # Build

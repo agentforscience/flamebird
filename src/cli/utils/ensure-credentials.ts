@@ -4,7 +4,7 @@
  * Checks that the runtime .env has all credentials needed for a given agent tier,
  * prompts the user for anything missing, and persists to .env.
  *
- * Also handles idea-explorer installation and credential sync.
+ * Also handles NeuriCo installation and credential sync.
  */
 
 import chalk from 'chalk';
@@ -97,34 +97,34 @@ function generateEncryptionKey(): string {
 }
 
 // ============================================================================
-// Idea Explorer
+// NeuriCo
 // ============================================================================
 
 /**
- * Find or install idea-explorer.
+ * Find or install NeuriCo.
  * Returns the installation path, or null if the user declines.
  */
-export async function ensureIdeaExplorer(): Promise<string | null> {
+export async function ensureNeurico(): Promise<string | null> {
   // Check common paths
   const candidates = [
-    process.env.IDEA_EXPLORER_PATH || '',
-    path.join(getFlamebirdHome(), 'idea-explorer'),
-    path.resolve(process.env.HOME || '~', 'idea-explorer'),
-    path.resolve('.', 'idea-explorer'),
-    path.resolve('..', 'idea-explorer'),
+    process.env.NEURICO_PATH || '',
+    path.join(getFlamebirdHome(), 'neurico'),
+    path.resolve(process.env.HOME || '~', 'neurico'),
+    path.resolve('.', 'neurico'),
+    path.resolve('..', 'neurico'),
   ].filter(Boolean);
 
-  const isIdeaExplorerDir = (dir: string) =>
+  const isNeuricoDir = (dir: string) =>
     fs.existsSync(path.join(dir, 'pyproject.toml')) &&
     fs.existsSync(path.join(dir, 'src', 'core', 'runner.py'));
 
   for (const p of candidates) {
-    // Check if p itself is idea-explorer, or if p/idea-explorer is
-    const resolved = isIdeaExplorerDir(p) ? p
-      : isIdeaExplorerDir(path.join(p, 'idea-explorer')) ? path.join(p, 'idea-explorer')
+    // Check if p itself is NeuriCo, or if p/neurico is
+    const resolved = isNeuricoDir(p) ? p
+      : isNeuricoDir(path.join(p, 'neurico')) ? path.join(p, 'neurico')
       : null;
     if (resolved) {
-      console.log(chalk.green(`    Found idea-explorer at ${resolved}`));
+      console.log(chalk.green(`    Found NeuriCo at ${resolved}`));
       const { useExisting } = await inquirer.prompt<{ useExisting: boolean }>([{
         type: 'confirm',
         name: 'useExisting',
@@ -140,30 +140,30 @@ export async function ensureIdeaExplorer(): Promise<string | null> {
   const { install } = await inquirer.prompt<{ install: boolean }>([{
     type: 'confirm',
     name: 'install',
-    message: 'Idea Explorer is not installed. Install it now?',
+    message: 'NeuriCo is not installed. Install it now?',
     prefix: '    ',
     default: true,
   }]);
 
   if (!install) {
     console.log(chalk.yellow('    Skipping. You can install later with:'));
-    console.log(chalk.cyan('    curl -fsSL https://raw.githubusercontent.com/ChicagoHAI/idea-explorer/main/install.sh | bash'));
+    console.log(chalk.cyan('    curl -fsSL https://raw.githubusercontent.com/ChicagoHAI/neurico/main/install.sh | bash'));
     return null;
   }
 
-  console.log(chalk.gray('\n    Running idea-explorer installer...\n'));
+  console.log(chalk.gray('\n    Running NeuriCo installer...\n'));
 
   // Run the one-liner installer with inherited stdio so the user sees
   // the full interactive setup (Docker pull, CLI login, etc.)
-  spawnSync('bash', ['-c', 'curl -fsSL https://raw.githubusercontent.com/ChicagoHAI/idea-explorer/main/install.sh | bash'], {
+  spawnSync('bash', ['-c', 'curl -fsSL https://raw.githubusercontent.com/ChicagoHAI/neurico/main/install.sh | bash'], {
     stdio: 'inherit',
     timeout: 600000, // 10 minutes
   });
 
   // Check if it was installed
-  const homePath = path.resolve(process.env.HOME || '~', 'idea-explorer');
-  if (isIdeaExplorerDir(homePath)) {
-    console.log(chalk.green(`\n    Idea Explorer installed at ${homePath}`));
+  const homePath = path.resolve(process.env.HOME || '~', 'neurico');
+  if (isNeuricoDir(homePath)) {
+    console.log(chalk.green(`\n    NeuriCo installed at ${homePath}`));
     return homePath;
   }
 
@@ -171,7 +171,7 @@ export async function ensureIdeaExplorer(): Promise<string | null> {
   const { iePath } = await inquirer.prompt<{ iePath: string }>([{
     type: 'input',
     name: 'iePath',
-    message: 'Where was idea-explorer installed?',
+    message: 'Where was NeuriCo installed?',
     prefix: '    ',
     default: homePath,
   }]);
@@ -179,14 +179,14 @@ export async function ensureIdeaExplorer(): Promise<string | null> {
 }
 
 /**
- * Sync credentials from the runtime .env to idea-explorer's .env.
- * Merges without overwriting existing values in idea-explorer's .env.
+ * Sync credentials from the runtime .env to NeuriCo's .env.
+ * Merges without overwriting existing values in NeuriCo's .env.
  */
-export function syncCredentialsToIdeaExplorer(ideaExplorerPath: string): void {
+export function syncCredentialsToNeurico(neuricoPath: string): void {
   const runtimeEnv = readEnvFile(getConfigPath());
-  const ieEnvPath = path.join(ideaExplorerPath, '.env');
+  const ieEnvPath = path.join(neuricoPath, '.env');
 
-  // Keys to sync from runtime → idea-explorer
+  // Keys to sync from runtime → NeuriCo
   const keysToSync = [
     'GITHUB_TOKEN',
     'GITHUB_ORG',
@@ -239,8 +239,8 @@ export async function ensureCredentials(tier: AgentCapability): Promise<boolean>
     process.env.ENCRYPTION_KEY = key;
   }
 
-  // 2. GitHub token (idea-explorer)
-  if (tier === 'idea-explorer') {
+  // 2. GitHub token (NeuriCo)
+  if (tier === 'neurico') {
     if (!env.GITHUB_TOKEN && !process.env.GITHUB_TOKEN) {
       console.log(chalk.gray('\n    GitHub token is needed to push generated paper repos.'));
       console.log(chalk.gray('    Create one at: https://github.com/settings/tokens (repo scope)\n'));
@@ -270,21 +270,21 @@ export async function ensureCredentials(tier: AgentCapability): Promise<boolean>
     }
   }
 
-  // 3. Idea Explorer (idea-explorer tier only)
-  if (tier === 'idea-explorer') {
-    if (!env.IDEA_EXPLORER_PATH && !process.env.IDEA_EXPLORER_PATH) {
-      const iePath = await ensureIdeaExplorer();
+  // 3. NeuriCo (neurico tier only)
+  if (tier === 'neurico') {
+    if (!env.NEURICO_PATH && !process.env.NEURICO_PATH) {
+      const iePath = await ensureNeurico();
       if (iePath) {
-        varsToAdd.IDEA_EXPLORER_PATH = iePath;
-        process.env.IDEA_EXPLORER_PATH = iePath;
+        varsToAdd.NEURICO_PATH = iePath;
+        process.env.NEURICO_PATH = iePath;
       }
     }
 
-    if (!env.IDEA_EXPLORER_PROVIDER && !process.env.IDEA_EXPLORER_PROVIDER) {
+    if (!env.NEURICO_PROVIDER && !process.env.NEURICO_PROVIDER) {
       const { provider } = await inquirer.prompt<{ provider: string }>([{
         type: 'list',
         name: 'provider',
-        message: 'AI provider for Idea Explorer:',
+        message: 'AI provider for NeuriCo:',
         prefix: '    ',
         choices: [
           { name: 'Claude (Anthropic)', value: 'claude' },
@@ -292,8 +292,8 @@ export async function ensureCredentials(tier: AgentCapability): Promise<boolean>
           { name: 'Gemini (Google)', value: 'gemini' },
         ],
       }]);
-      varsToAdd.IDEA_EXPLORER_PROVIDER = provider;
-      process.env.IDEA_EXPLORER_PROVIDER = provider;
+      varsToAdd.NEURICO_PROVIDER = provider;
+      process.env.NEURICO_PROVIDER = provider;
     }
   }
 
@@ -307,11 +307,11 @@ export async function ensureCredentials(tier: AgentCapability): Promise<boolean>
     console.log(chalk.green('    Credentials saved to .env'));
   }
 
-  // Sync to idea-explorer if applicable
-  if (tier === 'idea-explorer') {
-    const iePath = process.env.IDEA_EXPLORER_PATH;
+  // Sync to NeuriCo if applicable
+  if (tier === 'neurico') {
+    const iePath = process.env.NEURICO_PATH;
     if (iePath && fs.existsSync(iePath)) {
-      syncCredentialsToIdeaExplorer(iePath);
+      syncCredentialsToNeurico(iePath);
     }
   }
 
