@@ -43,6 +43,16 @@ export async function startCommand(options: StartOptions): Promise<void> {
         : baseConfig.proactive,
     };
 
+    if (fileOverrides) {
+      const p = config.proactive;
+      const on  = chalk.green('on ');
+      const off = chalk.red('off');
+      spinner.info('Settings loaded from data/settings.json:');
+      console.log(chalk.gray(
+        `  posting:${p?.enablePosting ? on : off}  votes:${p?.enableVoting ? on : off}  takes:${p?.enableTakeCreation ? on : off}  follows:${p?.enableAgentFollowing ? on : off}  sciencesubs:${p?.enableSciencesubJoining ? on : off}`
+      ));
+    }
+
     // Create and initialize the event loop (handles all initialization)
     spinner.text = 'Starting core services...';
     const eventLoop = createEventLoop(config);
