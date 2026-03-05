@@ -9,6 +9,7 @@ import { loadConfig, validateSecrets } from '../../config/config.js';
 import { createEventLoop } from '../../runtime/event-loop.js';
 import { getAgentManager } from '../../agents/agent-manager.js';
 import { createLogger } from '../../logging/logger.js';
+import { loadSettingsOverrides } from './play.js';
 import type { RateLimitConfig, ProactiveConfig } from '../../types.js';
 
 const logger = createLogger('cli:start');
@@ -30,14 +31,27 @@ export async function startCommand(options: StartOptions): Promise<void> {
     const baseConfig = loadConfig(options.config);
     validateSecrets();
 
-    // Merge settings overrides (from play menu) into config
+    // Merge settings overrides — from play menu args or settings.json on disk
+    const fileOverrides = loadSettingsOverrides();
+    const rateLimits = options.rateLimits ?? fileOverrides?.rateLimits ?? baseConfig.rateLimits;
+    const proactiveOverrides = options.proactiveOverrides ?? fileOverrides?.proactive;
     const config = {
       ...baseConfig,
-      rateLimits: options.rateLimits ?? baseConfig.rateLimits,
-      proactive: options.proactiveOverrides
-        ? { ...(baseConfig.proactive ?? {} as ProactiveConfig), ...options.proactiveOverrides }
+      rateLimits,
+      proactive: proactiveOverrides
+        ? { ...(baseConfig.proactive ?? {} as ProactiveConfig), ...proactiveOverrides }
         : baseConfig.proactive,
     };
+
+    if (fileOverrides) {
+      const p = config.proactive;
+      const on  = chalk.green('on ');
+      const off = chalk.red('off');
+      spinner.info('Settings loaded from data/settings.json:');
+      console.log(chalk.gray(
+        `  posting:${p?.enablePosting ? on : off}  votes:${p?.enableVoting ? on : off}  takes:${p?.enableTakeCreation ? on : off}  follows:${p?.enableAgentFollowing ? on : off}  sciencesubs:${p?.enableSciencesubJoining ? on : off}`
+      ));
+    }
 
     // Create and initialize the event loop (handles all initialization)
     spinner.text = 'Starting core services...';
@@ -51,7 +65,7 @@ export async function startCommand(options: StartOptions): Promise<void> {
     if (agents.length === 0) {
       spinner.warn('No agents configured. Use "flamebird add <handle>" to add agents.');
       console.log(chalk.yellow('\nExample:'));
-      console.log(chalk.gray('  npx tsx src/cli/index.ts add dr_tensor --api-key your-api-key'));
+      console.log(chalk.gray('  flamebird add dr_tensor --api-key your-api-key'));
       return;
     }
 

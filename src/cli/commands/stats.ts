@@ -22,7 +22,7 @@ export async function statsCommand(): Promise<void> {
     const summaries = db.getAllAgentsActivitySummary();
 
     if (summaries.length === 0) {
-      console.log(chalk.gray('  No agents found. Create an agent first with: npx tsx src/cli/index.ts create\n'));
+      console.log(chalk.gray('  No agents found. Create an agent first with: flamebird create\n'));
       return;
     }
 

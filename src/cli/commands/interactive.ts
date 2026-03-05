@@ -42,7 +42,7 @@ export async function interactiveCommand(): Promise<void> {
 
     const agentIds = manager.getAgentIds();
     if (agentIds.length === 0) {
-      console.log(chalk.yellow('No agents configured. Add one first with "npx tsx src/cli/index.ts add <handle>"'));
+      console.log(chalk.yellow('No agents configured. Add one first with "flamebird add <handle>"'));
       return;
     }
 

@@ -985,9 +985,8 @@ async function showHelp(): Promise<void> {
     ${chalk.gray('─────────────────────────────────────────────────────────────')}
 
     Just run the CLI with no arguments to see this menu:
-    ${chalk.cyan('npx tsx src/cli/index.ts')}
+    ${chalk.cyan('flamebird')}
 
-    Or use ${chalk.cyan('npx tsx src/cli/index.ts play')} for the same thing.
 
 
     ${chalk.bold.cyan('ALL COMMANDS')}
@@ -1033,13 +1032,13 @@ async function showHelp(): Promise<void> {
     ${chalk.gray('─────────────────────────────────────────────────────────────')}
 
     ${chalk.gray('# Create your first agent')}
-    ${chalk.cyan('npx tsx src/cli/index.ts create')}
+    ${chalk.cyan('flamebird create')}
 
     ${chalk.gray('# Run Ultimate Daemon in background')}
-    ${chalk.cyan('nohup npx tsx src/cli/index.ts community --daemon > daemon.log 2>&1 &')}
+    ${chalk.cyan('nohup flamebird community --daemon > daemon.log 2>&1 &')}
 
     ${chalk.gray('# Quick chaos burst')}
-    ${chalk.cyan('npx tsx src/cli/index.ts community --chaos')}
+    ${chalk.cyan('flamebird community --chaos')}
 
     ${chalk.gray('# Check logs')}
     ${chalk.cyan('tail -f daemon.log')}
@@ -1629,9 +1628,14 @@ export function loadSettingsOverrides(): SettingsOverrides | null {
   // Keys must match SINGLE_ACTION_WEIGHTS in proactive-engine.ts:
   //   comment_paper, comment_take, comment_review, reply, take_on_paper, review, standalone_take
   // User-facing categories are mapped to these specific action keys.
+  const ea = settings.enabledActivities;
   const w = settings.activityWeights;
-  const commentWeight = w.comment ?? 25;
-  const takeWeight = w.take ?? 10;
+  // Zero out weights for disabled activities so the engine never picks them
+  const commentWeight = ea.comments !== false ? (w.comment ?? 25) : 0;
+  const takeWeight = ea.takes !== false ? (w.take ?? 10) : 0;
+  // Scale review proportionally to maintain its natural ~6% share (matching SINGLE_ACTION_WEIGHTS).
+  // Using a fixed value like 10 would dominate when comment/take sliders are low.
+  const baseWeight = (commentWeight + takeWeight) || 1;
   const raw: Record<string, number> = {
     // "comment" distributes across comment subtypes and reply
     comment_paper:   commentWeight * 0.22,   // 22% of comment weight
@@ -1641,21 +1645,24 @@ export function loadSettingsOverrides(): SettingsOverrides | null {
     // "take" distributes across paper-linked and standalone takes
     take_on_paper:   takeWeight * 0.42,      // 42% of take weight
     standalone_take: takeWeight * 0.58,      // 58% of take weight
-    review: 10,
+    // review scales with baseWeight so it stays ~6% regardless of slider values
+    review:          baseWeight * (6 / 94),
   };
   const total = Object.values(raw).reduce((a, b) => a + b, 0);
   const actionWeights: Record<string, number> = {};
   for (const [k, v] of Object.entries(raw)) actionWeights[k] = total > 0 ? v / total : 0;
 
   // Convert enabledActivities → ProactiveConfig flags
-  const ea = settings.enabledActivities;
+  // Note: ea.papers is intentionally excluded from enablePosting — neurico paper generation
+  // runs independently and never checks this flag, so papers always post regardless.
+  // enablePosting only gates comments/takes in the proactive engine and notification handler.
   const proactive: Partial<ProactiveConfig> = {
     enableVoting: ea.votes ?? true,
     enableAgentFollowing: ea.follows ?? true,
     enableSciencesubJoining: ea.sciencesubs ?? true,
     enableSciencesubCreation: ea.sciencesubs ?? true,
     enableTakeCreation: ea.takes ?? true,
-    enablePosting: (ea.papers || ea.comments || ea.takes) ?? true,
+    enablePosting: (ea.comments || ea.takes) ?? true,
     actionWeights,
   };
 

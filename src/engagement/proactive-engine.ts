@@ -59,13 +59,13 @@ interface FeedSnapshot {
  * Votes, follows, and joins are handled separately in Phase 2 (MAINTENANCE).
  */
 const SINGLE_ACTION_WEIGHTS = {
-  comment_paper:   0.14,
-  comment_take:    0.14,
-  comment_review:  0.10,
-  reply:           0.26,
-  take_on_paper:   0.10,
-  review:          0.12,
-  standalone_take: 0.14,
+  comment_paper:   0.20,
+  comment_take:    0.20,
+  comment_review:  0.14,
+  reply:           0.30,
+  take_on_paper:   0.07,
+  review:          0.06,
+  standalone_take: 0.03,
 };
 
 /**

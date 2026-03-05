@@ -531,8 +531,28 @@ export class EventLoop {
         const apiKey = manager.getApiKey(agentId);
 
         if (apiKey) {
-          // 1. Fetch the root content (paper or take) for broader context
-          const rootId = notification.paperId || notification.takeId || notification.targetId;
+          // Resolve the triggering comment ID — may come from commentId or targetId
+          const commentId = notification.commentId ||
+            (notification.targetType === 'comment' ? notification.targetId : undefined);
+
+          // 1. Directly fetch the triggering comment to get its body and rootId
+          let commentRootId: string | undefined;
+          if (commentId) {
+            try {
+              const commentResult = await client.getComment(commentId, apiKey);
+              if (commentResult.success && commentResult.data) {
+                targetContent = commentResult.data.body || targetContent;
+                commentRootId = commentResult.data.rootId;
+              }
+            } catch (commentErr) {
+              logger.debug({ err: commentErr, agentId, commentId }, 'Failed to fetch comment for notification');
+            }
+          }
+
+          // 2. Fetch the root content (paper or take) for broader context
+          const rootId = notification.paperId || notification.takeId ||
+            (notification.targetType !== 'comment' ? notification.targetId : undefined) ||
+            commentRootId;
           if (rootId) {
             if (notification.paperId || notification.targetType === 'paper') {
               const paperResult = await client.getPaper(notification.paperId || rootId, apiKey);
@@ -544,48 +564,65 @@ export class EventLoop {
               if (takeResult.success && takeResult.data) {
                 parentContent = `${takeResult.data.title}\n\n${takeResult.data.hotTake || takeResult.data.summary?.join(' ') || ''}`;
               }
+            } else if (commentRootId) {
+              // Root type unknown — try paper first, then take
+              const paperResult = await client.getPaper(commentRootId, apiKey);
+              if (paperResult.success && paperResult.data) {
+                parentContent = `${paperResult.data.title}\n\n${paperResult.data.tldr || paperResult.data.abstract || ''}`;
+              } else {
+                const takeResult = await client.getTake(commentRootId, apiKey);
+                if (takeResult.success && takeResult.data) {
+                  parentContent = `${takeResult.data.title}\n\n${takeResult.data.hotTake || takeResult.data.summary?.join(' ') || ''}`;
+                }
+              }
             }
 
-            // 2. Fetch thread context — the conversation leading up to this comment
-            if (notification.commentId) {
-              try {
-                const threadResult = await client.getThread(rootId, apiKey);
-                if (threadResult.success && threadResult.data) {
-                  const allComments = (threadResult.data as any).comments || [];
+            // 3. Fetch thread — use for conversation chain AND as fallback when commentId is unknown
+            try {
+              const threadRootId = commentRootId || rootId;
+              const threadResult = await client.getThread(threadRootId, apiKey);
+              if (threadResult.success && threadResult.data) {
+                const allComments = (threadResult.data as any).comments || [];
 
-                  // Build parent chain from commentId upwards (oldest first)
+                // Resolve the triggering comment — exact match first, then heuristic
+                let triggeringId = commentId;
+                if (!triggeringId && notification.fromAgentId && allComments.length > 0) {
+                  // Find the most recent comment from the sender, closest to notification time
+                  const notifTime = new Date(notification.createdAt).getTime();
+                  const candidate = (allComments as any[])
+                    .filter((c: any) => c.agentId === notification.fromAgentId)
+                    .sort((a: any, b: any) =>
+                      Math.abs(new Date(a.createdAt).getTime() - notifTime) -
+                      Math.abs(new Date(b.createdAt).getTime() - notifTime)
+                    )[0];
+                  if (candidate) {
+                    triggeringId = candidate.id;
+                    targetContent = candidate.body || targetContent;
+                  }
+                }
+
+                // Build parent chain from triggeringId upwards (oldest first)
+                if (triggeringId) {
                   const chain: string[] = [];
-                  let currentId: string | undefined = notification.commentId;
+                  let currentId: string | undefined = triggeringId;
                   let depth = 0;
-
                   while (currentId && depth < 5) {
                     const comment = allComments.find((c: any) => c.id === currentId);
                     if (!comment) break;
-
                     const handle = comment.agent?.handle || comment.agentId || 'Agent';
                     chain.unshift(`@${handle}: "${comment.body}"`);
-
-                    // The comment being replied to is the first one (notification.commentId)
-                    if (depth === 0) {
-                      targetContent = comment.body || targetContent;
-                    }
-
                     currentId = comment.parentId || undefined;
                     depth++;
                   }
-
-                  if (chain.length > 1) {
-                    threadContext = chain.join('\n\n');
-                  }
+                  if (chain.length > 1) threadContext = chain.join('\n\n');
                 }
-              } catch (threadErr) {
-                logger.debug({ err: threadErr, agentId, rootId }, 'Failed to fetch thread context for notification');
               }
+            } catch (threadErr) {
+              logger.debug({ err: threadErr, agentId, rootId }, 'Failed to fetch thread context for notification');
             }
           }
 
-          // 3. If no commentId or thread fetch failed, try to at least get the comment body
-          if (!notification.commentId && targetContent === notification.message) {
+          if (!commentId && targetContent === notification.message) {
             logger.warn({ agentId, notificationType: notification.type },
               'Notification missing commentId — responding with limited context');
           }

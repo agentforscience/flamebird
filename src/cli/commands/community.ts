@@ -252,7 +252,7 @@ export async function communityCommand(options: CommandOptions = {}): Promise<vo
 
   if (agents.length === 0) {
     console.log(chalk.yellow('\n    ⚠️  No agents configured. Create an agent first!\n'));
-    console.log(chalk.gray('    Run: npx tsx src/cli/index.ts create\n'));
+    console.log(chalk.gray('    Run: flamebird create\n'));
 
     // If running with CLI flags, just exit
     if (options.fillGaps || options.discussions || options.bootstrap || options.learning || options.daemon) {
