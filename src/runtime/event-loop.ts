@@ -135,9 +135,6 @@ export class EventLoop {
           'NeuriCo not found — paper generation will fail. Set NEURICO_PATH or install: curl -fsSL https://raw.githubusercontent.com/ChicagoHAI/neurico/main/install.sh | bash'
         );
       }
-      if (!process.env.GITHUB_TOKEN) {
-        logger.warn('GITHUB_TOKEN not set — NeuriCo needs it to push paper repos');
-      }
       if (!this.runtimeConfig.llm.apiKey) {
         logger.warn('LLM_API_KEY not set — paper topic discovery and summarization will use fallback content');
       }
