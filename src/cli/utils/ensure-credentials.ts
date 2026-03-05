@@ -239,7 +239,50 @@ export async function ensureCredentials(tier: AgentCapability): Promise<boolean>
     process.env.ENCRYPTION_KEY = key;
   }
 
-  // 2. GitHub token (NeuriCo)
+  // 2. NeuriCo installation (neurico tier only — do this first so we can
+  //    pick up GitHub credentials that neurico install already collected)
+  if (tier === 'neurico') {
+    if (!env.NEURICO_PATH && !process.env.NEURICO_PATH) {
+      const iePath = await ensureNeurico();
+      if (iePath) {
+        varsToAdd.NEURICO_PATH = iePath;
+        process.env.NEURICO_PATH = iePath;
+
+        // Import GitHub credentials from neurico/.env if available
+        // (neurico install already prompts for these)
+        const ieEnvPath = path.join(iePath, '.env');
+        if (fs.existsSync(ieEnvPath)) {
+          const ieEnv = readEnvFile(ieEnvPath);
+          if (ieEnv.GITHUB_TOKEN && !env.GITHUB_TOKEN && !process.env.GITHUB_TOKEN) {
+            varsToAdd.GITHUB_TOKEN = ieEnv.GITHUB_TOKEN;
+            process.env.GITHUB_TOKEN = ieEnv.GITHUB_TOKEN;
+          }
+          if (ieEnv.GITHUB_ORG && !env.GITHUB_ORG && !process.env.GITHUB_ORG) {
+            varsToAdd.GITHUB_ORG = ieEnv.GITHUB_ORG;
+            process.env.GITHUB_ORG = ieEnv.GITHUB_ORG;
+          }
+        }
+      }
+    }
+
+    if (!env.NEURICO_PROVIDER && !process.env.NEURICO_PROVIDER) {
+      const { provider } = await inquirer.prompt<{ provider: string }>([{
+        type: 'list',
+        name: 'provider',
+        message: 'AI provider for NeuriCo:',
+        prefix: '    ',
+        choices: [
+          { name: 'Claude (Anthropic)', value: 'claude' },
+          { name: 'Codex (OpenAI)', value: 'codex' },
+          { name: 'Gemini (Google)', value: 'gemini' },
+        ],
+      }]);
+      varsToAdd.NEURICO_PROVIDER = provider;
+      process.env.NEURICO_PROVIDER = provider;
+    }
+  }
+
+  // 3. GitHub token (NeuriCo — only prompt if not already set by neurico install)
   if (tier === 'neurico') {
     if (!env.GITHUB_TOKEN && !process.env.GITHUB_TOKEN) {
       console.log(chalk.gray('\n    GitHub token is needed to push generated paper repos.'));
@@ -267,33 +310,6 @@ export async function ensureCredentials(tier: AgentCapability): Promise<boolean>
         varsToAdd.GITHUB_ORG = githubOrg;
         process.env.GITHUB_ORG = githubOrg;
       }
-    }
-  }
-
-  // 3. NeuriCo (neurico tier only)
-  if (tier === 'neurico') {
-    if (!env.NEURICO_PATH && !process.env.NEURICO_PATH) {
-      const iePath = await ensureNeurico();
-      if (iePath) {
-        varsToAdd.NEURICO_PATH = iePath;
-        process.env.NEURICO_PATH = iePath;
-      }
-    }
-
-    if (!env.NEURICO_PROVIDER && !process.env.NEURICO_PROVIDER) {
-      const { provider } = await inquirer.prompt<{ provider: string }>([{
-        type: 'list',
-        name: 'provider',
-        message: 'AI provider for NeuriCo:',
-        prefix: '    ',
-        choices: [
-          { name: 'Claude (Anthropic)', value: 'claude' },
-          { name: 'Codex (OpenAI)', value: 'codex' },
-          { name: 'Gemini (Google)', value: 'gemini' },
-        ],
-      }]);
-      varsToAdd.NEURICO_PROVIDER = provider;
-      process.env.NEURICO_PROVIDER = provider;
     }
   }
 

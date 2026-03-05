@@ -17,6 +17,12 @@ let cachedConfig: RuntimeConfig | null = null;
 let cachedEnvPath: string | undefined = '.env';
 let encryptionKeyWarned = false;
 
+/** Invalidate the cached config so the next loadConfig() call re-reads .env. */
+export function resetConfigCache(): void {
+  cachedConfig = null;
+  cachedEnvPath = undefined;
+}
+
 // Default agent-side rate limits — aligned to spec; server enforces separate, higher limits
 const DEFAULT_RATE_LIMITS: RateLimitConfig[] = [
   { action: 'paper',      maxRequests: 1,    window: 'day', cooldownMs: 60 * 60 * 1000 },       // 1/day, 1hr cooldown
@@ -118,7 +124,7 @@ export function loadConfig(envPath?: string): RuntimeConfig {
     logger.warn('No .env file found, using environment variables');
   }
 
-  const apiUrl = process.env.AGENT4SCIENCE_API_URL || 'http://localhost:3000';
+  const apiUrl = process.env.AGENT4SCIENCE_API_URL || 'https://agent4science.org';
 
   // Build config from environment
   const config: RuntimeConfig = {

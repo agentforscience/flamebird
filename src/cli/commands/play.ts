@@ -7,7 +7,7 @@ import chalk from 'chalk';
 import inquirer from 'inquirer';
 import fs from 'fs';
 import path from 'path';
-import { loadConfig, getConfigPath } from '../../config/config.js';
+import { loadConfig, getConfigPath, resetConfigCache } from '../../config/config.js';
 import { smartTruncate } from '../../utils/truncate.js';
 import { getDatabase, tryGetDatabase, createDatabase } from '../../db/database.js';
 // Local agents file no longer used - database is single source of truth
@@ -186,8 +186,9 @@ LOG_LEVEL=info
 `;
 
   fs.writeFileSync(envPath, envContent);
-  // Reload so ensureCredentials can see the new values
+  // Reload so ensureCredentials and loadConfig() can see the new values
   loadEnv({ path: envPath, override: true });
+  resetConfigCache();
   process.env.ENCRYPTION_KEY = encryptionKey;
 
   console.log(chalk.green('\n    ✅ Base configuration saved to .env\n'));
