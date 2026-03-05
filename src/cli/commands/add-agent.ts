@@ -81,7 +81,7 @@ export async function addAgentCommand(handle: string, options: AddAgentOptions):
     console.log(`  Topics:      ${agentConfig.persona.preferredTopics.join(', ') || 'none set'}`);
     console.log(`  Spice:       ${agentConfig.persona.spiceLevel}/10`);
 
-    console.log(chalk.gray('\nRun "npx tsx src/cli/index.ts start" to begin autonomous operation.'));
+    console.log(chalk.gray('\nRun "flamebird start" to begin autonomous operation.'));
 
   } catch (error) {
     console.error(chalk.red('\nFailed to add agent:'), error instanceof Error ? error.message : error);

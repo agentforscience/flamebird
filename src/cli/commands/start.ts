@@ -9,6 +9,7 @@ import { loadConfig, validateSecrets } from '../../config/config.js';
 import { createEventLoop } from '../../runtime/event-loop.js';
 import { getAgentManager } from '../../agents/agent-manager.js';
 import { createLogger } from '../../logging/logger.js';
+import { loadSettingsOverrides } from './play.js';
 import type { RateLimitConfig, ProactiveConfig } from '../../types.js';
 
 const logger = createLogger('cli:start');
@@ -30,12 +31,15 @@ export async function startCommand(options: StartOptions): Promise<void> {
     const baseConfig = loadConfig(options.config);
     validateSecrets();
 
-    // Merge settings overrides (from play menu) into config
+    // Merge settings overrides — from play menu args or settings.json on disk
+    const fileOverrides = loadSettingsOverrides();
+    const rateLimits = options.rateLimits ?? fileOverrides?.rateLimits ?? baseConfig.rateLimits;
+    const proactiveOverrides = options.proactiveOverrides ?? fileOverrides?.proactive;
     const config = {
       ...baseConfig,
-      rateLimits: options.rateLimits ?? baseConfig.rateLimits,
-      proactive: options.proactiveOverrides
-        ? { ...(baseConfig.proactive ?? {} as ProactiveConfig), ...options.proactiveOverrides }
+      rateLimits,
+      proactive: proactiveOverrides
+        ? { ...(baseConfig.proactive ?? {} as ProactiveConfig), ...proactiveOverrides }
         : baseConfig.proactive,
     };
 
@@ -51,7 +55,7 @@ export async function startCommand(options: StartOptions): Promise<void> {
     if (agents.length === 0) {
       spinner.warn('No agents configured. Use "flamebird add <handle>" to add agents.');
       console.log(chalk.yellow('\nExample:'));
-      console.log(chalk.gray('  npx tsx src/cli/index.ts add dr_tensor --api-key your-api-key'));
+      console.log(chalk.gray('  flamebird add dr_tensor --api-key your-api-key'));
       return;
     }
 

@@ -14,6 +14,7 @@ import { encryptApiKey } from '../../agents/agent-manager.js';
 import type { AgentPersona, PersonaVoice, EpistemicStyle, AgentCapability } from '../../types.js';
 import { ensureCredentials } from '../utils/ensure-credentials.js';
 import { normalizeApiError } from '../../api/agent4science-client.js';
+import { playCommand } from './play.js';
 
 // Large pixel art characters for each personality - game style!
 const PERSONALITY_ART: Record<string, string> = {
@@ -738,16 +739,15 @@ ${chalk.yellow('  └───────────────────�
       case 'start':
         console.log(chalk.green('\n  ══════════════════════════════════════════════'));
         console.log(chalk.bold.yellow('  ◆ DEPLOYING AGENT TO ARENA... ◆\n'));
-        console.log(chalk.gray(`  Run: npx tsx src/cli/index.ts add @${result.agent?.handle} --api-key ${result.apiKey}`));
-        console.log(chalk.gray('  Then: npx tsx src/cli/index.ts start'));
+        console.log(chalk.gray(`  Run: flamebird add @${result.agent?.handle} --api-key ${result.apiKey}`));
+        console.log(chalk.gray('  Then: flamebird start'));
         console.log(chalk.green('\n  ══════════════════════════════════════════════\n'));
         break;
       case 'create':
         await createAgentCommand();
         break;
       case 'menu':
-        // Will return to play menu
-        console.log(chalk.gray('\n  ◄ Returning to main menu...\n'));
+        await playCommand();
         break;
       case 'exit':
         console.log(chalk.cyan(`
