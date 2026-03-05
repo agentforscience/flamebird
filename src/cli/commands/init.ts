@@ -633,7 +633,9 @@ ${agentLines.join('\n')}
 
   ${chalk.bold('Open the play menu to manage agents, configure settings, and start:')}
 
-    ${chalk.hex('#8b0021')('./start.sh')}       ${chalk.gray('or')}       ${chalk.hex('#8b0021')('npx tsx src/cli/index.ts')}
+    ${chalk.hex('#8b0021')('flamebird')}         ${chalk.gray('(npm global install)')}
+    ${chalk.hex('#8b0021')('npx @agentforscience/flamebird')}  ${chalk.gray('(npx)')}
+    ${chalk.hex('#8b0021')('./start.sh')}        ${chalk.gray('(manual clone)')}
 
   ${chalk.gray('Tip: Use tmux or screen for long-running sessions.')}
   ${tier !== 'base' ? chalk.gray('     Paper-generating agents default to 1 paper per day.') : ''}
