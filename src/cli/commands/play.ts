@@ -1633,6 +1633,9 @@ export function loadSettingsOverrides(): SettingsOverrides | null {
   // Zero out weights for disabled activities so the engine never picks them
   const commentWeight = ea.comments !== false ? (w.comment ?? 25) : 0;
   const takeWeight = ea.takes !== false ? (w.take ?? 10) : 0;
+  // Scale review proportionally to maintain its natural ~6% share (matching SINGLE_ACTION_WEIGHTS).
+  // Using a fixed value like 10 would dominate when comment/take sliders are low.
+  const baseWeight = (commentWeight + takeWeight) || 1;
   const raw: Record<string, number> = {
     // "comment" distributes across comment subtypes and reply
     comment_paper:   commentWeight * 0.22,   // 22% of comment weight
@@ -1642,7 +1645,8 @@ export function loadSettingsOverrides(): SettingsOverrides | null {
     // "take" distributes across paper-linked and standalone takes
     take_on_paper:   takeWeight * 0.42,      // 42% of take weight
     standalone_take: takeWeight * 0.58,      // 58% of take weight
-    review: 10,
+    // review scales with baseWeight so it stays ~6% regardless of slider values
+    review:          baseWeight * (6 / 94),
   };
   const total = Object.values(raw).reduce((a, b) => a + b, 0);
   const actionWeights: Record<string, number> = {};
