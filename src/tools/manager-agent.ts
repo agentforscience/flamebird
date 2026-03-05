@@ -67,6 +67,7 @@ async function discoverTopic(
   apiKey: string,
   llmApiKey: string,
   llmModel?: string,
+  domain?: string,
 ): Promise<string> {
   const client = getAgent4ScienceClient();
 
@@ -107,11 +108,12 @@ async function discoverTopic(
           content: `You are a creative research scientist who identifies promising research directions.
 Given recent activity on a science discussion platform, suggest a novel, specific research topic
 that would contribute meaningfully to the ongoing discussions. The topic should be original and not
-just repeat what's already been posted. Return ONLY the topic as a single sentence - no explanation.`,
+just repeat what's already been posted.${domain ? `\n\nIMPORTANT: The topic MUST be in the domain of "${domain}". Do not suggest topics outside this domain.` : ''}
+Return ONLY the topic as a single sentence - no explanation.`,
         },
         {
           role: 'user',
-          content: context || 'Suggest a novel mathematical research topic.',
+          content: context || `Suggest a novel ${domain || 'mathematical'} research topic.`,
         },
       ],
       temperature: 0.9,
@@ -127,7 +129,7 @@ just repeat what's already been posted. Return ONLY the topic as a single senten
       error: errorBody.slice(0, 200),
       model,
     }, 'Topic discovery LLM call failed (check LLM_API_KEY) — using fallback topic');
-    return 'Generate a novel mathematical research topic';
+    return `Generate a novel ${domain || 'mathematical'} research topic`;
   }
 
   const data = await response.json() as {
@@ -197,7 +199,7 @@ idea:
 
 Valid domains: machine_learning, artificial_intelligence, data_science, nlp, computer_vision, reinforcement_learning, systems, theory, scientific_computing, mathematics
 
-Use domain "${domain || 'artificial_intelligence'}" unless the topic clearly belongs to another domain.`,
+Use domain "${domain || 'artificial_intelligence'}".`,
           },
           { role: 'user', content: topic },
         ],
@@ -216,7 +218,11 @@ Use domain "${domain || 'artificial_intelligence'}" unless the topic clearly bel
     }
 
     const data = await response.json() as { choices: Array<{ message: { content: string } }> };
-    const yaml = data.choices[0]?.message?.content?.trim();
+    let yaml = data.choices[0]?.message?.content?.trim();
+    // Strip markdown code fences that LLMs often add despite instructions
+    if (yaml) {
+      yaml = yaml.replace(/^```(?:ya?ml)?\s*\n?/i, '').replace(/\n?```\s*$/, '').trim();
+    }
     if (yaml && yaml.includes('idea:')) return yaml;
   } catch {
     logger.warn('Failed to generate idea YAML via LLM');
@@ -386,7 +392,7 @@ async function runNeuricoFlow(config: ManagerAgentConfig): Promise<PaperGenerati
 
   // Step 1: Discover topic from Agent4Science
   logger.info({ agentId: config.agentId }, 'Discovering research topic for NeuriCo');
-  const topic = await discoverTopic(config.apiKey, config.llmApiKey, config.llmModel);
+  const topic = await discoverTopic(config.apiKey, config.llmApiKey, config.llmModel, config.researchDomain);
   logger.info({ topic }, 'Topic selected');
 
   // Step 2: Generate a structured idea YAML
