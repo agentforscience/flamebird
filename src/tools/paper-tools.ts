@@ -333,7 +333,7 @@ async function runIdeaById(
 }
 
 /** Parse the idea ID from submit.py output. */
-function parseIdeaId(output: string): string | null {
+export function parseIdeaId(output: string): string | null {
   // Common patterns from submit.py output
   const patterns = [
     /Idea ID:\s*(\S+)/i,
@@ -373,7 +373,7 @@ function findLatestIdeaId(submittedDir: string): string | null {
  *      but earlier output from resource_finder may contain unrelated GitHub URLs
  *      from paper abstracts / search results)
  */
-function parseNeuricoOutput(stdout: string, basePath: string, ideaId?: string): NeuricoResult {
+export function parseNeuricoOutput(stdout: string, basePath: string, ideaId?: string): NeuricoResult {
   // Look for workspace location (container path like /workspaces/<name>)
   const locationMatch = stdout.match(/Location:\s*(.+)/);
   const containerWorkDir = locationMatch?.[1]?.trim();
@@ -392,7 +392,7 @@ function parseNeuricoOutput(stdout: string, basePath: string, ideaId?: string): 
       hostWorkDir = undefined;
     }
   } else {
-    logger.info('No workspace location found in stdout');
+    logger.debug('No Location line in stdout, searching for workspace');
   }
 
   // Fallback 1: match workspace directory by idea ID
@@ -419,6 +419,8 @@ function parseNeuricoOutput(stdout: string, basePath: string, ideaId?: string): 
       logger.warn({ hostWorkspacesDir }, 'No workspace directories found');
     }
   }
+
+  logger.debug({ hostWorkDir, hostWorkspacesDir, containerWorkDir }, 'Workspace resolution');
 
   // ── Read workspace files for metadata ──
   let title: string | undefined;
@@ -456,7 +458,13 @@ function parseNeuricoOutput(stdout: string, basePath: string, ideaId?: string): 
             .map(line => line.replace(/^\s*-\s*["']?/, '').replace(/["']?\s*$/, '').trim())
             .filter(t => t.length > 0);
         }
-      } catch { /* ignore */ }
+
+        logger.debug({ title, domain, githubUrl, tags, hasHypothesis: !!hypothesis }, 'Parsed idea.yaml');
+      } catch (err) {
+        logger.warn({ err, ideaYamlPath }, 'Failed to read idea.yaml');
+      }
+    } else {
+      logger.warn({ ideaYamlPath }, 'idea.yaml not found in workspace');
     }
 
     // ── REPORT.md — primary source for post content, title, and references ──
@@ -471,28 +479,51 @@ function parseNeuricoOutput(stdout: string, basePath: string, ideaId?: string): 
 
           // Extract title from the first `# Title` heading (more accurate than idea.yaml)
           const reportTitle = extractReportTitle(report);
-          if (reportTitle) title = reportTitle;
+          if (reportTitle) {
+            logger.debug({ reportTitle, ideaYamlTitle: title }, 'REPORT.md title overrides idea.yaml title');
+            title = reportTitle;
+          }
 
           // Extract references deterministically (LLMs are bad at precise reference parsing)
           references = extractReportReferences(report);
           if (references.length > 0) {
             logger.info({ count: references.length }, 'Extracted references from REPORT.md');
+          } else {
+            logger.debug('No references section found in REPORT.md');
           }
+        } else {
+          logger.warn({ reportPath }, 'REPORT.md exists but is empty');
         }
-      } catch { /* ignore */ }
+      } catch (err) {
+        logger.warn({ err, reportPath }, 'Failed to read REPORT.md');
+      }
+    } else {
+      logger.debug({ reportPath }, 'No REPORT.md found');
     }
 
     // Fallback: try README.md
     if (!abstract) {
       const readmePath = path.join(hostWorkDir, 'README.md');
       if (fs.existsSync(readmePath)) {
+        logger.debug('No abstract from idea.yaml or REPORT.md, falling back to README.md');
         try {
           const readme = fs.readFileSync(readmePath, 'utf-8');
           const paragraphs = readme.split('\n\n').filter(p => !p.startsWith('#') && p.trim().length > 50);
-          if (paragraphs.length > 0) abstract = paragraphs[0].trim().slice(0, 2000);
-        } catch { /* ignore */ }
+          if (paragraphs.length > 0) {
+            abstract = paragraphs[0].trim().slice(0, 2000);
+            logger.debug({ abstractLength: abstract.length }, 'Extracted abstract from README.md');
+          } else {
+            logger.warn('README.md has no substantial paragraphs for abstract');
+          }
+        } catch (err) {
+          logger.warn({ err, readmePath }, 'Failed to read README.md');
+        }
+      } else {
+        logger.warn({ hostWorkDir }, 'No abstract source found (no REPORT.md, no README.md, no hypothesis)');
       }
     }
+  } else {
+    logger.warn({ hostWorkDir, hostWorkspacesDir }, 'No workspace directory found');
   }
 
   // ── Fallback: .git/config for GitHub URL ──
@@ -516,7 +547,7 @@ function parseNeuricoOutput(stdout: string, basePath: string, ideaId?: string): 
   if (!githubUrl) {
     githubUrl = extractLastGithubUrl(stdout);
     if (githubUrl) {
-      logger.info({ githubUrl }, 'GitHub URL extracted from stdout');
+      logger.debug({ githubUrl }, 'GitHub URL extracted from stdout (not idea.yaml)');
     }
   }
 
@@ -529,7 +560,7 @@ function parseNeuricoOutput(stdout: string, basePath: string, ideaId?: string): 
   const pdfUrl = githubUrl ? `${githubUrl}/blob/main/paper_draft/main.pdf` : undefined;
 
   if (!hostWorkDir && !githubUrl) {
-    logger.error('parseNeuricoOutput failed: no workspace directory and no GitHub URL found');
+    logger.error('parseNeuricoOutput failed: no workspace found and no GitHub URL in stdout');
     return {
       success: false,
       error: 'Could not find workspace or GitHub URL in NeuriCo output',
@@ -540,6 +571,19 @@ function parseNeuricoOutput(stdout: string, basePath: string, ideaId?: string): 
     logger.warn({ hostWorkDir, title }, 'parseNeuricoOutput: workspace found but no GitHub URL from any source');
   }
 
+  const finalTags = tags || (domain ? [domain] : undefined);
+  const finalRefs = references && references.length > 0 ? references : undefined;
+
+  logger.info({
+    title,
+    abstractLength: abstract?.length,
+    domain,
+    tags: finalTags,
+    githubUrl,
+    pdfUrl,
+    refCount: finalRefs?.length ?? 0,
+  }, 'NeuriCo output parsed — ready for posting');
+
   return {
     success: true,
     workDir: hostWorkDir,
@@ -548,8 +592,8 @@ function parseNeuricoOutput(stdout: string, basePath: string, ideaId?: string): 
     title,
     abstract,
     domain,
-    tags: tags || (domain ? [domain] : undefined),
-    references: references && references.length > 0 ? references : undefined,
+    tags: finalTags,
+    references: finalRefs,
   };
 }
 
@@ -558,7 +602,7 @@ function parseNeuricoOutput(stdout: string, basePath: string, ideaId?: string): 
  * We want the last match because runner.py prints the correct URL at the end,
  * while earlier output may contain unrelated GitHub URLs from search results.
  */
-function extractLastGithubUrl(stdout: string): string | undefined {
+export function extractLastGithubUrl(stdout: string): string | undefined {
   const patterns = [
     /GitHub:\s*(https:\/\/github\.com\/[^\s]+)/gi,
     /github_repo_url:\s*(https:\/\/github\.com\/[^\s]+)/gi,
@@ -580,7 +624,7 @@ function extractLastGithubUrl(stdout: string): string | undefined {
 }
 
 /** Extract the title from a REPORT.md's first `# Title` heading. */
-function extractReportTitle(report: string): string | undefined {
+export function extractReportTitle(report: string): string | undefined {
   for (const line of report.split('\n')) {
     if (line.startsWith('# ') && !line.startsWith('## ')) {
       return line.replace(/^#\s+/, '').trim();
@@ -597,7 +641,7 @@ function extractReportTitle(report: string): string | undefined {
  *
  * Ported from flamebird_old/scripts/prefill.ts parseReferences().
  */
-function extractReportReferences(report: string): Array<{ authors: string; year: number; title: string; venue?: string; arxivId?: string }> {
+export function extractReportReferences(report: string): Array<{ authors: string; year: number; title: string; venue?: string; arxivId?: string }> {
   const lines = report.split('\n');
 
   // Find the ## References section
@@ -678,7 +722,7 @@ function findLatestWorkspace(workspacesDir: string): string | undefined {
 }
 
 /** Simple helper to extract a YAML field value (avoids pulling in a YAML parser dep). */
-function extractYamlField(content: string, field: string): string | undefined {
+export function extractYamlField(content: string, field: string): string | undefined {
   const regex = new RegExp(`^\\s*${field}:\\s*["']?(.+?)["']?\\s*$`, 'm');
   const match = content.match(regex);
   return match?.[1]?.trim();

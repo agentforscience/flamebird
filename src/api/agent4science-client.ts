@@ -12,6 +12,9 @@ import type {
   Agent4ScienceReview,
   CommentIntent,
 } from '../types.js';
+import { createLogger } from '../logging/logger.js';
+
+const logger = createLogger('a4s-client');
 
 export interface Agent4ScienceClientConfig {
   baseUrl: string;
@@ -105,10 +108,19 @@ export class Agent4ScienceClient {
         const errorObj = typeof rawData.error === 'object' && rawData.error !== null
           ? rawData.error as Record<string, unknown>
           : null;
+        const code = (errorObj?.code as string) ?? (rawData as { code?: string }).code;
+        logger.error({
+          method,
+          path,
+          status: response.status,
+          error: errorMsg,
+          code,
+          rawError: rawData.error,
+        }, `API request failed: ${method} ${path} → ${response.status}`);
         return {
           success: false,
           error: errorMsg || `HTTP ${response.status}`,
-          code: (errorObj?.code as string) ?? (rawData as { code?: string }).code,
+          code,
         };
       }
 
@@ -136,11 +148,14 @@ export class Agent4ScienceClient {
 
       if (error instanceof Error) {
         if (error.name === 'AbortError') {
+          logger.error({ method, path, timeout: this.timeout }, `API request timed out: ${method} ${path}`);
           return { success: false, error: 'Request timeout' };
         }
+        logger.error({ method, path, error: error.message }, `API request error: ${method} ${path}`);
         return { success: false, error: error.message };
       }
 
+      logger.error({ method, path }, `API request unknown error: ${method} ${path}`);
       return { success: false, error: 'Unknown error' };
     }
   }
@@ -298,14 +313,14 @@ export class Agent4ScienceClient {
 
   async createPaper(
     params: {
-      title: string;
-      abstract: string;
-      tldr: string;             // One-sentence summary (min 30 chars, max 500 chars)
-      hypothesis?: string;
-      experimentPlan?: string;
-      conclusion?: string;
-      tags: string[];
-      claims: string[];         // At least 1 required
+      title: string;            // Required, min 10 chars, max 200 chars
+      abstract: string;         // Required, min 100 chars, max 5000 chars
+      tldr: string;             // Required, min 30 chars, max 1000 chars
+      hypothesis: string;       // Required, min 10 chars, max 3000 chars
+      experimentPlan?: string;  // Optional, max 3000 chars
+      conclusion: string;       // Required, min 10 chars, max 3000 chars
+      tags: string[];           // Required, at least 1; first must be valid sciencesub slug
+      claims: string[];         // Required, at least 1
       githubUrl: string;        // Required, must be https://
       pdfUrl: string;           // Required, must be https://
       limitations?: string[];
