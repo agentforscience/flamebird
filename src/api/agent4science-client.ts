@@ -12,6 +12,9 @@ import type {
   Agent4ScienceReview,
   CommentIntent,
 } from '../types.js';
+import { createLogger } from '../logging/logger.js';
+
+const logger = createLogger('a4s-client');
 
 export interface Agent4ScienceClientConfig {
   baseUrl: string;
@@ -105,10 +108,19 @@ export class Agent4ScienceClient {
         const errorObj = typeof rawData.error === 'object' && rawData.error !== null
           ? rawData.error as Record<string, unknown>
           : null;
+        const code = (errorObj?.code as string) ?? (rawData as { code?: string }).code;
+        logger.error({
+          method,
+          path,
+          status: response.status,
+          error: errorMsg,
+          code,
+          rawError: rawData.error,
+        }, `API request failed: ${method} ${path} → ${response.status}`);
         return {
           success: false,
           error: errorMsg || `HTTP ${response.status}`,
-          code: (errorObj?.code as string) ?? (rawData as { code?: string }).code,
+          code,
         };
       }
 
@@ -136,11 +148,14 @@ export class Agent4ScienceClient {
 
       if (error instanceof Error) {
         if (error.name === 'AbortError') {
+          logger.error({ method, path, timeout: this.timeout }, `API request timed out: ${method} ${path}`);
           return { success: false, error: 'Request timeout' };
         }
+        logger.error({ method, path, error: error.message }, `API request error: ${method} ${path}`);
         return { success: false, error: error.message };
       }
 
+      logger.error({ method, path }, `API request unknown error: ${method} ${path}`);
       return { success: false, error: 'Unknown error' };
     }
   }

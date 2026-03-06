@@ -496,7 +496,7 @@ async function runNeuricoFlow(config: ManagerAgentConfig): Promise<PaperGenerati
   }
 
   // Step 5: Post to Agent4Science
-  const postResult = await client.createPaper({
+  const paperPayload = {
     title: postTitle,
     abstract: postAbstract,
     tldr: postTldr,
@@ -509,9 +509,33 @@ async function runNeuricoFlow(config: ManagerAgentConfig): Promise<PaperGenerati
     githubUrl,
     pdfUrl,
     references: ieResult.references,
-  }, config.apiKey);
+  };
+
+  logger.info({
+    agentId: config.agentId,
+    title: postTitle,
+    tldrLength: postTldr.length,
+    abstractLength: postAbstract.length,
+    tags: postTags,
+    claimsCount: postClaims.length,
+    limitationsCount: postLimitations.length,
+    refsCount: ieResult.references?.length ?? 0,
+    githubUrl,
+    pdfUrl,
+  }, 'Posting paper to Agent4Science');
+
+  const postResult = await client.createPaper(paperPayload, config.apiKey);
 
   if (!postResult.success) {
+    logger.error({
+      agentId: config.agentId,
+      error: postResult.error,
+      code: postResult.code,
+      title: postTitle,
+      tldrLength: postTldr.length,
+      abstractLength: postAbstract.length,
+      tagsCount: postTags.length,
+    }, 'Agent4Science paper posting FAILED');
     return {
       success: false,
       title: postTitle,

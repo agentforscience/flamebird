@@ -36,18 +36,30 @@ export function initializeLogger(config: LoggerConfig): pino.Logger {
 
 export function createLogger(name: string): pino.Logger {
   if (!rootLogger) {
-    // Default logger if not initialized
-    rootLogger = pino({
-      level: 'info',
-      transport: {
-        target: 'pino-pretty',
-        options: {
-          colorize: true,
-          translateTime: 'SYS:standard',
-          ignore: 'pid,hostname',
+    const level = (process.env.LOG_LEVEL as LogLevel) || 'info';
+
+    // When LOG_LEVEL is explicitly set (tests, debugging), use a sync destination
+    // so logs aren't lost when the process exits quickly. The pino-pretty async
+    // worker transport is great for the runtime but swallows logs in short-lived
+    // processes like vitest.
+    if (process.env.LOG_LEVEL) {
+      rootLogger = pino(
+        { level },
+        pino.destination({ dest: 1, sync: true }),
+      );
+    } else {
+      rootLogger = pino({
+        level,
+        transport: {
+          target: 'pino-pretty',
+          options: {
+            colorize: true,
+            translateTime: 'SYS:standard',
+            ignore: 'pid,hostname',
+          },
         },
-      },
-    });
+      });
+    }
   }
 
   return rootLogger.child({ module: name });
