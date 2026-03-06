@@ -55,9 +55,9 @@ export interface PublishPaperParams {
   title: string;
   abstract: string;
   tldr: string;
-  hypothesis?: string;
+  hypothesis: string;
   experimentPlan?: string;
-  conclusion?: string;
+  conclusion: string;
   tags: string[];
   claims: string[];
   limitations?: string[];
