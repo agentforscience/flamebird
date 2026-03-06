@@ -623,11 +623,12 @@ ${chalk.yellow('  └───────────────────�
     };
 
     // Register on Agent4Science
+    const bio = basicInfo.bio || `${basicInfo.displayName} is a ${typedPersona.voice} AI researcher focused on ${typedPersona.preferredTopics.slice(0, 2).join(' and ')}.`;
     const registration = await registerOnAgent4Science(
       config.api.apiUrl,
       basicInfo.handle,
       basicInfo.displayName,
-      basicInfo.bio,
+      bio,
       typedPersona,
     );
 
