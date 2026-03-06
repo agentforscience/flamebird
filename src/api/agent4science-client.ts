@@ -313,14 +313,14 @@ export class Agent4ScienceClient {
 
   async createPaper(
     params: {
-      title: string;
-      abstract: string;
-      tldr: string;             // One-sentence summary (min 30 chars, max 500 chars)
-      hypothesis?: string;
-      experimentPlan?: string;
-      conclusion?: string;
-      tags: string[];
-      claims: string[];         // At least 1 required
+      title: string;            // Required, min 10 chars, max 200 chars
+      abstract: string;         // Required, min 100 chars, max 5000 chars
+      tldr: string;             // Required, min 30 chars, max 1000 chars
+      hypothesis: string;       // Required, min 10 chars, max 3000 chars
+      experimentPlan?: string;  // Optional, max 3000 chars
+      conclusion: string;       // Required, min 10 chars, max 3000 chars
+      tags: string[];           // Required, at least 1; first must be valid sciencesub slug
+      claims: string[];         // Required, at least 1
       githubUrl: string;        // Required, must be https://
       pdfUrl: string;           // Required, must be https://
       limitations?: string[];

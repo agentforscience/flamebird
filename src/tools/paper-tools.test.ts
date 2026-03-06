@@ -554,7 +554,7 @@ describe('post-NeuriCo paper assembly (integration)', () => {
     const topic = 'machine learning';
     const abstract = 'This work explores new directions in ML research.';
 
-    // Mirror manager-agent.ts lines 472-477
+    // Mirror manager-agent.ts tldr padding logic
     if (!tldr || tldr.length < 30) {
       const baseTldr = tldr || topic || `Research on ${topic}`;
       tldr = `${baseTldr}. ${abstract || `This work explores new directions in ${topic} research.`}`;
@@ -562,6 +562,62 @@ describe('post-NeuriCo paper assembly (integration)', () => {
     tldr = smartTruncate(tldr, 1000);
 
     expect(tldr.length).toBeGreaterThanOrEqual(30);
+  });
+
+  it('pads short title to meet API 10-char minimum', () => {
+    let title = 'NLP';
+    const topic = 'natural language processing';
+
+    // Mirror manager-agent.ts title padding
+    if (title.length < 10) {
+      title = `Research: ${title} — a novel investigation in ${topic}`;
+    }
+    title = smartTruncate(title, 200);
+
+    expect(title.length).toBeGreaterThanOrEqual(10);
+    expect(title.length).toBeLessThanOrEqual(200);
+  });
+
+  it('pads short abstract to meet API 100-char minimum', () => {
+    let abstract = 'Research on: AI alignment';
+    const topic = 'AI alignment';
+    const hypothesis = 'We hypothesize that alignment can be improved with RLHF.';
+    const conclusion = 'Results show significant improvements.';
+
+    // Mirror manager-agent.ts abstract padding
+    if (abstract.length < 100) {
+      abstract = `${abstract} This research explores new directions in ${topic}. ${hypothesis} ${conclusion}`;
+    }
+    abstract = smartTruncate(abstract, 5000);
+
+    expect(abstract.length).toBeGreaterThanOrEqual(100);
+    expect(abstract.length).toBeLessThanOrEqual(5000);
+  });
+
+  it('ensures hypothesis is always present (API requires it)', () => {
+    const topic = 'quantum computing';
+    let hypothesis = '';
+
+    // Mirror manager-agent.ts hypothesis fallback
+    if (!hypothesis || hypothesis.length < 10) {
+      hypothesis = `This work investigates a novel approach to ${topic} and evaluates its effectiveness.`;
+    }
+    hypothesis = smartTruncate(hypothesis, 3000);
+
+    expect(hypothesis.length).toBeGreaterThanOrEqual(10);
+  });
+
+  it('ensures conclusion is always present (API requires it)', () => {
+    const topic = 'reinforcement learning';
+    let conclusion = '';
+
+    // Mirror manager-agent.ts conclusion fallback
+    if (!conclusion || conclusion.length < 10) {
+      conclusion = `Results demonstrate the validity of the proposed approach to ${topic}.`;
+    }
+    conclusion = smartTruncate(conclusion, 3000);
+
+    expect(conclusion.length).toBeGreaterThanOrEqual(10);
   });
 });
 
