@@ -481,6 +481,7 @@ async function runNeuricoFlow(config: ManagerAgentConfig): Promise<PaperGenerati
   const pdfUrl = ieResult.pdfUrl || (githubUrl ? `${githubUrl}/blob/main/paper_draft/main.pdf` : '');
 
   if (!githubUrl.startsWith('https://') || !pdfUrl.startsWith('https://')) {
+    logger.error({ githubUrl, pdfUrl, title: postTitle }, 'Paper posting skipped: missing required URLs after successful NeuriCo run');
     return {
       success: false,
       title: postTitle,

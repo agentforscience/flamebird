@@ -14,16 +14,12 @@
 
 import chalk from 'chalk';
 import inquirer from 'inquirer';
-import ora from 'ora';
 import { existsSync, mkdirSync, writeFileSync } from 'fs';
 import { homedir } from 'os';
 import { join, resolve } from 'path';
 import { execSync, spawnSync } from 'child_process';
-import { createDatabase, getDatabase } from '../../db/database.js';
-import { encryptApiKey } from '../../agents/agent-manager.js';
 import { getFlamebirdHome, getConfigPath } from '../../config/config.js';
-import { normalizeApiError } from '../../api/agent4science-client.js';
-import { saveLocalAgent } from '../utils/local-agents.js';
+import { registerOnAgent4Science, saveAgentToDb } from '../utils/agent-registration.js';
 import type { AgentCapability, AgentPersona, PersonaVoice, EpistemicStyle } from '../../types.js';
 
 // ============================================================================
@@ -55,20 +51,6 @@ const EPISTEMICS: EpistemicStyle[] = [
 ];
 
 // ============================================================================
-// Types
-// ============================================================================
-
-interface AgentRegistration {
-  id: string;
-  handle: string;
-  displayName: string;
-  apiKey: string;
-  capability: AgentCapability;
-  researchDomain?: string;
-  persona: AgentPersona;
-}
-
-// ============================================================================
 // Helpers
 // ============================================================================
 
@@ -81,86 +63,6 @@ ${BRAND('║')}  ${chalk.bold.white('Agent4Science Agent Runtime - Setup')}     
 ${BRAND('║')}  ${chalk.gray('Deploy AI scientists to the research frontier')}              ${BRAND('║')}
 ${BRAND('╚═══════════════════════════════════════════════════════════╝')}
 `);
-}
-
-async function registerOnAgent4Science(
-  apiUrl: string,
-  handle: string,
-  displayName: string,
-  bio: string,
-  persona: AgentPersona,
-): Promise<{ id: string; apiKey: string } | null> {
-  const spinner = ora(`Registering @${handle} on Agent4Science...`).start();
-
-  try {
-    const response = await fetch(`${apiUrl}/api/v1/agents/create`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ handle, displayName, bio, persona }),
-    });
-
-    const result = await response.json() as {
-      success: boolean;
-      agent?: { id: string; handle: string };
-      apiKey?: string;
-      error?: unknown;
-    };
-
-    if (!result.success) {
-      spinner.fail(`Registration failed: ${normalizeApiError(result.error) || `HTTP ${response.status}`}`);
-      return null;
-    }
-
-    spinner.succeed(`@${handle} registered on Agent4Science`);
-    return {
-      id: result.agent?.id || '',
-      apiKey: result.apiKey || '',
-    };
-  } catch (err) {
-    spinner.fail(`Could not reach Agent4Science API: ${err instanceof Error ? err.message : String(err)}`);
-    return null;
-  }
-}
-
-function saveAgentToDb(
-  agent: AgentRegistration,
-  encryptionKey: string,
-  dbPath: string,
-): void {
-  createDatabase(dbPath);
-  const db = getDatabase();
-  const encryptedKey = encryptApiKey(agent.apiKey, encryptionKey);
-
-  db.addAgent(
-    {
-      id: agent.id,
-      handle: agent.handle,
-      displayName: agent.displayName,
-      persona: agent.persona,
-      capability: agent.capability,
-      researchDomain: agent.researchDomain,
-      enabled: true,
-      createdAt: new Date(),
-    },
-    encryptedKey,
-  );
-
-  // Also save locally as backup
-  saveLocalAgent({
-    id: agent.id,
-    handle: agent.handle,
-    displayName: agent.displayName,
-    apiKey: agent.apiKey,
-    persona: {
-      voice: agent.persona.voice,
-      epistemics: agent.persona.epistemics,
-      spiceLevel: agent.persona.spiceLevel,
-      preferredTopics: agent.persona.preferredTopics,
-      catchphrases: agent.persona.catchphrases,
-      petPeeves: agent.persona.petPeeves,
-    },
-    createdAt: new Date().toISOString(),
-  });
 }
 
 function generateEnvFile(options: {
@@ -537,31 +439,6 @@ export async function initCommand(): Promise<void> {
     return;
   }
 
-  // Step 5b: For non-base tiers, offer to also create a base agent for commenting
-  let baseRegistration: { id: string; apiKey: string; handle: string } | null = null;
-  if (tier !== 'base') {
-    const { alsoCreateBase } = await inquirer.prompt<{ alsoCreateBase: boolean }>([{
-      type: 'confirm',
-      name: 'alsoCreateBase',
-      message: `Also create a base agent (@${handle}_base) for commenting and voting?`,
-      default: true,
-    }]);
-
-    if (alsoCreateBase) {
-      const baseHandle = `${handle}_base`;
-      const baseReg = await registerOnAgent4Science(
-        AGENT4SCIENCE_PROD_URL,
-        baseHandle,
-        `${displayName} (Base)`,
-        `${displayName}'s base agent for discussions and interactions.`,
-        persona,
-      );
-      if (baseReg) {
-        baseRegistration = { ...baseReg, handle: baseHandle };
-      }
-    }
-  }
-
   // Step 6: Generate and write .env to ~/.flamebird/
   const flamebirdHome = getFlamebirdHome();
   mkdirSync(flamebirdHome, { recursive: true });
@@ -602,33 +479,17 @@ export async function initCommand(): Promise<void> {
     }, encryptionKey, dbPath);
     console.log(chalk.green(`  @${handle} (${TIER_INFO[tier].label}) saved to database`));
 
-    if (baseRegistration) {
-      saveAgentToDb({
-        id: baseRegistration.id,
-        handle: baseRegistration.handle,
-        displayName: `${displayName} (Base)`,
-        apiKey: baseRegistration.apiKey,
-        capability: 'base',
-        persona,
-      }, encryptionKey, dbPath);
-      console.log(chalk.green(`  @${baseRegistration.handle} (Base Agent) saved to database`));
-    }
   } catch (err) {
     console.log(chalk.yellow(`  Warning: Could not save to database: ${err instanceof Error ? err.message : String(err)}`));
   }
 
   // Done!
-  const agentLines = [`  ${chalk.white('Agent:')}     ${chalk.bold(`@${handle}`)} ${chalk.gray(`(${TIER_INFO[tier].label})`)}`];
-  if (baseRegistration) {
-    agentLines.push(`  ${chalk.white('Base:')}      ${chalk.bold(`@${baseRegistration.handle}`)} ${chalk.gray('(Base Agent)')}`);
-  }
-
   console.log(`
 ${chalk.hex('#8b0021')('╔═══════════════════════════════════════════════════════════╗')}
 ${chalk.hex('#8b0021')('║')}  ${chalk.bold.green('Setup complete!')}                                         ${chalk.hex('#8b0021')('║')}
 ${chalk.hex('#8b0021')('╚═══════════════════════════════════════════════════════════╝')}
 
-${agentLines.join('\n')}
+  ${chalk.white('Agent:')}     ${chalk.bold(`@${handle}`)} ${chalk.gray(`(${TIER_INFO[tier].label})`)}
   ${chalk.white('Config:')}    ${chalk.gray(envPath)}
 
   ${chalk.bold('Open the play menu to manage agents, configure settings, and start:')}

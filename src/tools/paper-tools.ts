@@ -329,7 +329,7 @@ async function runIdeaById(
     };
   }
 
-  return parseNeuricoOutput(runResult.stdout, neuricoPath);
+  return parseNeuricoOutput(runResult.stdout, neuricoPath, ideaId);
 }
 
 /** Parse the idea ID from submit.py output. */
@@ -373,7 +373,7 @@ function findLatestIdeaId(submittedDir: string): string | null {
  *      but earlier output from resource_finder may contain unrelated GitHub URLs
  *      from paper abstracts / search results)
  */
-function parseNeuricoOutput(stdout: string, basePath: string): NeuricoResult {
+function parseNeuricoOutput(stdout: string, basePath: string, ideaId?: string): NeuricoResult {
   // Look for workspace location (container path like /workspaces/<name>)
   const locationMatch = stdout.match(/Location:\s*(.+)/);
   const containerWorkDir = locationMatch?.[1]?.trim();
@@ -384,13 +384,40 @@ function parseNeuricoOutput(stdout: string, basePath: string): NeuricoResult {
   let hostWorkDir: string | undefined;
 
   if (containerWorkDir) {
+    logger.info({ containerWorkDir }, 'Found workspace location in stdout');
     const workspaceName = containerWorkDir.replace(/^\/workspaces\//, '');
     hostWorkDir = path.join(hostWorkspacesDir, workspaceName);
     if (!fs.existsSync(hostWorkDir)) {
-      hostWorkDir = findLatestWorkspace(hostWorkspacesDir);
+      logger.warn({ hostWorkDir }, 'Translated host path does not exist');
+      hostWorkDir = undefined;
     }
   } else {
+    logger.info('No workspace location found in stdout');
+  }
+
+  // Fallback 1: match workspace directory by idea ID
+  if (!hostWorkDir && ideaId && fs.existsSync(hostWorkspacesDir)) {
+    try {
+      const entries = fs.readdirSync(hostWorkspacesDir);
+      const match = entries.find(e => e.includes(ideaId));
+      if (match) {
+        const candidate = path.join(hostWorkspacesDir, match);
+        if (fs.statSync(candidate).isDirectory()) {
+          hostWorkDir = candidate;
+          logger.info({ hostWorkDir }, 'Matched workspace by idea ID');
+        }
+      }
+    } catch { /* ignore readdir errors */ }
+  }
+
+  // Fallback 2: most recently modified workspace
+  if (!hostWorkDir) {
     hostWorkDir = findLatestWorkspace(hostWorkspacesDir);
+    if (hostWorkDir) {
+      logger.info({ hostWorkDir }, 'Using latest workspace by modification time');
+    } else {
+      logger.warn({ hostWorkspacesDir }, 'No workspace directories found');
+    }
   }
 
   // ── Read workspace files for metadata ──
@@ -414,6 +441,12 @@ function parseNeuricoOutput(stdout: string, basePath: string): NeuricoResult {
         domain = extractYamlField(ideaContent, 'domain');
         const hypothesis = extractYamlField(ideaContent, 'hypothesis');
         if (hypothesis) abstract = hypothesis;
+
+        if (githubUrl) {
+          logger.info({ githubUrl }, 'GitHub URL extracted from idea.yaml');
+        } else {
+          logger.warn('No github_repo_url found in idea.yaml');
+        }
 
         // Extract tags list from YAML
         const tagsMatch = ideaContent.match(/tags:\s*\n((?:\s*-\s*.+\n?)+)/);
@@ -462,11 +495,29 @@ function parseNeuricoOutput(stdout: string, basePath: string): NeuricoResult {
     }
   }
 
+  // ── Fallback: .git/config for GitHub URL ──
+  if (!githubUrl && hostWorkDir) {
+    const gitConfigPath = path.join(hostWorkDir, '.git', 'config');
+    if (fs.existsSync(gitConfigPath)) {
+      try {
+        const gitConfig = fs.readFileSync(gitConfigPath, 'utf-8');
+        const urlMatch = gitConfig.match(/url\s*=\s*(https:\/\/github\.com\/[^\s]+)/);
+        if (urlMatch) {
+          githubUrl = urlMatch[1].replace(/\.git$/, '');
+          logger.info({ githubUrl }, 'GitHub URL extracted from .git/config');
+        }
+      } catch { /* ignore */ }
+    }
+  }
+
   // ── Fallback GitHub URL: use LAST match in stdout ──
   // The runner.py prints the correct URL at the end, but earlier output
   // (resource_finder agent output, search results) may contain unrelated GitHub URLs.
   if (!githubUrl) {
     githubUrl = extractLastGithubUrl(stdout);
+    if (githubUrl) {
+      logger.info({ githubUrl }, 'GitHub URL extracted from stdout');
+    }
   }
 
   // Strip trailing punctuation/quotes that might have been captured
@@ -478,10 +529,15 @@ function parseNeuricoOutput(stdout: string, basePath: string): NeuricoResult {
   const pdfUrl = githubUrl ? `${githubUrl}/blob/main/paper_draft/main.pdf` : undefined;
 
   if (!hostWorkDir && !githubUrl) {
+    logger.error('parseNeuricoOutput failed: no workspace directory and no GitHub URL found');
     return {
       success: false,
       error: 'Could not find workspace or GitHub URL in NeuriCo output',
     };
+  }
+
+  if (!githubUrl) {
+    logger.warn({ hostWorkDir, title }, 'parseNeuricoOutput: workspace found but no GitHub URL from any source');
   }
 
   return {

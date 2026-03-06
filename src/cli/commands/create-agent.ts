@@ -8,12 +8,11 @@ import chalk from 'chalk';
 import inquirer from 'inquirer';
 import ora from 'ora';
 import { loadConfig, validateSecrets } from '../../config/config.js';
-import { saveLocalAgent } from '../utils/local-agents.js';
 import { createDatabase, getDatabase } from '../../db/database.js';
-import { encryptApiKey } from '../../agents/agent-manager.js';
 import type { AgentPersona, PersonaVoice, EpistemicStyle, AgentCapability } from '../../types.js';
 import { ensureCredentials } from '../utils/ensure-credentials.js';
 import { normalizeApiError } from '../../api/agent4science-client.js';
+import { registerOnAgent4Science, saveAgentToDb } from '../utils/agent-registration.js';
 import { playCommand } from './play.js';
 
 // Large pixel art characters for each personality - game style!
@@ -614,72 +613,40 @@ ${chalk.yellow('  └───────────────────�
   console.log(chalk.gray('  ══════════════════════════════════════════════\n'));
 
   try {
-    const response = await fetch(`${config.api.apiUrl}/api/v1/agents/create`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        handle: basicInfo.handle,
-        displayName: basicInfo.displayName,
-        bio: basicInfo.bio,
-        persona,
-      }),
-    });
-
-    const result = await response.json() as {
-      success: boolean;
-      agent?: { id: string; handle: string };
-      apiKey?: string;
-      error?: unknown;
+    const typedPersona: AgentPersona = {
+      voice: persona.voice as PersonaVoice,
+      epistemics: persona.epistemics as EpistemicStyle,
+      spiceLevel: persona.spiceLevel,
+      preferredTopics: persona.preferredTopics,
+      catchphrases: persona.catchphrases,
+      petPeeves: persona.petPeeves,
     };
 
-    if (!result.success) {
-      console.error(chalk.red(`\n  ❌ Failed: ${normalizeApiError(result.error) || `HTTP ${response.status}`}\n`));
-      return;
-    }
+    // Register on Agent4Science
+    const registration = await registerOnAgent4Science(
+      config.api.apiUrl,
+      basicInfo.handle,
+      basicInfo.displayName,
+      basicInfo.bio,
+      typedPersona,
+    );
 
-    // Save to database (single source of truth for runtime)
+    if (!registration) return;
+
+    // Save to database + local backup
     try {
-      const config = loadConfig();
-      createDatabase(config.database.path);
-      const db = getDatabase();
-      const encryptedKey = encryptApiKey(result.apiKey || '', config.security.encryptionKey);
-      const typedPersona: AgentPersona = {
-        voice: persona.voice as PersonaVoice,
-        epistemics: persona.epistemics as EpistemicStyle,
-        spiceLevel: persona.spiceLevel,
-        preferredTopics: persona.preferredTopics,
-        catchphrases: persona.catchphrases,
-        petPeeves: persona.petPeeves,
-      };
-      db.addAgent(
-        {
-          id: result.agent?.id || '',
-          handle: basicInfo.handle,
-          displayName: basicInfo.displayName,
-          persona: typedPersona,
-          capability: selectedCapability,
-          researchDomain: selectedDomain,
-          enabled: true,
-          createdAt: new Date(),
-        },
-        encryptedKey
-      );
+      saveAgentToDb({
+        id: registration.id,
+        handle: basicInfo.handle,
+        displayName: basicInfo.displayName,
+        apiKey: registration.apiKey,
+        capability: selectedCapability,
+        researchDomain: selectedDomain,
+        persona: typedPersona,
+      }, config.security.encryptionKey, config.database.path);
     } catch (err) {
-      console.log(chalk.yellow('  Note: Could not save to database, saved locally instead'));
+      console.log(chalk.yellow(`  Warning: Could not save to database: ${err instanceof Error ? err.message : String(err)}`));
     }
-
-    // Also save locally as backup
-    saveLocalAgent({
-      id: result.agent?.id || '',
-      handle: basicInfo.handle,
-      displayName: basicInfo.displayName,
-      apiKey: result.apiKey || '',
-      persona,
-      createdAt: new Date().toISOString(),
-    });
-
-    // Epic game-style success celebration
-    console.clear();
 
     // Victory fanfare text
     await typeText(chalk.gray('\n  [ NEURAL UPLOAD COMPLETE ]'), 20);
@@ -702,13 +669,13 @@ ${chalk.yellow('  └───────────────────�
     // Show the agent's pixel art one more time
     console.log(PERSONALITY_ART[preset] || PERSONALITY_ART['custom']);
 
-    console.log(chalk.bold.cyan(`\n  ◆ Your agent ${chalk.bold.yellow(`@${result.agent?.handle}`)} has joined the arena! ◆\n`));
+    console.log(chalk.bold.cyan(`\n  ◆ Your agent ${chalk.bold.yellow(`@${basicInfo.handle}`)} has joined the arena! ◆\n`));
 
     console.log(chalk.white('  ┌───────────────────────────────────────────────────────────────┐'));
     console.log(chalk.white('  │') + chalk.bold.yellow('  🔑 SECRET API KEY - SAVE THIS!                              ') + chalk.white('│'));
     console.log(chalk.white('  ├───────────────────────────────────────────────────────────────┤'));
     console.log(chalk.white('  │                                                               │'));
-    console.log(chalk.white('  │  ') + chalk.bgYellow.black(` ${result.apiKey} `) + chalk.white('  │'));
+    console.log(chalk.white('  │  ') + chalk.bgYellow.black(` ${registration.apiKey} `) + chalk.white('  │'));
     console.log(chalk.white('  │                                                               │'));
     console.log(chalk.white('  └───────────────────────────────────────────────────────────────┘'));
 
@@ -739,7 +706,7 @@ ${chalk.yellow('  └───────────────────�
       case 'start':
         console.log(chalk.green('\n  ══════════════════════════════════════════════'));
         console.log(chalk.bold.yellow('  ◆ DEPLOYING AGENT TO ARENA... ◆\n'));
-        console.log(chalk.gray(`  Run: flamebird add @${result.agent?.handle} --api-key ${result.apiKey}`));
+        console.log(chalk.gray(`  Run: flamebird add @${basicInfo.handle} --api-key ${registration.apiKey}`));
         console.log(chalk.gray('  Then: flamebird start'));
         console.log(chalk.green('\n  ══════════════════════════════════════════════\n'));
         break;
@@ -1727,37 +1694,20 @@ export async function quickCreateAgentCommand(): Promise<void> {
 
       if (!createResult) return;
 
-      // Save to database
+      // Save to database + local backup
       try {
-        createDatabase(config.database.path);
-        const db = getDatabase();
-        const encryptedKey = encryptApiKey(createResult.apiKey ?? '', config.security.encryptionKey);
-        db.addAgent(
-          {
-            id: createResult.agent?.id ?? '',
-            handle: tryHandle,
-            displayName,
-            persona: persona as AgentPersona,
-            capability: quickCapability,
-            researchDomain: quickDomain,
-            enabled: true,
-            createdAt: new Date(),
-          },
-          encryptedKey
-        );
-      } catch {
-        console.log(chalk.yellow('  Note: Could not save to database'));
+        saveAgentToDb({
+          id: createResult.agent?.id ?? '',
+          handle: tryHandle,
+          displayName,
+          apiKey: createResult.apiKey ?? '',
+          capability: quickCapability,
+          researchDomain: quickDomain,
+          persona: persona as AgentPersona,
+        }, config.security.encryptionKey, config.database.path);
+      } catch (err) {
+        console.log(chalk.yellow(`  Warning: Could not save to database: ${err instanceof Error ? err.message : String(err)}`));
       }
-
-      // Save locally as backup
-      saveLocalAgent({
-        id: createResult.agent?.id ?? '',
-        handle: tryHandle,
-        displayName,
-        persona: persona as AgentPersona,
-        apiKey: createResult.apiKey ?? '',
-        createdAt: new Date().toISOString(),
-      });
 
       spinner.succeed(chalk.green(`Created ${chalk.bold(`@${tryHandle}`)} (${displayName})`));
 
@@ -1902,38 +1852,20 @@ export async function quickCreateAgentCommand(): Promise<void> {
       petPeeves: fullPersona.petPeeves,
     };
 
-    // Save to database (single source of truth for runtime)
+    // Save to database + local backup
     try {
-      const config = loadConfig();
-      createDatabase(config.database.path);
-      const db = getDatabase();
-      const encryptedKey = encryptApiKey(createResult.apiKey ?? '', config.security.encryptionKey);
-      db.addAgent(
-        {
-          id: createResult.agent?.id ?? '',
-          handle: tryHandle,
-          displayName,
-          persona: typedPersona,
-          capability: quickCapability,
-          researchDomain: quickDomain,
-          enabled: true,
-          createdAt: new Date(),
-        },
-        encryptedKey
-      );
+      saveAgentToDb({
+        id: createResult.agent?.id ?? '',
+        handle: tryHandle,
+        displayName,
+        apiKey: createResult.apiKey ?? '',
+        capability: quickCapability,
+        researchDomain: quickDomain,
+        persona: typedPersona,
+      }, config.security.encryptionKey, config.database.path);
     } catch (err) {
-      console.log(chalk.yellow('  Note: Could not save to database'));
+      console.log(chalk.yellow(`  Warning: Could not save to database: ${err instanceof Error ? err.message : String(err)}`));
     }
-
-    // Also save locally as backup
-    saveLocalAgent({
-      id: createResult.agent?.id ?? '',
-      handle: tryHandle,
-      displayName,
-      apiKey: createResult.apiKey ?? '',
-      persona: fullPersona,
-      createdAt: new Date().toISOString(),
-    });
 
     spinner.succeed(`Agent ${chalk.bold(`@${tryHandle}`)} created (${displayName}).`);
     console.log(chalk.gray(`  ${spiceEmoji(persona.spiceLevel)} ${persona.preferredTopics.join(', ')}\n`));
