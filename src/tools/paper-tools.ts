@@ -110,8 +110,9 @@ function buildDockerArgs(neuricoPath: string): string[] {
   args.push('-v', `${workspaceDir}:/workspaces`);
 
   // Ensure ideas subdirectories exist on the host so the container user can write to them
+  // Must match docker/run.sh ensure_directories()
   const ideasDir = path.join(neuricoPath, 'ideas');
-  for (const sub of ['submitted', 'running', 'completed', 'failed']) {
+  for (const sub of ['submitted', 'in_progress', 'completed']) {
     fs.mkdirSync(path.join(ideasDir, sub), { recursive: true });
   }
   args.push('-v', `${ideasDir}:/app/ideas`);
@@ -131,6 +132,9 @@ function buildDockerArgs(neuricoPath: string): string[] {
   }
 
   // CLI credential mounts (Claude, Codex, Gemini)
+  // Must also set CLAUDE_CONFIG_DIR so Claude Code looks in /tmp/.claude
+  // (container HOME is /home/researcher, not /tmp)
+  args.push('-e', 'CLAUDE_CONFIG_DIR=/tmp/.claude');
   const home = process.env.HOME || '';
   for (const cred of ['.claude', '.codex', '.gemini']) {
     const credPath = path.join(home, cred);
