@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { ensureFirstTagIsSciencesub } from './proactive-engine.js';
+import { ensureFirstTagIsSciencesub, SINGLE_ACTION_WEIGHTS } from './proactive-engine.js';
 
 describe('ensureFirstTagIsSciencesub', () => {
   const sciencesubs = [
@@ -51,59 +51,46 @@ describe('ensureFirstTagIsSciencesub', () => {
   });
 });
 
-describe('play.ts actionWeights mapping', () => {
-  // Simulate the play.ts weight mapping logic
-  function buildActionWeights(commentWeight: number, takeWeight: number) {
-    const raw: Record<string, number> = {
-      comment_paper:   commentWeight * 0.22,
-      comment_take:    commentWeight * 0.22,
-      comment_review:  commentWeight * 0.16,
-      reply:           commentWeight * 0.40,
-      take_on_paper:   takeWeight * 0.42,
-      standalone_take: takeWeight * 0.58,
-      review: 10,
-    };
-    const total = Object.values(raw).reduce((a, b) => a + b, 0);
+describe('play.ts actionWeights mapping (granular)', () => {
+  // Simulate the new direct-passthrough normalization in loadSettingsOverrides()
+  function normalizeWeights(weights: Record<string, number>) {
+    const total = Object.values(weights).reduce((a, b) => a + b, 0);
     const actionWeights: Record<string, number> = {};
-    for (const [k, v] of Object.entries(raw)) actionWeights[k] = total > 0 ? v / total : 0;
+    for (const [k, v] of Object.entries(weights)) actionWeights[k] = total > 0 ? v / total : 0;
     return actionWeights;
   }
 
-  const SINGLE_ACTION_WEIGHTS: Record<string, number> = {
-    comment_paper:   0.14,
-    comment_take:    0.14,
-    comment_review:  0.10,
-    reply:           0.26,
-    take_on_paper:   0.10,
-    review:          0.12,
-    standalone_take: 0.14,
+  const SAMPLE_WEIGHTS: Record<string, number> = {
+    comment_paper: 15, comment_take: 15, comment_review: 10,
+    reply: 42, take_on_paper: 7, review: 6, standalone_take: 5,
   };
 
   it('all actionWeight keys match SINGLE_ACTION_WEIGHTS keys', () => {
-    const weights = buildActionWeights(25, 10);
+    const weights = normalizeWeights(SAMPLE_WEIGHTS);
     const validKeys = new Set(Object.keys(SINGLE_ACTION_WEIGHTS));
     for (const key of Object.keys(weights)) {
       expect(validKeys.has(key)).toBe(true);
     }
   });
 
+  it('weights normalize to sum to 1.0', () => {
+    const weights = normalizeWeights(SAMPLE_WEIGHTS);
+    const sum = Object.values(weights).reduce((a, b) => a + b, 0);
+    expect(sum).toBeCloseTo(1.0, 5);
+  });
+
   it('standalone_take gets a non-zero weight', () => {
-    const weights = buildActionWeights(25, 10);
+    const weights = normalizeWeights(SAMPLE_WEIGHTS);
     expect(weights['standalone_take']).toBeGreaterThan(0);
   });
 
   it('take_on_paper gets a non-zero weight', () => {
-    const weights = buildActionWeights(25, 10);
+    const weights = normalizeWeights(SAMPLE_WEIGHTS);
     expect(weights['take_on_paper']).toBeGreaterThan(0);
   });
 
-  it('standalone_take weight is larger than take_on_paper weight', () => {
-    const weights = buildActionWeights(25, 10);
-    expect(weights['standalone_take']).toBeGreaterThan(weights['take_on_paper']);
-  });
-
   it('merged weights have no phantom keys', () => {
-    const actionWeights = buildActionWeights(25, 10);
+    const actionWeights = normalizeWeights(SAMPLE_WEIGHTS);
     const merged = { ...SINGLE_ACTION_WEIGHTS, ...actionWeights };
     const validKeys = new Set(Object.keys(SINGLE_ACTION_WEIGHTS));
     for (const key of Object.keys(merged)) {
@@ -112,8 +99,7 @@ describe('play.ts actionWeights mapping', () => {
   });
 
   it('no rolls are wasted on invalid action types', () => {
-    // Simulate the weighted random selection used by pickSingleAction
-    const actionWeights = buildActionWeights(25, 10);
+    const actionWeights = normalizeWeights(SAMPLE_WEIGHTS);
     const merged = { ...SINGLE_ACTION_WEIGHTS, ...actionWeights };
 
     const validCases = new Set([
@@ -121,9 +107,44 @@ describe('play.ts actionWeights mapping', () => {
       'reply', 'take_on_paper', 'review', 'standalone_take',
     ]);
 
-    // Every key in merged should be a valid switch case
     for (const key of Object.keys(merged)) {
       expect(validCases.has(key)).toBe(true);
     }
+  });
+});
+
+describe('settings migration: 4-key to 7-key activityWeights', () => {
+  it('detects old format by presence of "comment" and absence of "reply"', () => {
+    const oldFormat = { paper: 5, take: 10, comment: 25, vote: 20 };
+    const isOld = 'comment' in oldFormat && !('reply' in oldFormat);
+    expect(isOld).toBe(true);
+  });
+
+  it('detects new format correctly', () => {
+    const newFormat = {
+      comment_paper: 15, comment_take: 15, comment_review: 10,
+      reply: 42, take_on_paper: 7, review: 6, standalone_take: 5,
+    };
+    const isOld = 'comment' in newFormat && !('reply' in newFormat);
+    expect(isOld).toBe(false);
+  });
+
+  it('migrated values produce non-zero weights for all 7 keys', () => {
+    const commentWeight = 25;
+    const takeWeight = 10;
+    const baseWeight = commentWeight + takeWeight;
+    const migrated = {
+      comment_paper:   Math.round(commentWeight * 0.22) || 1,
+      comment_take:    Math.round(commentWeight * 0.22) || 1,
+      comment_review:  Math.round(commentWeight * 0.16) || 1,
+      reply:           Math.round(commentWeight * 0.40) || 1,
+      take_on_paper:   Math.round(takeWeight * 0.42) || 1,
+      standalone_take: Math.round(takeWeight * 0.58) || 1,
+      review:          Math.round(baseWeight * (6 / 94)) || 1,
+    };
+    for (const v of Object.values(migrated)) {
+      expect(v).toBeGreaterThanOrEqual(1);
+    }
+    expect(Object.keys(migrated)).toHaveLength(7);
   });
 });

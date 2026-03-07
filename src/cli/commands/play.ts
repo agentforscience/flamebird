@@ -1531,12 +1531,16 @@ interface RuntimeSettings {
     follow: number;
     sciencesub: number;
   };
-  // Activity weights for proactive engine action selection (pickWeightedAction)
+  // The 7 granular action weights that drive pickSingleAction() in the proactive engine.
+  // Votes, follows, and sciencesub joins are handled separately in Phase 2 (MAINTENANCE).
   activityWeights: {
-    paper: number;
-    take: number;
-    comment: number;
-    vote: number;
+    comment_paper: number;
+    comment_take: number;
+    comment_review: number;
+    reply: number;
+    take_on_paper: number;
+    review: number;
+    standalone_take: number;
   };
   // Activity toggles
   enabledActivities: {
@@ -1568,10 +1572,13 @@ const DEFAULT_SETTINGS: RuntimeSettings = {
     sciencesub: 0,     // no cooldown
   },
   activityWeights: {
-    paper: 5,
-    take: 10,
-    comment: 25,
-    vote: 20,
+    comment_paper:   15,
+    comment_take:    15,
+    comment_review:  10,
+    reply:           42,
+    take_on_paper:    7,
+    review:           6,
+    standalone_take:  5,
   },
   enabledActivities: {
     papers: true,
@@ -1583,11 +1590,44 @@ const DEFAULT_SETTINGS: RuntimeSettings = {
   },
 };
 
+const ACTION_KEY_META: Record<string, { label: string; icon: string; description: string }> = {
+  comment_paper:   { label: 'Comment Paper',   icon: '💬📄', description: 'Comment on a paper' },
+  comment_take:    { label: 'Comment Take',    icon: '💬📝', description: 'Comment on a take' },
+  comment_review:  { label: 'Comment Review',  icon: '💬🔬', description: 'Comment on a peer review' },
+  reply:           { label: 'Reply',           icon: '↩️ ',  description: 'Reply to a comment thread' },
+  take_on_paper:   { label: 'Take on Paper',   icon: '📝📄', description: 'Write a take about a paper' },
+  review:          { label: 'Peer Review',     icon: '🔬',   description: 'Write a peer review' },
+  standalone_take: { label: 'Standalone Take', icon: '📝✨', description: 'Write an independent take' },
+};
+
+const ACTION_KEYS = Object.keys(ACTION_KEY_META);
+
 function loadSettings(): RuntimeSettings {
   try {
     const settingsPath = './data/settings.json';
     if (fs.existsSync(settingsPath)) {
-      return JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
+      const raw = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
+
+      // Migrate old 4-key activityWeights to new 7-key format
+      if (raw.activityWeights && 'comment' in raw.activityWeights && !('reply' in raw.activityWeights)) {
+        const oldW = raw.activityWeights;
+        const commentWeight = oldW.comment ?? 25;
+        const takeWeight = oldW.take ?? 10;
+        const baseWeight = (commentWeight + takeWeight) || 1;
+        raw.activityWeights = {
+          comment_paper:   Math.round(commentWeight * 0.22) || 1,
+          comment_take:    Math.round(commentWeight * 0.22) || 1,
+          comment_review:  Math.round(commentWeight * 0.16) || 1,
+          reply:           Math.round(commentWeight * 0.40) || 1,
+          take_on_paper:   Math.round(takeWeight * 0.42) || 1,
+          standalone_take: Math.round(takeWeight * 0.58) || 1,
+          review:          Math.round(baseWeight * (6 / 94)) || 1,
+        };
+        // Auto-save migrated format
+        fs.writeFileSync(settingsPath, JSON.stringify(raw, null, 2));
+      }
+
+      return raw as RuntimeSettings;
     }
   } catch {
     // Use defaults
@@ -1624,33 +1664,24 @@ export function loadSettingsOverrides(): SettingsOverrides | null {
   // Preserve 'review' (not in settings UI)
   rateLimits.push({ action: 'review', maxRequests: 12, window: 'day', cooldownMs: 7200000 });
 
-  // Normalize activityWeights → actionWeights for proactive engine
-  // Keys must match SINGLE_ACTION_WEIGHTS in proactive-engine.ts:
-  //   comment_paper, comment_take, comment_review, reply, take_on_paper, review, standalone_take
-  // User-facing categories are mapped to these specific action keys.
+  // activityWeights are now the 7 granular action keys directly.
+  // Zero out weights for disabled activities so the engine never picks them.
   const ea = settings.enabledActivities;
-  const w = settings.activityWeights;
-  // Zero out weights for disabled activities so the engine never picks them
-  const commentWeight = ea.comments !== false ? (w.comment ?? 25) : 0;
-  const takeWeight = ea.takes !== false ? (w.take ?? 10) : 0;
-  // Scale review proportionally to maintain its natural ~6% share (matching SINGLE_ACTION_WEIGHTS).
-  // Using a fixed value like 10 would dominate when comment/take sliders are low.
-  const baseWeight = (commentWeight + takeWeight) || 1;
-  const raw: Record<string, number> = {
-    // "comment" distributes across comment subtypes and reply
-    comment_paper:   commentWeight * 0.22,   // 22% of comment weight
-    comment_take:    commentWeight * 0.22,   // 22% of comment weight
-    comment_review:  commentWeight * 0.16,   // 16% of comment weight
-    reply:           commentWeight * 0.40,   // 40% of comment weight
-    // "take" distributes across paper-linked and standalone takes
-    take_on_paper:   takeWeight * 0.42,      // 42% of take weight
-    standalone_take: takeWeight * 0.58,      // 58% of take weight
-    // review scales with baseWeight so it stays ~6% regardless of slider values
-    review:          baseWeight * (6 / 94),
-  };
-  const total = Object.values(raw).reduce((a, b) => a + b, 0);
+  const w = { ...settings.activityWeights };
+  if (ea.comments === false) {
+    w.comment_paper = 0;
+    w.comment_take = 0;
+    w.comment_review = 0;
+    w.reply = 0;
+  }
+  if (ea.takes === false) {
+    w.take_on_paper = 0;
+    w.standalone_take = 0;
+  }
+  // Normalize to sum=1.0
+  const total = Object.values(w).reduce((a, b) => a + b, 0);
   const actionWeights: Record<string, number> = {};
-  for (const [k, v] of Object.entries(raw)) actionWeights[k] = total > 0 ? v / total : 0;
+  for (const [k, v] of Object.entries(w)) actionWeights[k] = total > 0 ? v / total : 0;
 
   // Convert enabledActivities → ProactiveConfig flags
   // Note: ea.papers is intentionally excluded from enablePosting — neurico paper generation
@@ -1709,18 +1740,24 @@ async function settingsMenu(): Promise<void> {
   }
 
   // Show activity weights
-  console.log('\n' + chalk.bold('    🎲 Activity Weights (probability distribution):\n'));
+  // Show the 7 granular action weights that reach the proactive engine
+  console.log('\n' + chalk.bold('    🎲 Action Weights (creative action probability):\n'));
   const weights = settings.activityWeights || DEFAULT_SETTINGS.activityWeights;
   const totalWeight = Object.values(weights).reduce((a, b) => a + b, 0);
 
-  for (const [activity, weight] of Object.entries(weights)) {
-    const pct = Math.round((weight / totalWeight) * 100);
-    const bar = '▓'.repeat(Math.round(pct / 5)).padEnd(20, '░');
-    console.log(`    ${icons[activity] || '•'} ${chalk.cyan(activity.padEnd(10))} ${chalk.yellow(bar)} ${chalk.white(String(pct).padStart(2))}%`);
+  for (const key of ACTION_KEYS) {
+    const weight = (weights as Record<string, number>)[key] || 0;
+    const pct = totalWeight > 0 ? Math.round((weight / totalWeight) * 100) : 0;
+    const meta = ACTION_KEY_META[key];
+    const bar = '▓'.repeat(Math.round(pct / 2.5)).padEnd(20, '░');
+    console.log(`    ${meta.icon} ${chalk.cyan(meta.label.padEnd(16))} ${chalk.yellow(bar)} ${chalk.white(String(pct).padStart(2))}% ${chalk.gray(`(raw: ${weight})`)}`);
   }
 
+  console.log(chalk.gray('\n    These weights control the ONE creative action per heartbeat (Phase 4).'));
+  console.log(chalk.gray('    Votes, follows, and sciencesub joins are handled separately.\n'));
+
   // Show enabled activities
-  console.log('\n' + chalk.bold('    ✅ Enabled Activities:\n'));
+  console.log(chalk.bold('    ✅ Enabled Activities:\n'));
   const enabled = settings.enabledActivities || DEFAULT_SETTINGS.enabledActivities;
   const activityList = Object.entries(enabled).map(([name, isEnabled]) => {
     const icon = isEnabled ? chalk.green('●') : chalk.gray('○');
@@ -1728,6 +1765,8 @@ async function settingsMenu(): Promise<void> {
   });
   console.log('    ' + activityList.join('  '));
 
+  console.log('');
+  console.log(chalk.gray(`    💾 Saved to: ${chalk.white('data/settings.json')}  |  ⏱  Applied on next agent start`));
   console.log('');
 
   const { action } = await inquirer.prompt([
@@ -1810,6 +1849,15 @@ interface EngagementPreset {
     follow: number;
     sciencesub: number;
   };
+  activityWeights?: {
+    comment_paper: number;
+    comment_take: number;
+    comment_review: number;
+    reply: number;
+    take_on_paper: number;
+    review: number;
+    standalone_take: number;
+  };
 }
 
 const ENGAGEMENT_PRESETS: Record<string, EngagementPreset> = {
@@ -1818,24 +1866,40 @@ const ENGAGEMENT_PRESETS: Record<string, EngagementPreset> = {
     description: 'Slow and steady. Minimal LLM costs, organic feel.',
     rateLimits: { paper: 2, take: 10, comment: 50, vote: 100, follow: 20, sciencesub: 1 },
     cooldowns: { paper: 600000, take: 60000, comment: 30000, vote: 5000, follow: 10000, sciencesub: 0 },
+    activityWeights: {
+      comment_paper: 12, comment_take: 12, comment_review: 8,
+      reply: 30, take_on_paper: 10, review: 18, standalone_take: 10,
+    },
   },
   moderate: {
     name: '🚶 Moderate',
     description: 'Balanced activity. Good engagement without breaking the bank.',
     rateLimits: { paper: 5, take: 30, comment: 150, vote: 300, follow: 50, sciencesub: 2 },
     cooldowns: { paper: 300000, take: 30000, comment: 10000, vote: 2000, follow: 5000, sciencesub: 0 },
+    activityWeights: {
+      comment_paper: 15, comment_take: 15, comment_review: 10,
+      reply: 35, take_on_paper: 8, review: 8, standalone_take: 9,
+    },
   },
   aggressive: {
     name: '🏃 Aggressive',
     description: 'High activity. Fast engagement, noticeable LLM costs.',
     rateLimits: { paper: 20, take: 100, comment: 500, vote: 1000, follow: 200, sciencesub: 5 },
     cooldowns: { paper: 60000, take: 10000, comment: 3000, vote: 500, follow: 2000, sciencesub: 0 },
+    activityWeights: {
+      comment_paper: 18, comment_take: 18, comment_review: 12,
+      reply: 38, take_on_paper: 5, review: 4, standalone_take: 5,
+    },
   },
   insane: {
     name: '🚀 INSANE',
     description: 'Maximum engagement. Votes and comments explode.',
     rateLimits: { paper: 50, take: 200, comment: 1000, vote: 5000, follow: 500, sciencesub: 10 },
     cooldowns: { paper: 30000, take: 2000, comment: 500, vote: 100, follow: 500, sciencesub: 0 },
+    activityWeights: {
+      comment_paper: 20, comment_take: 20, comment_review: 12,
+      reply: 35, take_on_paper: 5, review: 3, standalone_take: 5,
+    },
   },
 };
 
@@ -1919,6 +1983,7 @@ async function engagementPresetsMenu(settings: RuntimeSettings): Promise<void> {
       ...settings,
       rateLimits: { ...preset.rateLimits },
       cooldowns: { ...preset.cooldowns },
+      ...(preset.activityWeights && { activityWeights: { ...preset.activityWeights } }),
     };
     saveSettings(newSettings);
 
@@ -2049,22 +2114,21 @@ async function adjustCooldowns(settings: RuntimeSettings): Promise<void> {
 
 async function adjustActivityWeights(settings: RuntimeSettings): Promise<void> {
   console.clear();
-  console.log(chalk.bold.cyan('\n    🎲 ACTIVITY WEIGHTS\n'));
-  console.log(chalk.gray('    Control how often each activity type occurs (higher = more frequent)\n'));
+  console.log(chalk.bold.cyan('\n    🎲 ACTION WEIGHTS\n'));
+  console.log(chalk.gray('    Control how often each creative action type occurs (higher = more frequent)'));
+  console.log(chalk.gray('    These only affect the ONE creative action per heartbeat (Phase 4).\n'));
 
   const weights = settings.activityWeights || DEFAULT_SETTINGS.activityWeights;
   const totalWeight = Object.values(weights).reduce((a, b) => a + b, 0);
 
   // Show current distribution
   console.log(chalk.bold('    Current Distribution:\n'));
-  const weightIcons: Record<string, string> = {
-    paper: '📄', take: '📝', comment: '💬', vote: '⬆️',
-  };
-
-  for (const [activity, weight] of Object.entries(weights)) {
-    const pct = Math.round((weight / totalWeight) * 100);
-    const bar = '▓'.repeat(Math.round(pct / 5)).padEnd(20, '░');
-    console.log(`    ${weightIcons[activity] || '•'} ${chalk.cyan(activity.padEnd(10))} ${chalk.yellow(bar)} ${chalk.white(String(pct).padStart(2))}% ${chalk.gray(`(weight: ${weight})`)}`);
+  for (const key of ACTION_KEYS) {
+    const weight = (weights as Record<string, number>)[key] || 0;
+    const pct = totalWeight > 0 ? Math.round((weight / totalWeight) * 100) : 0;
+    const meta = ACTION_KEY_META[key];
+    const bar = '▓'.repeat(Math.round(pct / 2.5)).padEnd(20, '░');
+    console.log(`    ${meta.icon} ${chalk.cyan(meta.label.padEnd(16))} ${chalk.yellow(bar)} ${chalk.white(String(pct).padStart(2))}% ${chalk.gray(`(weight: ${weight})`)}`);
   }
 
   console.log('');
@@ -2073,16 +2137,20 @@ async function adjustActivityWeights(settings: RuntimeSettings): Promise<void> {
     {
       type: 'list',
       name: 'selectedActivity',
-      message: chalk.white('Select activity to adjust:'),
+      message: chalk.white('Select action to adjust:'),
       prefix: '    ',
       choices: [
-        ...Object.keys(weights).map(a => ({
-          name: `${weightIcons[a] || '•'} ${a.padEnd(12)} ${chalk.gray(`(current: ${weights[a as keyof typeof weights]})`)}`,
-          value: a,
-        })),
+        ...ACTION_KEYS.map(key => {
+          const meta = ACTION_KEY_META[key];
+          const weight = (weights as Record<string, number>)[key] || 0;
+          return {
+            name: `${meta.icon} ${meta.label.padEnd(16)} ${chalk.gray(`(current: ${weight})`)} ${chalk.dim(meta.description)}`,
+            value: key,
+          };
+        }),
         new inquirer.Separator(),
-        { name: chalk.yellow('⚡ Quick: Boost engagement (comments, votes)'), value: '__boost_engagement__' },
-        { name: chalk.blue('📚 Quick: Boost research (papers, takes)'), value: '__boost_research__' },
+        { name: chalk.yellow('⚡ Quick: Boost engagement (comments, replies)'), value: '__boost_engagement__' },
+        { name: chalk.blue('📚 Quick: Boost research (reviews, takes)'), value: '__boost_research__' },
         new inquirer.Separator(),
         { name: chalk.gray('← Back'), value: 'back' },
       ],
@@ -2094,46 +2162,56 @@ async function adjustActivityWeights(settings: RuntimeSettings): Promise<void> {
     return;
   }
 
-  // Quick presets
+  // Quick presets (7-key format)
   if (selectedActivity === '__boost_engagement__') {
-    settings.activityWeights = { paper: 3, take: 5, comment: 30, vote: 25 };
+    settings.activityWeights = {
+      comment_paper: 18, comment_take: 18, comment_review: 12,
+      reply: 35, take_on_paper: 5, review: 4, standalone_take: 8,
+    };
     saveSettings(settings);
-    console.log(chalk.green('\n    ✓ Engagement mode activated! More comments and votes\n'));
+    console.log(chalk.green('\n    ✓ Engagement mode activated! More comments and replies'));
+    console.log(chalk.gray('    💾 Saved to data/settings.json\n'));
     await inquirer.prompt([{ type: 'input', name: 'c', message: chalk.gray('Press Enter to continue...'), prefix: '    ' }]);
     await settingsMenu();
     return;
   }
 
   if (selectedActivity === '__boost_research__') {
-    settings.activityWeights = { paper: 20, take: 25, comment: 15, vote: 10 };
+    settings.activityWeights = {
+      comment_paper: 8, comment_take: 8, comment_review: 6,
+      reply: 15, take_on_paper: 20, review: 25, standalone_take: 18,
+    };
     saveSettings(settings);
-    console.log(chalk.green('\n    ✓ Research mode activated! More papers and takes\n'));
+    console.log(chalk.green('\n    ✓ Research mode activated! More reviews and takes'));
+    console.log(chalk.gray('    💾 Saved to data/settings.json\n'));
     await inquirer.prompt([{ type: 'input', name: 'c', message: chalk.gray('Press Enter to continue...'), prefix: '    ' }]);
     await settingsMenu();
     return;
   }
 
+  const meta = ACTION_KEY_META[selectedActivity];
   const { newWeight } = await inquirer.prompt([
     {
       type: 'number',
       name: 'newWeight',
-      message: chalk.white(`New weight for ${selectedActivity} (1-50):`),
+      message: chalk.white(`New weight for ${meta.label} (0-100, 0 = disabled):`),
       prefix: '    ',
-      default: weights[selectedActivity as keyof typeof weights],
+      default: (weights as Record<string, number>)[selectedActivity] || 0,
       validate: (val: number) => {
-        if (val < 1) return 'Must be at least 1';
-        if (val > 50) return 'Maximum is 50';
+        if (val < 0) return 'Must be at least 0';
+        if (val > 100) return 'Maximum is 100';
         return true;
       },
     },
   ]);
 
-  settings.activityWeights[selectedActivity as keyof typeof settings.activityWeights] = newWeight;
+  (settings.activityWeights as Record<string, number>)[selectedActivity] = newWeight;
   saveSettings(settings);
 
   const newTotal = Object.values(settings.activityWeights).reduce((a, b) => a + b, 0);
-  const newPct = Math.round((newWeight / newTotal) * 100);
-  console.log(chalk.green(`\n    ✓ ${selectedActivity} weight set to ${newWeight} (${newPct}% of total)\n`));
+  const newPct = newTotal > 0 ? Math.round((newWeight / newTotal) * 100) : 0;
+  console.log(chalk.green(`\n    ✓ ${meta.label} weight set to ${newWeight} (${newPct}% of total)`));
+  console.log(chalk.gray('    💾 Saved to data/settings.json\n'));
 
   await inquirer.prompt([{ type: 'input', name: 'c', message: chalk.gray('Press Enter to continue...'), prefix: '    ' }]);
   await adjustActivityWeights(settings);

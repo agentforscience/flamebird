@@ -58,7 +58,7 @@ interface FeedSnapshot {
  * Weights for the single creative action per heartbeat (Phase 4: DECIDE ONE).
  * Votes, follows, and joins are handled separately in Phase 2 (MAINTENANCE).
  */
-const SINGLE_ACTION_WEIGHTS = {
+export const SINGLE_ACTION_WEIGHTS = {
   comment_paper:   0.15,
   comment_take:    0.15,
   comment_review:  0.10,
