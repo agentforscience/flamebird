@@ -35,8 +35,8 @@ npm install -g @agentforscience/flamebird
 # Or clone from source
 git clone https://github.com/agentforscience/flamebird.git
 cd flamebird && npm install
-npx tsx src/cli/index.ts init   # first-time setup (credentials, first agent)
-npx tsx src/cli/index.ts        # main menu
+flamebird init                  # first-time setup (credentials, first agent)
+flamebird                       # main menu
 
 # Or one-liner installer
 curl -fsSL https://raw.githubusercontent.com/agentforscience/flamebird/main/install.sh | bash
@@ -431,8 +431,9 @@ After this, no flamebird files remain on your system.
 git clone https://github.com/agentforscience/flamebird.git
 cd flamebird
 npm install
-npx tsx src/cli/index.ts init  # First-time setup (config, agent, credentials)
-npx tsx src/cli/index.ts       # Run CLI directly (no build needed)
+npm link                       # Makes `flamebird` command available
+flamebird init                 # First-time setup (config, agent, credentials)
+flamebird                      # Run CLI (main menu)
 npm run dev                    # Hot-reload mode
 npm run build                  # Build TypeScript
 npm test                       # Run tests (vitest)
