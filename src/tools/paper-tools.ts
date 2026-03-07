@@ -21,6 +21,72 @@ const logger = createLogger('paper-tools');
 
 const DOCKER_IMAGE = 'chicagohai/neurico:latest';
 
+/**
+ * Extract the current Claude OAuth access token.
+ *
+ * Claude Code refreshes OAuth tokens in the macOS Keychain but does NOT
+ * always update ~/.claude/.claude.json in real-time. So we try:
+ *   1. macOS Keychain (always has the freshest token)
+ *   2. ~/.claude/.claude.json (fallback for non-macOS or if Keychain fails)
+ */
+function extractClaudeOAuthToken(homeDir: string): string | null {
+  // 1. Try macOS Keychain — has the latest refreshed token
+  const keychainToken = readClaudeTokenFromKeychain();
+  if (keychainToken) return keychainToken;
+
+  // 2. Fall back to .claude.json
+  try {
+    const configPath = path.join(homeDir, '.claude', '.claude.json');
+    if (!fs.existsSync(configPath)) return null;
+
+    const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+    const oauth = config.claudeAiOauth;
+    if (!oauth?.accessToken) return null;
+
+    // Check expiry — skip if token expires within 5 minutes
+    if (oauth.expiresAt && Date.now() > oauth.expiresAt - 5 * 60 * 1000) {
+      logger.warn('Claude OAuth token from .claude.json is expired');
+      return null;
+    }
+
+    return oauth.accessToken;
+  } catch (err) {
+    logger.debug({ err }, 'Failed to read Claude OAuth token from .claude.json');
+    return null;
+  }
+}
+
+/**
+ * Read the Claude OAuth token from macOS Keychain.
+ * Claude Code stores credentials under service "Claude Code-credentials".
+ * The value is a JSON blob containing { claudeAiOauth: { accessToken, expiresAt, ... } }.
+ */
+function readClaudeTokenFromKeychain(): string | null {
+  try {
+    const raw = execSync(
+      'security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null',
+      { encoding: 'utf-8', timeout: 5000 },
+    ).trim();
+    if (!raw) return null;
+
+    const data = JSON.parse(raw);
+    const oauth = data.claudeAiOauth;
+    if (!oauth?.accessToken) return null;
+
+    // Check expiry with 5-minute buffer
+    if (oauth.expiresAt && Date.now() > oauth.expiresAt - 5 * 60 * 1000) {
+      logger.warn('Claude OAuth token from Keychain is expired');
+      return null;
+    }
+
+    logger.info('Read fresh Claude OAuth token from macOS Keychain');
+    return oauth.accessToken;
+  } catch {
+    // Not macOS, no keychain entry, or parse error — that's fine
+    return null;
+  }
+}
+
 // ============================================================================
 // Types
 // ============================================================================
@@ -140,6 +206,28 @@ function buildDockerArgs(neuricoPath: string): string[] {
     const credPath = path.join(home, cred);
     if (fs.existsSync(credPath)) {
       args.push('-v', `${credPath}:/tmp/${cred}`);
+    }
+  }
+
+  // Inject ANTHROPIC_API_KEY for claude provider if not already in .env.
+  // On macOS, OAuth tokens live in the system Keychain — inaccessible from
+  // inside Docker even when ~/.claude is mounted. Extract the current OAuth
+  // access token from .claude.json and pass it explicitly so the claude CLI
+  // inside the container can authenticate.
+  const neuricoEnvPath = path.join(neuricoPath, '.env');
+  const neuricoEnvContent = fs.existsSync(neuricoEnvPath) ? fs.readFileSync(neuricoEnvPath, 'utf-8') : '';
+  const hasAnthropicKey = /^ANTHROPIC_API_KEY=\S+/m.test(neuricoEnvContent);
+
+  if (!hasAnthropicKey) {
+    const oauthToken = extractClaudeOAuthToken(home);
+    if (oauthToken) {
+      args.push('-e', `ANTHROPIC_API_KEY=${oauthToken}`);
+      logger.info('Injected OAuth access token as ANTHROPIC_API_KEY for Docker container');
+    } else if (process.env.ANTHROPIC_API_KEY) {
+      args.push('-e', `ANTHROPIC_API_KEY=${process.env.ANTHROPIC_API_KEY}`);
+      logger.info('Injected host ANTHROPIC_API_KEY for Docker container');
+    } else {
+      logger.warn('No ANTHROPIC_API_KEY available for Docker container — claude CLI may fail to authenticate');
     }
   }
 

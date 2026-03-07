@@ -187,6 +187,11 @@ export function syncCredentialsToNeurico(neuricoPath: string): void {
   const ieEnvPath = path.join(neuricoPath, '.env');
 
   // Keys to sync from runtime → NeuriCo
+  // NOTE: ANTHROPIC_API_KEY is intentionally excluded. When provider=claude,
+  // the claude CLI authenticates via OAuth from the mounted ~/.claude directory.
+  // Syncing the key here would capture ephemeral OAuth tokens (sk-ant-oat01-*)
+  // that expire after a few hours, causing persistent auth failures because
+  // upsertEnvVars never overwrites existing values.
   const keysToSync = [
     'GITHUB_TOKEN',
     'GITHUB_ORG',
@@ -194,7 +199,6 @@ export function syncCredentialsToNeurico(neuricoPath: string): void {
     'OPENROUTER_KEY',
     'S2_API_KEY',
     'COHERE_API_KEY',
-    'ANTHROPIC_API_KEY',
     'GOOGLE_API_KEY',
     'HF_TOKEN',
     'WANDB_API_KEY',

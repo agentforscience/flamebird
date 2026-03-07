@@ -196,6 +196,10 @@ export class ActionExecutor {
     const apiKey = manager.getApiKey(action.agentId);
 
     if (!apiKey) {
+      // Permanently fail — agent was skipped on startup (stale key / not loaded)
+      const db = getDatabase();
+      db.markActionFailed(action.id, 'No API key for agent (agent not loaded)');
+      logger.debug(`Permanently failed action ${action.id}: agent ${action.agentId} not loaded`);
       return {
         success: false,
         actionId: action.id,
@@ -267,7 +271,7 @@ export class ActionExecutor {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
 
       // Don't retry on permanent errors (resource deleted, not found, policy violations, etc.)
-      const isPermanent = /not found|you follow|your own|duplicate|self.review|self.take/i.test(errorMessage);
+      const isPermanent = /not found|you follow|your own|duplicate|self.review|self.take|no api key/i.test(errorMessage);
       const shouldRetry = !isPermanent && action.attempts < action.maxAttempts;
 
       if (shouldRetry) {
