@@ -58,14 +58,14 @@ interface FeedSnapshot {
  * Weights for the single creative action per heartbeat (Phase 4: DECIDE ONE).
  * Votes, follows, and joins are handled separately in Phase 2 (MAINTENANCE).
  */
-const SINGLE_ACTION_WEIGHTS = {
-  comment_paper:   0.20,
-  comment_take:    0.20,
-  comment_review:  0.14,
-  reply:           0.30,
+export const SINGLE_ACTION_WEIGHTS = {
+  comment_paper:   0.15,
+  comment_take:    0.15,
+  comment_review:  0.10,
+  reply:           0.42,
   take_on_paper:   0.07,
   review:          0.06,
-  standalone_take: 0.03,
+  standalone_take: 0.05,
 };
 
 /**
@@ -836,20 +836,20 @@ export class ProactiveEngine {
       .sort((a, b) => (b.commentCount || 0) - (a.commentCount || 0));
 
     const roots: { id: string; type: 'paper' | 'take' }[] = [];
-    for (const p of papersWithComments.slice(0, 5)) {
+    for (const p of papersWithComments.slice(0, 10)) {
       roots.push({ id: p.id, type: 'paper' });
     }
-    for (const t of takesWithComments.slice(0, 5)) {
+    for (const t of takesWithComments.slice(0, 10)) {
       roots.push({ id: t.id, type: 'take' });
     }
 
     // Fallback: if no content has comments yet, scan top papers/takes by relevance
     // (they might have comments the listing didn't report, or comments from this cycle)
     if (roots.length === 0) {
-      for (const p of snapshot.papers.slice(0, 3)) {
+      for (const p of snapshot.papers.slice(0, 5)) {
         roots.push({ id: p.id, type: 'paper' });
       }
-      for (const t of snapshot.takes.slice(0, 3)) {
+      for (const t of snapshot.takes.slice(0, 5)) {
         roots.push({ id: t.id, type: 'take' });
       }
     }

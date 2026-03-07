@@ -336,7 +336,8 @@ Output ONLY valid JSON, no markdown fences.`,
     });
 
     if (!response.ok) {
-      logger.warn('Report summarization LLM call failed');
+      const errorBody = await response.text().catch(() => '(unreadable)');
+      logger.warn({ status: response.status, body: errorBody.slice(0, 200) }, 'Report summarization LLM call failed');
       return null;
     }
 
@@ -381,7 +382,7 @@ Output ONLY valid JSON, no markdown fences.`,
  * Run the full NeuriCo paper generation flow:
  * discover topic → generate idea YAML → submit + run → post to Agent4Science
  */
-async function runNeuricoFlow(config: ManagerAgentConfig): Promise<PaperGenerationResult> {
+export async function runNeuricoFlow(config: ManagerAgentConfig): Promise<PaperGenerationResult> {
   const iePath = config.neuricoPath || resolveNeuricoPath();
   if (!iePath) {
     return {
@@ -422,6 +423,34 @@ async function runNeuricoFlow(config: ManagerAgentConfig): Promise<PaperGenerati
     return { success: false, error: ieResult.error || 'NeuriCo run failed' };
   }
 
+  // ── Quality gate: reject runs that produced no substantive output ──
+  // A real REPORT.md is 1000+ chars; anything under 200 is likely a stub or error message
+  if (!ieResult.abstract || ieResult.abstract.length < 200) {
+    logger.error({
+      agentId: config.agentId,
+      abstractLength: ieResult.abstract?.length ?? 0,
+      title: ieResult.title,
+    }, 'NeuriCo run produced no substantive report — skipping paper posting');
+    return {
+      success: false,
+      title: ieResult.title,
+      githubUrl: ieResult.githubUrl,
+      error: `NeuriCo completed but REPORT.md is missing or too short (${ieResult.abstract?.length ?? 0} chars). Research may have failed silently.`,
+    };
+  }
+
+  if (!ieResult.githubUrl) {
+    logger.error({
+      agentId: config.agentId,
+      title: ieResult.title,
+    }, 'NeuriCo run produced no GitHub URL — skipping paper posting');
+    return {
+      success: false,
+      title: ieResult.title,
+      error: 'NeuriCo completed but no GitHub URL was found. The repo may not have been created.',
+    };
+  }
+
   // Step 4: Summarize REPORT.md via LLM for a quality post
   // Keep the deterministic title from REPORT.md — it's more accurate than LLM-generated titles
   const deterministicTitle = ieResult.title;
@@ -453,6 +482,9 @@ async function runNeuricoFlow(config: ManagerAgentConfig): Promise<PaperGenerati
       config.llmModel,
       sciencesubs,
     );
+    if (!summary) {
+      logger.warn({ agentId: config.agentId, reportLength: postAbstract.length }, 'LLM summarization returned null — posting will use raw report content with fallback fields');
+    }
     if (summary) {
       // Prefer the deterministic title from REPORT.md over LLM-generated title
       // (LLM may rephrase it; the actual report heading is more accurate)
@@ -470,8 +502,10 @@ async function runNeuricoFlow(config: ManagerAgentConfig): Promise<PaperGenerati
 
   // ── Ensure all required fields meet API minimums ──
   // API: title min 10 chars, max 200
-  if (postTitle.length < 10) {
-    postTitle = `Research: ${postTitle} — a novel investigation in ${topic}`;
+  if (!postTitle || postTitle.length < 10) {
+    postTitle = postTitle
+      ? `Research: ${postTitle} — a novel investigation in ${topic}`
+      : `Research: ${topic}`;
   }
   postTitle = smartTruncate(postTitle, 200);
 

@@ -3,6 +3,7 @@
  * Typed client for interacting with Agent4Science's REST API
  */
 
+import dns from 'dns';
 import type {
   Agent4ScienceAgent,
   Agent4SciencePaper,
@@ -13,6 +14,10 @@ import type {
   CommentIntent,
 } from '../types.js';
 import { createLogger } from '../logging/logger.js';
+
+// Node.js defaults to IPv6 which fails on many networks.
+// Force IPv4-first to prevent "fetch failed" errors.
+dns.setDefaultResultOrder('ipv4first');
 
 const logger = createLogger('a4s-client');
 
@@ -85,79 +90,110 @@ export class Agent4ScienceClient {
     apiKey: string,
     body?: unknown
   ): Promise<ApiResponse<T>> {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), this.timeout);
+    const maxRetries = 3;
 
-    try {
-      const response = await fetch(`${this.baseUrl}${path}`, {
-        method,
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${apiKey}`,
-        },
-        body: body ? JSON.stringify(body) : undefined,
-        signal: controller.signal,
-      });
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), this.timeout);
 
-      clearTimeout(timeoutId);
-
-      const rawData = await response.json() as Record<string, unknown>;
-
-      if (!response.ok) {
-        const errorMsg = normalizeApiError(rawData.error);
-        const errorObj = typeof rawData.error === 'object' && rawData.error !== null
-          ? rawData.error as Record<string, unknown>
-          : null;
-        const code = (errorObj?.code as string) ?? (rawData as { code?: string }).code;
-        logger.error({
+      try {
+        const response = await fetch(`${this.baseUrl}${path}`, {
           method,
-          path,
-          status: response.status,
-          error: errorMsg,
-          code,
-          rawError: rawData.error,
-        }, `API request failed: ${method} ${path} → ${response.status}`);
-        return {
-          success: false,
-          error: errorMsg || `HTTP ${response.status}`,
-          code,
-        };
-      }
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${apiKey}`,
+          },
+          body: body ? JSON.stringify(body) : undefined,
+          signal: controller.signal,
+        });
 
-      // Agent4Science API wraps responses like { success: true, agent: {...} } or { success: true, papers: [...] }
-      // Extract the actual data from common wrapper keys
-      let extractedData: unknown = rawData;
-      const wrapperKeys = ['agent', 'paper', 'papers', 'take', 'takes', 'review', 'reviews', 'comment', 'comments', 'notifications', 'sciencesubs', 'items', 'data'];
-      const matchingKeys = wrapperKeys.filter(key => key in rawData && rawData[key] !== undefined);
+        clearTimeout(timeoutId);
 
-      if (matchingKeys.length === 1) {
-        // Single data key — extract it (e.g., { success, agent: {...} } → agent)
-        extractedData = rawData[matchingKeys[0]];
-      } else if (matchingKeys.length > 1) {
-        // Multiple data keys (e.g., feed: { papers, takes }, random: { papers, takes, reviews })
-        // Pass through the full response so callers can access all keys
-        extractedData = rawData;
-      }
+        const rawData = await response.json() as Record<string, unknown>;
 
-      return {
-        success: true,
-        data: extractedData as T,
-      };
-    } catch (error) {
-      clearTimeout(timeoutId);
+        if (!response.ok) {
+          const errorMsg = normalizeApiError(rawData.error);
+          const errorObj = typeof rawData.error === 'object' && rawData.error !== null
+            ? rawData.error as Record<string, unknown>
+            : null;
+          const code = (errorObj?.code as string) ?? (rawData as { code?: string }).code;
 
-      if (error instanceof Error) {
-        if (error.name === 'AbortError') {
-          logger.error({ method, path, timeout: this.timeout }, `API request timed out: ${method} ${path}`);
-          return { success: false, error: 'Request timeout' };
+          // Retry on 5xx server errors and 429 rate limits
+          if (attempt < maxRetries && (response.status >= 500 || response.status === 429)) {
+            const delay = attempt * 2000;
+            logger.warn({ method, path, status: response.status, attempt, delay }, `Retryable API error, retrying in ${delay}ms`);
+            await new Promise(resolve => setTimeout(resolve, delay));
+            continue;
+          }
+
+          logger.error({
+            method,
+            path,
+            status: response.status,
+            error: errorMsg,
+            code,
+            rawError: rawData.error,
+          }, `API request failed: ${method} ${path} → ${response.status}`);
+          return {
+            success: false,
+            error: errorMsg || `HTTP ${response.status}`,
+            code,
+          };
         }
-        logger.error({ method, path, error: error.message }, `API request error: ${method} ${path}`);
-        return { success: false, error: error.message };
-      }
 
-      logger.error({ method, path }, `API request unknown error: ${method} ${path}`);
-      return { success: false, error: 'Unknown error' };
+        // Agent4Science API wraps responses like { success: true, agent: {...} } or { success: true, papers: [...] }
+        // Extract the actual data from common wrapper keys
+        let extractedData: unknown = rawData;
+        const wrapperKeys = ['agent', 'paper', 'papers', 'take', 'takes', 'review', 'reviews', 'comment', 'comments', 'notifications', 'sciencesubs', 'items', 'data'];
+        const matchingKeys = wrapperKeys.filter(key => key in rawData && rawData[key] !== undefined);
+
+        if (matchingKeys.length === 1) {
+          // Single data key — extract it (e.g., { success, agent: {...} } → agent)
+          extractedData = rawData[matchingKeys[0]];
+        } else if (matchingKeys.length > 1) {
+          // Multiple data keys (e.g., feed: { papers, takes }, random: { papers, takes, reviews })
+          // Pass through the full response so callers can access all keys
+          extractedData = rawData;
+        }
+
+        return {
+          success: true,
+          data: extractedData as T,
+        };
+      } catch (error) {
+        clearTimeout(timeoutId);
+
+        if (error instanceof Error) {
+          if (error.name === 'AbortError') {
+            if (attempt < maxRetries) {
+              const delay = attempt * 2000;
+              logger.warn({ method, path, attempt, delay }, `Request timed out, retrying in ${delay}ms`);
+              await new Promise(resolve => setTimeout(resolve, delay));
+              continue;
+            }
+            logger.error({ method, path, timeout: this.timeout }, `API request timed out: ${method} ${path}`);
+            return { success: false, error: 'Request timeout' };
+          }
+
+          // Retry on network errors (fetch failed, ECONNRESET, etc.)
+          if (attempt < maxRetries) {
+            const delay = attempt * 2000;
+            logger.warn({ method, path, error: error.message, attempt, delay }, `Network error, retrying in ${delay}ms`);
+            await new Promise(resolve => setTimeout(resolve, delay));
+            continue;
+          }
+
+          logger.error({ method, path, error: error.message }, `API request error: ${method} ${path}`);
+          return { success: false, error: error.message };
+        }
+
+        logger.error({ method, path }, `API request unknown error: ${method} ${path}`);
+        return { success: false, error: 'Unknown error' };
+      }
     }
+
+    // Should never reach here, but TypeScript needs it
+    return { success: false, error: 'Max retries exceeded' };
   }
 
   private get<T>(path: string, apiKey: string): Promise<ApiResponse<T>> {

@@ -329,7 +329,33 @@ async function runIdeaById(
     };
   }
 
-  return parseNeuricoOutput(runResult.stdout, neuricoPath, ideaId);
+  const parsed = parseNeuricoOutput(runResult.stdout, neuricoPath, ideaId);
+
+  // Only check for auth failures if the run produced no useful output.
+  // NeuriCo logs may contain transient "Invalid API key" warnings even on
+  // successful runs, so we avoid false positives by checking after parsing.
+  if (!parsed.success || !parsed.githubUrl) {
+    const combined = runResult.stdout + runResult.stderr;
+    const authFailurePatterns = [
+      /Not logged in.*Please run \/login/i,
+      /Invalid API key/i,
+      /authentication.*fail/i,
+      /ANTHROPIC_API_KEY.*not set/i,
+      /unauthorized/i,
+    ];
+    for (const pattern of authFailurePatterns) {
+      const match = combined.match(pattern);
+      if (match) {
+        logger.error({ pattern: match[0] }, 'NeuriCo authentication failure detected in output');
+        return {
+          success: false,
+          error: `NeuriCo authentication failed: "${match[0]}". Check ANTHROPIC_API_KEY in NeuriCo .env or CLI login.`,
+        };
+      }
+    }
+  }
+
+  return parsed;
 }
 
 /** Parse the idea ID from submit.py output. */
@@ -768,6 +794,7 @@ export function resolveNeuricoPath(): string | null {
 
   // Common locations
   const candidates = [
+    path.join(process.env.HOME || '', '.flamebird', 'neurico'),
     path.join(process.env.HOME || '', 'neurico'),
     path.join(process.cwd(), 'neurico'),
     path.join(process.cwd(), '..', 'neurico'),

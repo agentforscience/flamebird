@@ -51,6 +51,15 @@ export async function startCommand(options: StartOptions): Promise<void> {
       console.log(chalk.gray(
         `  posting:${p?.enablePosting ? on : off}  votes:${p?.enableVoting ? on : off}  takes:${p?.enableTakeCreation ? on : off}  follows:${p?.enableAgentFollowing ? on : off}  sciencesubs:${p?.enableSciencesubJoining ? on : off}`
       ));
+      if (p?.actionWeights) {
+        const total = Object.values(p.actionWeights).reduce((s, w) => s + w, 0);
+        const summary = Object.entries(p.actionWeights)
+          .sort(([, a], [, b]) => b - a)
+          .slice(0, 3)
+          .map(([k, w]) => `${k}:${Math.round((w / total) * 100)}%`)
+          .join('  ');
+        console.log(chalk.gray(`  weights: ${summary} ...`));
+      }
     }
 
     // Create and initialize the event loop (handles all initialization)

@@ -26,6 +26,7 @@ import {
 } from '../../tools/paper-tools.js';
 import { config as loadEnv } from 'dotenv';
 import type { RateLimitConfig, ProactiveConfig } from '../../types.js';
+import { SINGLE_ACTION_WEIGHTS } from '../../engagement/proactive-engine.js';
 
 // =====================================================
 // SETUP WIZARD - First-time user experience
@@ -1531,12 +1532,16 @@ interface RuntimeSettings {
     follow: number;
     sciencesub: number;
   };
-  // Activity weights for proactive engine action selection (pickWeightedAction)
+  // The 7 granular action weights that drive pickSingleAction() in the proactive engine.
+  // Votes, follows, and sciencesub joins are handled separately in Phase 2 (MAINTENANCE).
   activityWeights: {
-    paper: number;
-    take: number;
-    comment: number;
-    vote: number;
+    comment_paper: number;
+    comment_take: number;
+    comment_review: number;
+    reply: number;
+    take_on_paper: number;
+    review: number;
+    standalone_take: number;
   };
   // Activity toggles
   enabledActivities: {
@@ -1567,12 +1572,10 @@ const DEFAULT_SETTINGS: RuntimeSettings = {
     follow: 60000,     // 1min
     sciencesub: 0,     // no cooldown
   },
-  activityWeights: {
-    paper: 5,
-    take: 10,
-    comment: 25,
-    vote: 20,
-  },
+  // Derived from SINGLE_ACTION_WEIGHTS (the engine's source of truth), scaled to integers.
+  activityWeights: Object.fromEntries(
+    Object.entries(SINGLE_ACTION_WEIGHTS).map(([k, v]) => [k, Math.round(v * 100)])
+  ) as RuntimeSettings['activityWeights'],
   enabledActivities: {
     papers: true,
     takes: true,
@@ -1583,11 +1586,26 @@ const DEFAULT_SETTINGS: RuntimeSettings = {
   },
 };
 
+
+const ACTION_KEY_META: Record<string, { label: string; icon: string; description: string }> = {
+  comment_paper:   { label: 'Comment Paper',   icon: '💬📄', description: 'Comment on a paper' },
+  comment_take:    { label: 'Comment Take',    icon: '💬📝', description: 'Comment on a take' },
+  comment_review:  { label: 'Comment Review',  icon: '💬🔬', description: 'Comment on a peer review' },
+  reply:           { label: 'Reply',           icon: '↩️ ',  description: 'Reply to a comment thread' },
+  take_on_paper:   { label: 'Take on Paper',   icon: '📝📄', description: 'Write a take about a paper' },
+  review:          { label: 'Peer Review',     icon: '🔬',   description: 'Write a peer review' },
+  standalone_take: { label: 'Standalone Take', icon: '📝✨', description: 'Write an independent take' },
+};
+
+const ACTION_KEYS = Object.keys(ACTION_KEY_META);
+
 function loadSettings(): RuntimeSettings {
   try {
     const settingsPath = './data/settings.json';
     if (fs.existsSync(settingsPath)) {
-      return JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
+      const raw = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
+
+      return raw as RuntimeSettings;
     }
   } catch {
     // Use defaults
@@ -1624,33 +1642,24 @@ export function loadSettingsOverrides(): SettingsOverrides | null {
   // Preserve 'review' (not in settings UI)
   rateLimits.push({ action: 'review', maxRequests: 12, window: 'day', cooldownMs: 7200000 });
 
-  // Normalize activityWeights → actionWeights for proactive engine
-  // Keys must match SINGLE_ACTION_WEIGHTS in proactive-engine.ts:
-  //   comment_paper, comment_take, comment_review, reply, take_on_paper, review, standalone_take
-  // User-facing categories are mapped to these specific action keys.
+  // activityWeights are now the 7 granular action keys directly.
+  // Zero out weights for disabled activities so the engine never picks them.
   const ea = settings.enabledActivities;
-  const w = settings.activityWeights;
-  // Zero out weights for disabled activities so the engine never picks them
-  const commentWeight = ea.comments !== false ? (w.comment ?? 25) : 0;
-  const takeWeight = ea.takes !== false ? (w.take ?? 10) : 0;
-  // Scale review proportionally to maintain its natural ~6% share (matching SINGLE_ACTION_WEIGHTS).
-  // Using a fixed value like 10 would dominate when comment/take sliders are low.
-  const baseWeight = (commentWeight + takeWeight) || 1;
-  const raw: Record<string, number> = {
-    // "comment" distributes across comment subtypes and reply
-    comment_paper:   commentWeight * 0.22,   // 22% of comment weight
-    comment_take:    commentWeight * 0.22,   // 22% of comment weight
-    comment_review:  commentWeight * 0.16,   // 16% of comment weight
-    reply:           commentWeight * 0.40,   // 40% of comment weight
-    // "take" distributes across paper-linked and standalone takes
-    take_on_paper:   takeWeight * 0.42,      // 42% of take weight
-    standalone_take: takeWeight * 0.58,      // 58% of take weight
-    // review scales with baseWeight so it stays ~6% regardless of slider values
-    review:          baseWeight * (6 / 94),
-  };
-  const total = Object.values(raw).reduce((a, b) => a + b, 0);
+  const w = { ...settings.activityWeights };
+  if (ea.comments === false) {
+    w.comment_paper = 0;
+    w.comment_take = 0;
+    w.comment_review = 0;
+    w.reply = 0;
+  }
+  if (ea.takes === false) {
+    w.take_on_paper = 0;
+    w.standalone_take = 0;
+  }
+  // Normalize to sum=1.0
+  const total = Object.values(w).reduce((a, b) => a + b, 0);
   const actionWeights: Record<string, number> = {};
-  for (const [k, v] of Object.entries(raw)) actionWeights[k] = total > 0 ? v / total : 0;
+  for (const [k, v] of Object.entries(w)) actionWeights[k] = total > 0 ? v / total : 0;
 
   // Convert enabledActivities → ProactiveConfig flags
   // Note: ea.papers is intentionally excluded from enablePosting — neurico paper generation
@@ -1709,18 +1718,24 @@ async function settingsMenu(): Promise<void> {
   }
 
   // Show activity weights
-  console.log('\n' + chalk.bold('    🎲 Activity Weights (probability distribution):\n'));
+  // Show the 7 granular action weights that reach the proactive engine
+  console.log('\n' + chalk.bold('    🎲 Action Weights (creative action probability):\n'));
   const weights = settings.activityWeights || DEFAULT_SETTINGS.activityWeights;
   const totalWeight = Object.values(weights).reduce((a, b) => a + b, 0);
 
-  for (const [activity, weight] of Object.entries(weights)) {
-    const pct = Math.round((weight / totalWeight) * 100);
-    const bar = '▓'.repeat(Math.round(pct / 5)).padEnd(20, '░');
-    console.log(`    ${icons[activity] || '•'} ${chalk.cyan(activity.padEnd(10))} ${chalk.yellow(bar)} ${chalk.white(String(pct).padStart(2))}%`);
+  for (const key of ACTION_KEYS) {
+    const weight = (weights as Record<string, number>)[key] || 0;
+    const pct = totalWeight > 0 ? Math.round((weight / totalWeight) * 100) : 0;
+    const meta = ACTION_KEY_META[key];
+    const bar = '▓'.repeat(Math.round(pct / 2.5)).padEnd(20, '░');
+    console.log(`    ${meta.icon} ${chalk.cyan(meta.label.padEnd(16))} ${chalk.yellow(bar)} ${chalk.white(String(pct).padStart(2))}% ${chalk.gray(`(raw: ${weight})`)}`);
   }
 
+  console.log(chalk.gray('\n    These weights control the ONE creative action per heartbeat (Phase 4).'));
+  console.log(chalk.gray('    Votes, follows, and sciencesub joins are handled separately.\n'));
+
   // Show enabled activities
-  console.log('\n' + chalk.bold('    ✅ Enabled Activities:\n'));
+  console.log(chalk.bold('    ✅ Enabled Activities:\n'));
   const enabled = settings.enabledActivities || DEFAULT_SETTINGS.enabledActivities;
   const activityList = Object.entries(enabled).map(([name, isEnabled]) => {
     const icon = isEnabled ? chalk.green('●') : chalk.gray('○');
@@ -1728,6 +1743,8 @@ async function settingsMenu(): Promise<void> {
   });
   console.log('    ' + activityList.join('  '));
 
+  console.log('');
+  console.log(chalk.gray(`    💾 Saved to: ${chalk.white('data/settings.json')}  |  ⏱  Applied on next agent start`));
   console.log('');
 
   const { action } = await inquirer.prompt([
@@ -1788,6 +1805,20 @@ async function settingsMenu(): Promise<void> {
     await toggleActivities(settings);
     return;
   }
+}
+
+/**
+ * Scale SINGLE_ACTION_WEIGHTS by per-key multipliers.
+ * Keys not in the multipliers map keep their default weight.
+ * Result is rounded to integers for readability in settings.json.
+ */
+function scaleWeights(multipliers: Partial<Record<string, number>>): RuntimeSettings['activityWeights'] {
+  return Object.fromEntries(
+    Object.entries(SINGLE_ACTION_WEIGHTS).map(([k, v]) => [
+      k,
+      Math.round(v * (multipliers[k] ?? 1) * 100),
+    ])
+  ) as RuntimeSettings['activityWeights'];
 }
 
 // Engagement presets
@@ -1914,7 +1945,8 @@ async function engagementPresetsMenu(settings: RuntimeSettings): Promise<void> {
   ]);
 
   if (confirm) {
-    // Apply the preset to settings
+    // Apply the preset to settings (presets only change rate limits and cooldowns,
+    // not activity weights — those are controlled separately by the user)
     const newSettings: RuntimeSettings = {
       ...settings,
       rateLimits: { ...preset.rateLimits },
@@ -2049,22 +2081,21 @@ async function adjustCooldowns(settings: RuntimeSettings): Promise<void> {
 
 async function adjustActivityWeights(settings: RuntimeSettings): Promise<void> {
   console.clear();
-  console.log(chalk.bold.cyan('\n    🎲 ACTIVITY WEIGHTS\n'));
-  console.log(chalk.gray('    Control how often each activity type occurs (higher = more frequent)\n'));
+  console.log(chalk.bold.cyan('\n    🎲 ACTION WEIGHTS\n'));
+  console.log(chalk.gray('    Control how often each creative action type occurs (higher = more frequent)'));
+  console.log(chalk.gray('    These only affect the ONE creative action per heartbeat (Phase 4).\n'));
 
   const weights = settings.activityWeights || DEFAULT_SETTINGS.activityWeights;
   const totalWeight = Object.values(weights).reduce((a, b) => a + b, 0);
 
   // Show current distribution
   console.log(chalk.bold('    Current Distribution:\n'));
-  const weightIcons: Record<string, string> = {
-    paper: '📄', take: '📝', comment: '💬', vote: '⬆️',
-  };
-
-  for (const [activity, weight] of Object.entries(weights)) {
-    const pct = Math.round((weight / totalWeight) * 100);
-    const bar = '▓'.repeat(Math.round(pct / 5)).padEnd(20, '░');
-    console.log(`    ${weightIcons[activity] || '•'} ${chalk.cyan(activity.padEnd(10))} ${chalk.yellow(bar)} ${chalk.white(String(pct).padStart(2))}% ${chalk.gray(`(weight: ${weight})`)}`);
+  for (const key of ACTION_KEYS) {
+    const weight = (weights as Record<string, number>)[key] || 0;
+    const pct = totalWeight > 0 ? Math.round((weight / totalWeight) * 100) : 0;
+    const meta = ACTION_KEY_META[key];
+    const bar = '▓'.repeat(Math.round(pct / 2.5)).padEnd(20, '░');
+    console.log(`    ${meta.icon} ${chalk.cyan(meta.label.padEnd(16))} ${chalk.yellow(bar)} ${chalk.white(String(pct).padStart(2))}% ${chalk.gray(`(weight: ${weight})`)}`);
   }
 
   console.log('');
@@ -2073,16 +2104,20 @@ async function adjustActivityWeights(settings: RuntimeSettings): Promise<void> {
     {
       type: 'list',
       name: 'selectedActivity',
-      message: chalk.white('Select activity to adjust:'),
+      message: chalk.white('Select action to adjust:'),
       prefix: '    ',
       choices: [
-        ...Object.keys(weights).map(a => ({
-          name: `${weightIcons[a] || '•'} ${a.padEnd(12)} ${chalk.gray(`(current: ${weights[a as keyof typeof weights]})`)}`,
-          value: a,
-        })),
+        ...ACTION_KEYS.map(key => {
+          const meta = ACTION_KEY_META[key];
+          const weight = (weights as Record<string, number>)[key] || 0;
+          return {
+            name: `${meta.icon} ${meta.label.padEnd(16)} ${chalk.gray(`(current: ${weight})`)} ${chalk.dim(meta.description)}`,
+            value: key,
+          };
+        }),
         new inquirer.Separator(),
-        { name: chalk.yellow('⚡ Quick: Boost engagement (comments, votes)'), value: '__boost_engagement__' },
-        { name: chalk.blue('📚 Quick: Boost research (papers, takes)'), value: '__boost_research__' },
+        { name: chalk.yellow('⚡ Quick: Boost engagement (comments, replies)'), value: '__boost_engagement__' },
+        { name: chalk.blue('📚 Quick: Boost research (reviews, takes)'), value: '__boost_research__' },
         new inquirer.Separator(),
         { name: chalk.gray('← Back'), value: 'back' },
       ],
@@ -2094,46 +2129,58 @@ async function adjustActivityWeights(settings: RuntimeSettings): Promise<void> {
     return;
   }
 
-  // Quick presets
+  // Quick presets — derived from SINGLE_ACTION_WEIGHTS with explicit multipliers
   if (selectedActivity === '__boost_engagement__') {
-    settings.activityWeights = { paper: 3, take: 5, comment: 30, vote: 25 };
+    // 1.5x comments/replies, 0.5x takes/reviews
+    settings.activityWeights = scaleWeights({
+      comment_paper: 1.5, comment_take: 1.5, comment_review: 1.5, reply: 1.5,
+      take_on_paper: 0.5, review: 0.5, standalone_take: 0.5,
+    });
     saveSettings(settings);
-    console.log(chalk.green('\n    ✓ Engagement mode activated! More comments and votes\n'));
+    console.log(chalk.green('\n    ✓ Engagement mode activated! 1.5x comments/replies, 0.5x takes/reviews'));
+    console.log(chalk.gray('    💾 Saved to data/settings.json\n'));
     await inquirer.prompt([{ type: 'input', name: 'c', message: chalk.gray('Press Enter to continue...'), prefix: '    ' }]);
     await settingsMenu();
     return;
   }
 
   if (selectedActivity === '__boost_research__') {
-    settings.activityWeights = { paper: 20, take: 25, comment: 15, vote: 10 };
+    // 3x reviews/takes, 0.5x comments/replies
+    settings.activityWeights = scaleWeights({
+      comment_paper: 0.5, comment_take: 0.5, comment_review: 0.5, reply: 0.5,
+      take_on_paper: 3, review: 3, standalone_take: 3,
+    });
     saveSettings(settings);
-    console.log(chalk.green('\n    ✓ Research mode activated! More papers and takes\n'));
+    console.log(chalk.green('\n    ✓ Research mode activated! 3x reviews/takes, 0.5x comments/replies'));
+    console.log(chalk.gray('    💾 Saved to data/settings.json\n'));
     await inquirer.prompt([{ type: 'input', name: 'c', message: chalk.gray('Press Enter to continue...'), prefix: '    ' }]);
     await settingsMenu();
     return;
   }
 
+  const meta = ACTION_KEY_META[selectedActivity];
   const { newWeight } = await inquirer.prompt([
     {
       type: 'number',
       name: 'newWeight',
-      message: chalk.white(`New weight for ${selectedActivity} (1-50):`),
+      message: chalk.white(`New weight for ${meta.label} (0-100, 0 = disabled):`),
       prefix: '    ',
-      default: weights[selectedActivity as keyof typeof weights],
+      default: (weights as Record<string, number>)[selectedActivity] || 0,
       validate: (val: number) => {
-        if (val < 1) return 'Must be at least 1';
-        if (val > 50) return 'Maximum is 50';
+        if (val < 0) return 'Must be at least 0';
+        if (val > 100) return 'Maximum is 100';
         return true;
       },
     },
   ]);
 
-  settings.activityWeights[selectedActivity as keyof typeof settings.activityWeights] = newWeight;
+  (settings.activityWeights as Record<string, number>)[selectedActivity] = newWeight;
   saveSettings(settings);
 
   const newTotal = Object.values(settings.activityWeights).reduce((a, b) => a + b, 0);
-  const newPct = Math.round((newWeight / newTotal) * 100);
-  console.log(chalk.green(`\n    ✓ ${selectedActivity} weight set to ${newWeight} (${newPct}% of total)\n`));
+  const newPct = newTotal > 0 ? Math.round((newWeight / newTotal) * 100) : 0;
+  console.log(chalk.green(`\n    ✓ ${meta.label} weight set to ${newWeight} (${newPct}% of total)`));
+  console.log(chalk.gray('    💾 Saved to data/settings.json\n'));
 
   await inquirer.prompt([{ type: 'input', name: 'c', message: chalk.gray('Press Enter to continue...'), prefix: '    ' }]);
   await adjustActivityWeights(settings);
