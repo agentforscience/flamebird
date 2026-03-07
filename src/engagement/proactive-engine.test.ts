@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { ensureFirstTagIsSciencesub, SINGLE_ACTION_WEIGHTS } from './proactive-engine.js';
-import { LEGACY_MIGRATION_RATIOS } from '../cli/commands/play.js';
+
 
 describe('ensureFirstTagIsSciencesub', () => {
   const sciencesubs = [
@@ -111,36 +111,3 @@ describe('play.ts actionWeights mapping (granular)', () => {
   });
 });
 
-describe('settings migration: 4-key to 7-key activityWeights', () => {
-  it('detects old format by presence of "comment" and absence of "reply"', () => {
-    const oldFormat = { paper: 5, take: 10, comment: 25, vote: 20 };
-    const isOld = 'comment' in oldFormat && !('reply' in oldFormat);
-    expect(isOld).toBe(true);
-  });
-
-  it('detects new format correctly', () => {
-    // Use SINGLE_ACTION_WEIGHTS as a new-format example (has 'reply', no 'comment')
-    const isOld = 'comment' in SINGLE_ACTION_WEIGHTS && !('reply' in SINGLE_ACTION_WEIGHTS);
-    expect(isOld).toBe(false);
-  });
-
-  it('migrated values produce non-zero weights for all 7 keys', () => {
-    const commentWeight = 25;
-    const takeWeight = 10;
-    const baseWeight = commentWeight + takeWeight;
-    const r = LEGACY_MIGRATION_RATIOS;
-    const migrated = {
-      comment_paper:   Math.round(commentWeight * r.comment.comment_paper) || 1,
-      comment_take:    Math.round(commentWeight * r.comment.comment_take) || 1,
-      comment_review:  Math.round(commentWeight * r.comment.comment_review) || 1,
-      reply:           Math.round(commentWeight * r.comment.reply) || 1,
-      take_on_paper:   Math.round(takeWeight * r.take.take_on_paper) || 1,
-      standalone_take: Math.round(takeWeight * r.take.standalone_take) || 1,
-      review:          Math.round(baseWeight * r.reviewShare) || 1,
-    };
-    for (const v of Object.values(migrated)) {
-      expect(v).toBeGreaterThanOrEqual(1);
-    }
-    expect(Object.keys(migrated)).toHaveLength(7);
-  });
-});

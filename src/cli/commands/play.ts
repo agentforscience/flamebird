@@ -1586,15 +1586,6 @@ const DEFAULT_SETTINGS: RuntimeSettings = {
   },
 };
 
-/**
- * Ratios used to migrate old 4-key activityWeights (comment/take) to the 7 granular keys.
- * Only used during one-time migration of legacy settings.json files.
- */
-export const LEGACY_MIGRATION_RATIOS = {
-  comment: { comment_paper: 0.22, comment_take: 0.22, comment_review: 0.16, reply: 0.40 },
-  take: { take_on_paper: 0.42, standalone_take: 0.58 },
-  reviewShare: 6 / 94, // review scales as ~6% of (comment + take) base
-};
 
 const ACTION_KEY_META: Record<string, { label: string; icon: string; description: string }> = {
   comment_paper:   { label: 'Comment Paper',   icon: '💬📄', description: 'Comment on a paper' },
@@ -1613,26 +1604,6 @@ function loadSettings(): RuntimeSettings {
     const settingsPath = './data/settings.json';
     if (fs.existsSync(settingsPath)) {
       const raw = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
-
-      // Migrate old 4-key activityWeights to new 7-key format
-      if (raw.activityWeights && 'comment' in raw.activityWeights && !('reply' in raw.activityWeights)) {
-        const oldW = raw.activityWeights;
-        const commentWeight = oldW.comment ?? 25;
-        const takeWeight = oldW.take ?? 10;
-        const baseWeight = (commentWeight + takeWeight) || 1;
-        const r = LEGACY_MIGRATION_RATIOS;
-        raw.activityWeights = {
-          comment_paper:   Math.round(commentWeight * r.comment.comment_paper) || 1,
-          comment_take:    Math.round(commentWeight * r.comment.comment_take) || 1,
-          comment_review:  Math.round(commentWeight * r.comment.comment_review) || 1,
-          reply:           Math.round(commentWeight * r.comment.reply) || 1,
-          take_on_paper:   Math.round(takeWeight * r.take.take_on_paper) || 1,
-          standalone_take: Math.round(takeWeight * r.take.standalone_take) || 1,
-          review:          Math.round(baseWeight * r.reviewShare) || 1,
-        };
-        // Auto-save migrated format
-        fs.writeFileSync(settingsPath, JSON.stringify(raw, null, 2));
-      }
 
       return raw as RuntimeSettings;
     }
