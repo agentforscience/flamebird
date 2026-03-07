@@ -384,7 +384,27 @@ export async function runNeurico(
   return runIdeaById(neuricoPath, baseArgs, ideaId, provider, writePaper, noGithub);
 }
 
-/** Run an already-submitted idea by its ID. */
+/** Max number of auth-failure retries with fresh OAuth tokens. */
+const MAX_AUTH_RETRIES = 2;
+
+/** Check if combined stdout+stderr contains an auth failure. */
+function detectAuthFailure(stdout: string, stderr: string): string | null {
+  const combined = stdout + stderr;
+  const authFailurePatterns = [
+    /Not logged in.*Please run \/login/i,
+    /Invalid API key/i,
+    /authentication.*fail/i,
+    /ANTHROPIC_API_KEY.*not set/i,
+    /unauthorized/i,
+  ];
+  for (const pattern of authFailurePatterns) {
+    const match = combined.match(pattern);
+    if (match) return match[0];
+  }
+  return null;
+}
+
+/** Run an already-submitted idea by its ID. Retries with a fresh OAuth token on auth failure. */
 async function runIdeaById(
   neuricoPath: string,
   baseArgs: string[],
@@ -393,57 +413,87 @@ async function runIdeaById(
   writePaper: boolean,
   noGithub: boolean,
 ): Promise<NeuricoResult> {
-  logger.info({ ideaId, provider, writePaper }, 'Running NeuriCo research agent');
+  let attempt = 0;
 
-  const runArgs = [
-    ...baseArgs,
-    DOCKER_IMAGE,
-    'python', '/app/src/core/runner.py', ideaId,
-    '--provider', provider,
-    '--full-permissions',
-  ];
-  if (writePaper) runArgs.push('--write-paper');
-  if (noGithub) runArgs.push('--no-github');
+  while (attempt <= MAX_AUTH_RETRIES) {
+    // On retry, rebuild Docker args to pick up a fresh OAuth token from Keychain
+    const effectiveArgs = attempt === 0
+      ? baseArgs
+      : buildDockerArgs(neuricoPath);
 
-  // No explicit timeout — let NeuriCo run to completion
-  // Use a generous 6-hour cap to prevent zombie processes
-  const runResult = await spawnDocker(runArgs, 6 * 3600 * 1000);
+    if (attempt > 0) {
+      logger.info({ attempt, maxRetries: MAX_AUTH_RETRIES }, 'Retrying NeuriCo with fresh OAuth token');
+    }
 
-  if (runResult.code !== 0 && runResult.code !== null) {
-    logger.error({ code: runResult.code }, 'NeuriCo run failed');
-    return {
-      success: false,
-      error: `NeuriCo run failed (code ${runResult.code}): ${runResult.stderr.slice(-500)}`,
-    };
-  }
+    logger.info({ ideaId, provider, writePaper, attempt }, 'Running NeuriCo research agent');
 
-  const parsed = parseNeuricoOutput(runResult.stdout, neuricoPath, ideaId);
-
-  // Only check for auth failures if the run produced no useful output.
-  // NeuriCo logs may contain transient "Invalid API key" warnings even on
-  // successful runs, so we avoid false positives by checking after parsing.
-  if (!parsed.success || !parsed.githubUrl) {
-    const combined = runResult.stdout + runResult.stderr;
-    const authFailurePatterns = [
-      /Not logged in.*Please run \/login/i,
-      /Invalid API key/i,
-      /authentication.*fail/i,
-      /ANTHROPIC_API_KEY.*not set/i,
-      /unauthorized/i,
+    const runArgs = [
+      ...effectiveArgs,
+      DOCKER_IMAGE,
+      'python', '/app/src/core/runner.py', ideaId,
+      '--provider', provider,
+      '--full-permissions',
     ];
-    for (const pattern of authFailurePatterns) {
-      const match = combined.match(pattern);
-      if (match) {
-        logger.error({ pattern: match[0] }, 'NeuriCo authentication failure detected in output');
+    if (writePaper) runArgs.push('--write-paper');
+    if (noGithub) runArgs.push('--no-github');
+
+    // No explicit timeout — let NeuriCo run to completion
+    // Use a generous 6-hour cap to prevent zombie processes
+    const runResult = await spawnDocker(runArgs, 6 * 3600 * 1000);
+
+    const parsed = parseNeuricoOutput(runResult.stdout, neuricoPath, ideaId);
+
+    // If we got a successful result with a GitHub URL, we're done
+    if (parsed.success && parsed.githubUrl) {
+      return parsed;
+    }
+
+    // Check for auth failure
+    const authError = detectAuthFailure(runResult.stdout, runResult.stderr);
+
+    if (authError && attempt < MAX_AUTH_RETRIES) {
+      logger.warn(
+        { authError, attempt },
+        'NeuriCo auth failure detected — will retry with fresh OAuth token from Keychain',
+      );
+      attempt++;
+      continue;
+    }
+
+    // Non-auth failure or exhausted retries
+    if (runResult.code !== 0 && runResult.code !== null) {
+      if (authError) {
+        logger.error({ authError, attempts: attempt + 1 }, 'NeuriCo auth failure persists after retries');
         return {
           success: false,
-          error: `NeuriCo authentication failed: "${match[0]}". Check ANTHROPIC_API_KEY in NeuriCo .env or CLI login.`,
+          error: `NeuriCo authentication failed after ${attempt + 1} attempts: "${authError}". Get a static API key from console.anthropic.com.`,
         };
       }
+      logger.error({ code: runResult.code }, 'NeuriCo run failed');
+      return {
+        success: false,
+        error: `NeuriCo run failed (code ${runResult.code}): ${runResult.stderr.slice(-500)}`,
+      };
     }
+
+    // Run exited 0 but no GitHub URL — check if it was auth-related
+    if (authError) {
+      if (attempt < MAX_AUTH_RETRIES) {
+        attempt++;
+        continue;
+      }
+      logger.error({ authError, attempts: attempt + 1 }, 'NeuriCo auth failure persists after retries');
+      return {
+        success: false,
+        error: `NeuriCo authentication failed after ${attempt + 1} attempts: "${authError}". Get a static API key from console.anthropic.com.`,
+      };
+    }
+
+    return parsed;
   }
 
-  return parsed;
+  // Should never reach here, but just in case
+  return { success: false, error: 'NeuriCo run failed: exhausted retries' };
 }
 
 /** Parse the idea ID from submit.py output. */

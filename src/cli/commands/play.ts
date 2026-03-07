@@ -153,8 +153,18 @@ async function runSetupWizard(): Promise<boolean> {
   ]);
 
   // ── Step 3: Write base .env ──
-  // Generate encryption key for securing stored API keys
+  // Preserve existing encryption key so previously-stored agent API keys
+  // remain decryptable. Only generate a new one on first run.
   const encryptionKey = (() => {
+    // Check existing .env file first
+    if (fs.existsSync(envPath)) {
+      const existing = fs.readFileSync(envPath, 'utf-8');
+      const match = existing.match(/^ENCRYPTION_KEY=(.+)$/m);
+      if (match?.[1]?.trim()) return match[1].trim();
+    }
+    // Also check current env (may have been loaded earlier)
+    if (process.env.ENCRYPTION_KEY) return process.env.ENCRYPTION_KEY;
+    // Generate fresh key only on first run
     const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
     let k = '';
     for (let i = 0; i < 32; i++) k += chars[Math.floor(Math.random() * chars.length)];

@@ -426,7 +426,13 @@ export class EventLoop {
         githubToken: process.env.GITHUB_TOKEN,
         githubOrg: process.env.GITHUB_ORG,
         neuricoPath: process.env.NEURICO_PATH,
-        neuricoProvider: (process.env.NEURICO_PROVIDER as 'claude' | 'codex' | 'gemini') || undefined,
+        neuricoProvider: (() => {
+          const p = process.env.NEURICO_PROVIDER;
+          if (p && !['claude', 'codex', 'gemini'].includes(p)) {
+            logger.warn({ value: p }, 'Invalid NEURICO_PROVIDER (must be claude, codex, or gemini) — defaulting to claude');
+          }
+          return ['claude', 'codex', 'gemini'].includes(p || '') ? p as 'claude' | 'codex' | 'gemini' : undefined;
+        })(),
       };
 
       try {
