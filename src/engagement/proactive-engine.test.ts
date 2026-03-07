@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { ensureFirstTagIsSciencesub, SINGLE_ACTION_WEIGHTS } from './proactive-engine.js';
+import { LEGACY_MIGRATION_RATIOS } from '../cli/commands/play.js';
 
 describe('ensureFirstTagIsSciencesub', () => {
   const sciencesubs = [
@@ -60,10 +61,10 @@ describe('play.ts actionWeights mapping (granular)', () => {
     return actionWeights;
   }
 
-  const SAMPLE_WEIGHTS: Record<string, number> = {
-    comment_paper: 15, comment_take: 15, comment_review: 10,
-    reply: 42, take_on_paper: 7, review: 6, standalone_take: 5,
-  };
+  // Derive sample weights from SINGLE_ACTION_WEIGHTS (the single source of truth)
+  const SAMPLE_WEIGHTS: Record<string, number> = Object.fromEntries(
+    Object.entries(SINGLE_ACTION_WEIGHTS).map(([k, v]) => [k, Math.round(v * 100)])
+  );
 
   it('all actionWeight keys match SINGLE_ACTION_WEIGHTS keys', () => {
     const weights = normalizeWeights(SAMPLE_WEIGHTS);
@@ -102,10 +103,7 @@ describe('play.ts actionWeights mapping (granular)', () => {
     const actionWeights = normalizeWeights(SAMPLE_WEIGHTS);
     const merged = { ...SINGLE_ACTION_WEIGHTS, ...actionWeights };
 
-    const validCases = new Set([
-      'comment_paper', 'comment_take', 'comment_review',
-      'reply', 'take_on_paper', 'review', 'standalone_take',
-    ]);
+    const validCases = new Set(Object.keys(SINGLE_ACTION_WEIGHTS));
 
     for (const key of Object.keys(merged)) {
       expect(validCases.has(key)).toBe(true);
@@ -121,11 +119,8 @@ describe('settings migration: 4-key to 7-key activityWeights', () => {
   });
 
   it('detects new format correctly', () => {
-    const newFormat = {
-      comment_paper: 15, comment_take: 15, comment_review: 10,
-      reply: 42, take_on_paper: 7, review: 6, standalone_take: 5,
-    };
-    const isOld = 'comment' in newFormat && !('reply' in newFormat);
+    // Use SINGLE_ACTION_WEIGHTS as a new-format example (has 'reply', no 'comment')
+    const isOld = 'comment' in SINGLE_ACTION_WEIGHTS && !('reply' in SINGLE_ACTION_WEIGHTS);
     expect(isOld).toBe(false);
   });
 
@@ -133,14 +128,15 @@ describe('settings migration: 4-key to 7-key activityWeights', () => {
     const commentWeight = 25;
     const takeWeight = 10;
     const baseWeight = commentWeight + takeWeight;
+    const r = LEGACY_MIGRATION_RATIOS;
     const migrated = {
-      comment_paper:   Math.round(commentWeight * 0.22) || 1,
-      comment_take:    Math.round(commentWeight * 0.22) || 1,
-      comment_review:  Math.round(commentWeight * 0.16) || 1,
-      reply:           Math.round(commentWeight * 0.40) || 1,
-      take_on_paper:   Math.round(takeWeight * 0.42) || 1,
-      standalone_take: Math.round(takeWeight * 0.58) || 1,
-      review:          Math.round(baseWeight * (6 / 94)) || 1,
+      comment_paper:   Math.round(commentWeight * r.comment.comment_paper) || 1,
+      comment_take:    Math.round(commentWeight * r.comment.comment_take) || 1,
+      comment_review:  Math.round(commentWeight * r.comment.comment_review) || 1,
+      reply:           Math.round(commentWeight * r.comment.reply) || 1,
+      take_on_paper:   Math.round(takeWeight * r.take.take_on_paper) || 1,
+      standalone_take: Math.round(takeWeight * r.take.standalone_take) || 1,
+      review:          Math.round(baseWeight * r.reviewShare) || 1,
     };
     for (const v of Object.values(migrated)) {
       expect(v).toBeGreaterThanOrEqual(1);

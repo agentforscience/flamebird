@@ -26,6 +26,7 @@ import {
 } from '../../tools/paper-tools.js';
 import { config as loadEnv } from 'dotenv';
 import type { RateLimitConfig, ProactiveConfig } from '../../types.js';
+import { SINGLE_ACTION_WEIGHTS } from '../../engagement/proactive-engine.js';
 
 // =====================================================
 // SETUP WIZARD - First-time user experience
@@ -1571,15 +1572,10 @@ const DEFAULT_SETTINGS: RuntimeSettings = {
     follow: 60000,     // 1min
     sciencesub: 0,     // no cooldown
   },
-  activityWeights: {
-    comment_paper:   15,
-    comment_take:    15,
-    comment_review:  10,
-    reply:           42,
-    take_on_paper:    7,
-    review:           6,
-    standalone_take:  5,
-  },
+  // Derived from SINGLE_ACTION_WEIGHTS (the engine's source of truth), scaled to integers.
+  activityWeights: Object.fromEntries(
+    Object.entries(SINGLE_ACTION_WEIGHTS).map(([k, v]) => [k, Math.round(v * 100)])
+  ) as RuntimeSettings['activityWeights'],
   enabledActivities: {
     papers: true,
     takes: true,
@@ -1588,6 +1584,16 @@ const DEFAULT_SETTINGS: RuntimeSettings = {
     follows: true,
     sciencesubs: true,
   },
+};
+
+/**
+ * Ratios used to migrate old 4-key activityWeights (comment/take) to the 7 granular keys.
+ * Only used during one-time migration of legacy settings.json files.
+ */
+export const LEGACY_MIGRATION_RATIOS = {
+  comment: { comment_paper: 0.22, comment_take: 0.22, comment_review: 0.16, reply: 0.40 },
+  take: { take_on_paper: 0.42, standalone_take: 0.58 },
+  reviewShare: 6 / 94, // review scales as ~6% of (comment + take) base
 };
 
 const ACTION_KEY_META: Record<string, { label: string; icon: string; description: string }> = {
@@ -1614,14 +1620,15 @@ function loadSettings(): RuntimeSettings {
         const commentWeight = oldW.comment ?? 25;
         const takeWeight = oldW.take ?? 10;
         const baseWeight = (commentWeight + takeWeight) || 1;
+        const r = LEGACY_MIGRATION_RATIOS;
         raw.activityWeights = {
-          comment_paper:   Math.round(commentWeight * 0.22) || 1,
-          comment_take:    Math.round(commentWeight * 0.22) || 1,
-          comment_review:  Math.round(commentWeight * 0.16) || 1,
-          reply:           Math.round(commentWeight * 0.40) || 1,
-          take_on_paper:   Math.round(takeWeight * 0.42) || 1,
-          standalone_take: Math.round(takeWeight * 0.58) || 1,
-          review:          Math.round(baseWeight * (6 / 94)) || 1,
+          comment_paper:   Math.round(commentWeight * r.comment.comment_paper) || 1,
+          comment_take:    Math.round(commentWeight * r.comment.comment_take) || 1,
+          comment_review:  Math.round(commentWeight * r.comment.comment_review) || 1,
+          reply:           Math.round(commentWeight * r.comment.reply) || 1,
+          take_on_paper:   Math.round(takeWeight * r.take.take_on_paper) || 1,
+          standalone_take: Math.round(takeWeight * r.take.standalone_take) || 1,
+          review:          Math.round(baseWeight * r.reviewShare) || 1,
         };
         // Auto-save migrated format
         fs.writeFileSync(settingsPath, JSON.stringify(raw, null, 2));
@@ -1829,6 +1836,20 @@ async function settingsMenu(): Promise<void> {
   }
 }
 
+/**
+ * Scale SINGLE_ACTION_WEIGHTS by per-key multipliers.
+ * Keys not in the multipliers map keep their default weight.
+ * Result is rounded to integers for readability in settings.json.
+ */
+function scaleWeights(multipliers: Partial<Record<string, number>>): RuntimeSettings['activityWeights'] {
+  return Object.fromEntries(
+    Object.entries(SINGLE_ACTION_WEIGHTS).map(([k, v]) => [
+      k,
+      Math.round(v * (multipliers[k] ?? 1) * 100),
+    ])
+  ) as RuntimeSettings['activityWeights'];
+}
+
 // Engagement presets
 interface EngagementPreset {
   name: string;
@@ -1849,15 +1870,6 @@ interface EngagementPreset {
     follow: number;
     sciencesub: number;
   };
-  activityWeights?: {
-    comment_paper: number;
-    comment_take: number;
-    comment_review: number;
-    reply: number;
-    take_on_paper: number;
-    review: number;
-    standalone_take: number;
-  };
 }
 
 const ENGAGEMENT_PRESETS: Record<string, EngagementPreset> = {
@@ -1866,40 +1878,24 @@ const ENGAGEMENT_PRESETS: Record<string, EngagementPreset> = {
     description: 'Slow and steady. Minimal LLM costs, organic feel.',
     rateLimits: { paper: 2, take: 10, comment: 50, vote: 100, follow: 20, sciencesub: 1 },
     cooldowns: { paper: 600000, take: 60000, comment: 30000, vote: 5000, follow: 10000, sciencesub: 0 },
-    activityWeights: {
-      comment_paper: 12, comment_take: 12, comment_review: 8,
-      reply: 30, take_on_paper: 10, review: 18, standalone_take: 10,
-    },
   },
   moderate: {
     name: '🚶 Moderate',
     description: 'Balanced activity. Good engagement without breaking the bank.',
     rateLimits: { paper: 5, take: 30, comment: 150, vote: 300, follow: 50, sciencesub: 2 },
     cooldowns: { paper: 300000, take: 30000, comment: 10000, vote: 2000, follow: 5000, sciencesub: 0 },
-    activityWeights: {
-      comment_paper: 15, comment_take: 15, comment_review: 10,
-      reply: 35, take_on_paper: 8, review: 8, standalone_take: 9,
-    },
   },
   aggressive: {
     name: '🏃 Aggressive',
     description: 'High activity. Fast engagement, noticeable LLM costs.',
     rateLimits: { paper: 20, take: 100, comment: 500, vote: 1000, follow: 200, sciencesub: 5 },
     cooldowns: { paper: 60000, take: 10000, comment: 3000, vote: 500, follow: 2000, sciencesub: 0 },
-    activityWeights: {
-      comment_paper: 18, comment_take: 18, comment_review: 12,
-      reply: 38, take_on_paper: 5, review: 4, standalone_take: 5,
-    },
   },
   insane: {
     name: '🚀 INSANE',
     description: 'Maximum engagement. Votes and comments explode.',
     rateLimits: { paper: 50, take: 200, comment: 1000, vote: 5000, follow: 500, sciencesub: 10 },
     cooldowns: { paper: 30000, take: 2000, comment: 500, vote: 100, follow: 500, sciencesub: 0 },
-    activityWeights: {
-      comment_paper: 20, comment_take: 20, comment_review: 12,
-      reply: 35, take_on_paper: 5, review: 3, standalone_take: 5,
-    },
   },
 };
 
@@ -1978,12 +1974,12 @@ async function engagementPresetsMenu(settings: RuntimeSettings): Promise<void> {
   ]);
 
   if (confirm) {
-    // Apply the preset to settings
+    // Apply the preset to settings (presets only change rate limits and cooldowns,
+    // not activity weights — those are controlled separately by the user)
     const newSettings: RuntimeSettings = {
       ...settings,
       rateLimits: { ...preset.rateLimits },
       cooldowns: { ...preset.cooldowns },
-      ...(preset.activityWeights && { activityWeights: { ...preset.activityWeights } }),
     };
     saveSettings(newSettings);
 
@@ -2162,14 +2158,15 @@ async function adjustActivityWeights(settings: RuntimeSettings): Promise<void> {
     return;
   }
 
-  // Quick presets (7-key format)
+  // Quick presets — derived from SINGLE_ACTION_WEIGHTS with explicit multipliers
   if (selectedActivity === '__boost_engagement__') {
-    settings.activityWeights = {
-      comment_paper: 18, comment_take: 18, comment_review: 12,
-      reply: 35, take_on_paper: 5, review: 4, standalone_take: 8,
-    };
+    // 1.5x comments/replies, 0.5x takes/reviews
+    settings.activityWeights = scaleWeights({
+      comment_paper: 1.5, comment_take: 1.5, comment_review: 1.5, reply: 1.5,
+      take_on_paper: 0.5, review: 0.5, standalone_take: 0.5,
+    });
     saveSettings(settings);
-    console.log(chalk.green('\n    ✓ Engagement mode activated! More comments and replies'));
+    console.log(chalk.green('\n    ✓ Engagement mode activated! 1.5x comments/replies, 0.5x takes/reviews'));
     console.log(chalk.gray('    💾 Saved to data/settings.json\n'));
     await inquirer.prompt([{ type: 'input', name: 'c', message: chalk.gray('Press Enter to continue...'), prefix: '    ' }]);
     await settingsMenu();
@@ -2177,12 +2174,13 @@ async function adjustActivityWeights(settings: RuntimeSettings): Promise<void> {
   }
 
   if (selectedActivity === '__boost_research__') {
-    settings.activityWeights = {
-      comment_paper: 8, comment_take: 8, comment_review: 6,
-      reply: 15, take_on_paper: 20, review: 25, standalone_take: 18,
-    };
+    // 3x reviews/takes, 0.5x comments/replies
+    settings.activityWeights = scaleWeights({
+      comment_paper: 0.5, comment_take: 0.5, comment_review: 0.5, reply: 0.5,
+      take_on_paper: 3, review: 3, standalone_take: 3,
+    });
     saveSettings(settings);
-    console.log(chalk.green('\n    ✓ Research mode activated! More reviews and takes'));
+    console.log(chalk.green('\n    ✓ Research mode activated! 3x reviews/takes, 0.5x comments/replies'));
     console.log(chalk.gray('    💾 Saved to data/settings.json\n'));
     await inquirer.prompt([{ type: 'input', name: 'c', message: chalk.gray('Press Enter to continue...'), prefix: '    ' }]);
     await settingsMenu();
