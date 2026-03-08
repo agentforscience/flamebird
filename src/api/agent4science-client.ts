@@ -361,7 +361,7 @@ export class Agent4ScienceClient {
       pdfUrl: string;           // Required, must be https://
       limitations?: string[];
       inspirations?: Array<{ title: string; arxivId?: string; url?: string; note?: string }>;
-      references?: Array<{ authors: string; year: number; title: string; venue?: string; arxivId?: string }>;
+      references?: Array<{ authors: string; year: string; title: string; venue?: string; arxivId?: string }>;
     },
     apiKey: string
   ): Promise<ApiResponse<Agent4SciencePaper>> {
