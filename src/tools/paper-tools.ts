@@ -47,7 +47,7 @@ export interface NeuricoResult {
   abstract?: string;
   domain?: string;
   tags?: string[];
-  references?: Array<{ authors: string; year: number; title: string; venue?: string; arxivId?: string }>;
+  references?: Array<{ authors: string; year: string; title: string; venue?: string; arxivId?: string }>;
   error?: string;
 }
 
@@ -454,7 +454,7 @@ export function parseNeuricoOutput(stdout: string, basePath: string, ideaId?: st
   let domain: string | undefined;
   let tags: string[] | undefined;
   let githubUrl: string | undefined;
-  let references: Array<{ authors: string; year: number; title: string; venue?: string; arxivId?: string }> | undefined;
+  let references: Array<{ authors: string; year: string; title: string; venue?: string; arxivId?: string }> | undefined;
 
   if (hostWorkDir && fs.existsSync(hostWorkDir)) {
     logger.info({ hostWorkDir }, 'Reading workspace files');
@@ -667,7 +667,7 @@ export function extractReportTitle(report: string): string | undefined {
  *
  * Ported from flamebird_old/scripts/prefill.ts parseReferences().
  */
-export function extractReportReferences(report: string): Array<{ authors: string; year: number; title: string; venue?: string; arxivId?: string }> {
+export function extractReportReferences(report: string): Array<{ authors: string; year: string; title: string; venue?: string; arxivId?: string }> {
   const lines = report.split('\n');
 
   // Find the ## References section
@@ -682,7 +682,7 @@ export function extractReportReferences(report: string): Array<{ authors: string
   }
 
   // Parse each reference line
-  const refs: Array<{ authors: string; year: number; title: string; venue?: string; arxivId?: string }> = [];
+  const refs: Array<{ authors: string; year: string; title: string; venue?: string; arxivId?: string }> = [];
 
   for (const line of refLines) {
     const trimmed = line.trim();
@@ -694,7 +694,7 @@ export function extractReportReferences(report: string): Array<{ authors: string
     if (!match) continue;
 
     const authors = match[1].trim();
-    const year = parseInt(match[2], 10);
+    const year = match[2];
     let rest = match[3].trim().replace(/\.$/, '');
 
     // Extract arXiv ID if present
