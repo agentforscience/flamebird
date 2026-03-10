@@ -13,7 +13,7 @@ import type {
 import { createAgent4ScienceClient, getAgent4ScienceClient } from '../api/agent4science-client.js';
 import { createAgentManager, getAgentManager } from '../agents/agent-manager.js';
 import { createDatabase, closeDatabase, getDatabase } from '../db/database.js';
-import { createRateLimiter } from '../rate-limit/rate-limiter.js';
+import { createRateLimiter, getRateLimiter } from '../rate-limit/rate-limiter.js';
 import { createNotificationPoller, getNotificationPoller } from '../polling/notification-poller.js';
 import { createActionExecutor, getActionExecutor } from '../actions/action-executor.js';
 import { createLLMClient, getLLMClient } from '../llm/llm-client.js';
@@ -24,6 +24,16 @@ import { tickPaperGeneration, type ManagerAgentConfig } from '../tools/manager-a
 import { resolveNeuricoPath } from '../tools/paper-tools.js';
 
 const logger = createLogger('runtime');
+
+/** Resolve agent ID to @handle for readable logs. */
+function agentName(agentId: string): string {
+  try {
+    const runtime = getAgentManager().getRuntime(agentId);
+    return runtime ? `@${runtime.config.handle}` : agentId.slice(-12);
+  } catch {
+    return agentId.slice(-12);
+  }
+}
 
 export interface EventLoopConfig {
   tickIntervalMs: number;        // How often to check for work (e.g., 1s)
@@ -214,7 +224,7 @@ export class EventLoop {
           }
         }
 
-        logger.info(`Agent ${agentId}: ${confirmed} sciencesub memberships confirmed on init (${subsToJoin.length} attempted)`);
+        logger.info(`${agentName(agentId)}: ${confirmed} sciencesub memberships confirmed on init (${subsToJoin.length} attempted)`);
       } catch (error) {
         logger.warn({ err: error, agentId }, 'Failed to init sciencesubs for agent');
       }
@@ -407,6 +417,28 @@ export class EventLoop {
       actionsExecuted++;
     }
 
+    // Auto-scale cooldowns based on queue backlog
+    const queueStats = executor.getQueueStats();
+    const rateLimiter = getRateLimiter();
+    const pending = queueStats.pending;
+    let newScale: number;
+    if (pending > 200) {
+      newScale = 0.1;   // 10x faster — heavy backlog
+    } else if (pending > 100) {
+      newScale = 0.25;  // 4x faster — moderate backlog
+    } else if (pending > 50) {
+      newScale = 0.5;   // 2x faster — mild backlog
+    } else {
+      newScale = 1.0;   // normal — queue is healthy
+    }
+    if (rateLimiter.cooldownScale !== newScale) {
+      logger.info(
+        { pending, oldScale: rateLimiter.cooldownScale, newScale },
+        `Cooldown auto-scale: ${rateLimiter.cooldownScale}x → ${newScale}x (${pending} pending)`
+      );
+      rateLimiter.setCooldownScale(newScale);
+    }
+
     // Phase 4: Paper generation for NeuriCo agents
     for (const agentId of manager.getAgentIds()) {
       const agent = manager.getRuntime(agentId);
@@ -462,7 +494,7 @@ export class EventLoop {
     // Skip responding to notifications when posting is disabled
     // This prevents agents from creating comments/replies
     if (!this.runtimeConfig.proactive?.enablePosting) {
-      logger.debug(`${agentId} posting disabled - skipping notification response`);
+      logger.debug(`${agentName(agentId)} posting disabled - skipping notification response`);
       return;
     }
 
@@ -475,7 +507,7 @@ export class EventLoop {
 
     // Skip if already engaged with this content (deduplication)
     if (db.hasEngaged(agentId, targetId)) {
-      logger.debug(`${agentId} already engaged with ${targetId}, skipping notification response`);
+      logger.debug(`${agentName(agentId)} already engaged with ${targetId}, skipping notification response`);
       return;
     }
 
@@ -520,13 +552,15 @@ export class EventLoop {
 
     // For mentions, replies, and comments on own content — respond as author
     if (notification.type === 'mention' || notification.type === 'reply' || notification.type === 'comment') {
-      logger.info(`Agent ${agentId} responding to ${notification.type} from ${notification.fromAgentId}`);
+      logger.info(`${agentName(agentId)} responding to ${notification.type} from ${agentName(notification.fromAgentId || '')}`);
 
       try {
         // Determine the root content (paper/take) for broader context
         let parentContent: string | undefined;
         let targetContent = notification.message;
         let threadContext: string | undefined;
+        let rootTitle: string | undefined;
+        let rootType: string | undefined;
 
         const apiKey = manager.getApiKey(agentId);
 
@@ -557,21 +591,29 @@ export class EventLoop {
             if (notification.paperId || notification.targetType === 'paper') {
               const paperResult = await client.getPaper(notification.paperId || rootId, apiKey);
               if (paperResult.success && paperResult.data) {
+                rootTitle = paperResult.data.title;
+                rootType = 'paper';
                 parentContent = `${paperResult.data.title}\n\n${paperResult.data.tldr || paperResult.data.abstract || ''}`;
               }
             } else if (notification.takeId || notification.targetType === 'take') {
               const takeResult = await client.getTake(notification.takeId || rootId, apiKey);
               if (takeResult.success && takeResult.data) {
+                rootTitle = takeResult.data.title || takeResult.data.hotTake;
+                rootType = 'take';
                 parentContent = `${takeResult.data.title}\n\n${takeResult.data.hotTake || takeResult.data.summary?.join(' ') || ''}`;
               }
             } else if (commentRootId) {
               // Root type unknown — try paper first, then take
               const paperResult = await client.getPaper(commentRootId, apiKey);
               if (paperResult.success && paperResult.data) {
+                rootTitle = paperResult.data.title;
+                rootType = 'paper';
                 parentContent = `${paperResult.data.title}\n\n${paperResult.data.tldr || paperResult.data.abstract || ''}`;
               } else {
                 const takeResult = await client.getTake(commentRootId, apiKey);
                 if (takeResult.success && takeResult.data) {
+                  rootTitle = takeResult.data.title || takeResult.data.hotTake;
+                  rootType = 'take';
                   parentContent = `${takeResult.data.title}\n\n${takeResult.data.hotTake || takeResult.data.summary?.join(' ') || ''}`;
                 }
               }
@@ -601,8 +643,11 @@ export class EventLoop {
                   }
                 }
 
-                // Build parent chain from triggeringId upwards (oldest first)
+                // Build rich multi-agent conversation context
                 if (triggeringId) {
+                  const triggeringComment = allComments.find((c: any) => c.id === triggeringId);
+
+                  // Parent chain (oldest first)
                   const chain: string[] = [];
                   let currentId: string | undefined = triggeringId;
                   let depth = 0;
@@ -614,7 +659,53 @@ export class EventLoop {
                     currentId = comment.parentId || undefined;
                     depth++;
                   }
-                  if (chain.length > 1) threadContext = chain.join('\n\n');
+
+                  // Sibling comments — other replies to the same parent
+                  const siblingContext: string[] = [];
+                  if (triggeringComment?.parentId) {
+                    const siblings = allComments.filter(
+                      (c: any) => c.parentId === triggeringComment.parentId && c.id !== triggeringId
+                    );
+                    for (const sib of siblings.slice(0, 5)) {
+                      const handle = sib.agent?.handle || sib.agentId || 'Agent';
+                      siblingContext.push(`@${handle} (${sib.intent || 'comment'}): "${sib.body}"`);
+                    }
+                  }
+
+                  // Participant map
+                  const participants = new Map<string, { intent: string; count: number }>();
+                  for (const c of allComments) {
+                    const handle = c.agent?.handle || c.agentId || 'Agent';
+                    const existing = participants.get(handle);
+                    if (existing) {
+                      existing.count++;
+                    } else {
+                      participants.set(handle, { intent: c.intent || 'comment', count: 1 });
+                    }
+                  }
+
+                  // Assemble
+                  let richContext = '';
+
+                  if (participants.size > 1) {
+                    richContext += `=== DISCUSSION PARTICIPANTS (${participants.size} researchers) ===\n`;
+                    for (const [handle, info] of participants) {
+                      richContext += `- @${handle}: ${info.count} comment${info.count > 1 ? 's' : ''}, last intent: ${info.intent}\n`;
+                    }
+                    richContext += '\n';
+                  }
+
+                  richContext += `=== CONVERSATION THREAD ===\n`;
+                  richContext += chain.join('\n\n');
+
+                  if (siblingContext.length > 0) {
+                    richContext += `\n\n=== OTHER REPLIES IN THIS BRANCH (${siblingContext.length} other researchers also responded) ===\n`;
+                    richContext += siblingContext.join('\n\n');
+                  }
+
+                  if (chain.length > 1 || siblingContext.length > 0) {
+                    threadContext = richContext;
+                  }
                 }
               }
             } catch (threadErr) {
@@ -629,8 +720,16 @@ export class EventLoop {
         }
 
         const triggerType = notification.type === 'mention' ? 'mention'
-          : notification.type === 'comment' ? 'new_content'
+          : notification.type === 'comment' ? 'author_reply'
           : 'reply';
+
+        logger.info({
+          agentId,
+          triggerType,
+          rootTitle: rootTitle || '(unknown)',
+          rootType: rootType || '(unknown)',
+          from: notification.fromAgentId,
+        }, `${agentName(agentId)} generating ${triggerType} on "${rootTitle || notification.targetId}"`)
 
         const response = await llm.generateComment(persona, {
           targetType: notification.commentId ? 'comment' : (notification.targetType === 'review' ? 'comment' : notification.targetType ?? 'comment') as 'paper' | 'take' | 'comment',
@@ -639,6 +738,8 @@ export class EventLoop {
           threadContext,
           triggerType,
           fromAgent: notification.fromAgentId,
+          rootTitle,
+          rootType,
         });
 
         return {
@@ -659,7 +760,7 @@ export class EventLoop {
 
     // For take/review notifications (someone wrote a take/review on your paper) — optionally engage
     if (notification.type === 'take' || notification.type === 'review') {
-      logger.debug(`Agent ${agentId} evaluating ${notification.type}`);
+      logger.debug(`${agentName(agentId)} evaluating ${notification.type}`);
 
       try {
         const apiKey = manager.getApiKey(agentId);
@@ -696,11 +797,11 @@ export class EventLoop {
         const decision = await llm.decideEngagement(persona, content);
 
         if (!decision.shouldEngage) {
-          logger.debug(`Agent ${agentId} decided not to engage: ${decision.reason}`);
+          logger.debug(`${agentName(agentId)} decided not to engage: ${decision.reason}`);
           return null;
         }
 
-        logger.info(`Agent ${agentId} will ${decision.actionType} on ${notification.targetType}: ${decision.reason}`);
+        logger.info(`${agentName(agentId)} will ${decision.actionType} on ${notification.targetType}: ${decision.reason}`);
 
         // For now, just queue a comment. Future: support takes, votes
         if (decision.actionType === 'comment') {
@@ -750,7 +851,7 @@ export class EventLoop {
     for (const agentId of agentIds) {
       const agent = manager.getRuntime(agentId);
       if (agent && agent.state === 'error' && agent.errorCount < 3) {
-        logger.info(`Resetting agent ${agentId} from error state`);
+        logger.info(`Resetting ${agentName(agentId)} from error state`);
         manager.updateState(agentId, 'idle');
         poller.resetAgent(agentId);
       }

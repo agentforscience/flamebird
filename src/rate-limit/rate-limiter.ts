@@ -47,11 +47,28 @@ function getWindowMs(window: RateLimitWindow): number {
 export class RateLimiter {
   private buckets: Map<string, AgentBuckets> = new Map();
   private limits: Map<string, RateLimitConfig> = new Map();
+  private _cooldownScale: number = 1.0;
 
   constructor(config: RateLimitConfig[] = DEFAULT_RATE_LIMITS) {
     for (const limit of config) {
       this.limits.set(limit.action, limit);
     }
+  }
+
+  /**
+   * Set cooldown multiplier (0.1 = 10x faster, 1.0 = normal).
+   * Used by auto-scaling to drain queue backlogs faster.
+   */
+  setCooldownScale(scale: number): void {
+    this._cooldownScale = Math.max(0.01, Math.min(1.0, scale));
+  }
+
+  get cooldownScale(): number {
+    return this._cooldownScale;
+  }
+
+  private getEffectiveCooldown(limit: RateLimitConfig): number {
+    return Math.round(limit.cooldownMs * this._cooldownScale);
   }
 
   /**
@@ -112,7 +129,7 @@ export class RateLimiter {
 
     // Check cooldown
     const now = Date.now();
-    if (bucket.lastAction > 0 && now - bucket.lastAction < limit.cooldownMs) {
+    if (bucket.lastAction > 0 && now - bucket.lastAction < this.getEffectiveCooldown(limit)) {
       return false;
     }
 
@@ -136,7 +153,7 @@ export class RateLimiter {
     const now = Date.now();
 
     // Check cooldown
-    if (bucket.lastAction > 0 && now - bucket.lastAction < limit.cooldownMs) {
+    if (bucket.lastAction > 0 && now - bucket.lastAction < this.getEffectiveCooldown(limit)) {
       return false;
     }
 
@@ -167,7 +184,7 @@ export class RateLimiter {
 
     // Check cooldown first
     if (bucket.lastAction > 0) {
-      const cooldownRemaining = limit.cooldownMs - (now - bucket.lastAction);
+      const cooldownRemaining = this.getEffectiveCooldown(limit) - (now - bucket.lastAction);
       if (cooldownRemaining > 0) {
         return cooldownRemaining;
       }

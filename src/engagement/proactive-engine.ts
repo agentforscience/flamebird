@@ -22,6 +22,12 @@ import { isTooSimilarToRecent } from '../utils/similarity.js';
 
 const logger = createLogger('proactive');
 
+/** Resolve agent ID to @handle for readable logs. Falls back to last 8 chars of ID. */
+function agentName(agentId: string): string {
+  const runtime = getAgentManager().getRuntime(agentId);
+  return runtime ? `@${runtime.config.handle}` : agentId.slice(-12);
+}
+
 export const DEFAULT_PROACTIVE_CONFIG: ProactiveConfig = {
   discoveryIntervalMs: 60_000, // Check every minute
   maxDiscoveryItems: 10,
@@ -47,25 +53,31 @@ interface FeedSnapshot {
     commentBody: string;
     commentAuthorId: string;
     rootId: string;
-    rootType: 'paper' | 'take';
+    rootType: 'paper' | 'take' | 'review';
+    rootTitle?: string;
     reciprocityMultiplier: number;
+    threadParticipantCount: number;  // How many unique agents are in this thread
+    siblingCount: number;            // How many other replies to the same parent
   }>;
   discoveredAgents: Map<string, string>; // handle → agentId
   sciencesubCandidates: Array<{ slug: string; name: string; description: string; relevance: number }>;
 }
 
 /**
- * Weights for the single creative action per heartbeat (Phase 4: DECIDE ONE).
+ * Valid action types for the single creative action per heartbeat (Phase 4: DECIDE ONE).
  * Votes, follows, and joins are handled separately in Phase 2 (MAINTENANCE).
+ *
+ * Actual weights come from config.actionWeights (set via settings.json / play menu).
+ * This object defines the valid keys only — values are ignored at runtime.
  */
 export const SINGLE_ACTION_WEIGHTS = {
-  comment_paper:   0.15,
-  comment_take:    0.15,
-  comment_review:  0.10,
-  reply:           0.42,
-  take_on_paper:   0.07,
-  review:          0.06,
-  standalone_take: 0.05,
+  comment_paper:   0,
+  comment_take:    0,
+  comment_review:  0,
+  reply:           0,
+  take_on_paper:   0,
+  review:          0,
+  standalone_take: 0,
 };
 
 /**
@@ -315,14 +327,16 @@ export class ProactiveEngine {
   }
 
   /**
-   * Pick ONE creative action type using action weights.
-   * Uses config.actionWeights if provided (e.g. for testing), otherwise SINGLE_ACTION_WEIGHTS.
+   * Pick ONE creative action type using action weights from config.
+   * Weights are set via settings.json / play menu — no hardcoded fallback.
    * Used in Phase 4 (DECIDE ONE) — one action per heartbeat.
    */
   private pickSingleAction(): keyof typeof SINGLE_ACTION_WEIGHTS {
-    const weights = this.config.actionWeights
-      ? { ...SINGLE_ACTION_WEIGHTS, ...this.config.actionWeights }
-      : SINGLE_ACTION_WEIGHTS;
+    if (!this.config.actionWeights || Object.keys(this.config.actionWeights).length === 0) {
+      logger.warn('No actionWeights configured — defaulting to reply');
+      return 'reply';
+    }
+    const weights = this.config.actionWeights;
 
     // Normalize weights (so they don't need to sum to 1.0)
     const total = Object.values(weights).reduce((s, w) => s + w, 0);
@@ -370,13 +384,13 @@ export class ProactiveEngine {
 
     const apiKey = manager.getApiKey(agentId);
     if (!apiKey) {
-      logger.warn(`No API key for agent ${agentId}`);
+      logger.warn(`No API key for ${agentName(agentId)}`);
       return;
     }
 
     logger.info(
       { agentId, enablePosting: this.config.enablePosting, enableTakeCreation: this.config.enableTakeCreation },
-      `Running proactive discovery for ${agentId}`
+      `Running proactive discovery for ${agentName(agentId)}`
     );
     this.lastDiscoveryTime.set(agentId, new Date());
 
@@ -389,6 +403,7 @@ export class ProactiveEngine {
       const snapshot = await this.browseFeed(agentId, agent.config.persona, apiKey);
       logger.info(
         {
+          agent: agentName(agentId),
           agentId,
           papers: snapshot.papers.length,
           takes: snapshot.takes.length,
@@ -406,7 +421,7 @@ export class ProactiveEngine {
 
       // Skip all content creation when posting is disabled
       if (!this.config.enablePosting) {
-        logger.debug(`${agentId} posting disabled - skipping content creation`);
+        logger.debug(`${agentName(agentId)} posting disabled - skipping content creation`);
         return;
       }
 
@@ -458,7 +473,7 @@ export class ProactiveEngine {
 
     logger.warn(
       { agentId, localCount },
-      `Agent ${agentId} has only ${localCount} tracked sciencesub memberships (minimum ${MIN_SCIENCESUB_MEMBERSHIPS}), joining via API...`
+      `${agentName(agentId)} has only ${localCount} tracked sciencesub memberships (minimum ${MIN_SCIENCESUB_MEMBERSHIPS}), joining via API...`
     );
 
     const client = getAgent4ScienceClient();
@@ -525,7 +540,7 @@ export class ProactiveEngine {
 
     // Check rate limit (1/day agent default for papers)
     if (!rateLimiter.canPerform(agentId, 'paper')) {
-      logger.debug(`${agentId} rate limited for paper creation`);
+      logger.debug(`${agentName(agentId)} rate limited for paper creation`);
       return;
     }
 
@@ -642,11 +657,13 @@ export class ProactiveEngine {
     };
 
     // Fetch all feeds in parallel
-    const [papersNew, papersHot, takesNew, takesHot, followingFeed, randomFeed, sciencesubsResult] = await Promise.all([
+    const [papersNew, papersHot, takesNew, takesHot, reviewsNew, reviewsHot, followingFeed, randomFeed, sciencesubsResult] = await Promise.all([
       client.getPapers(apiKey, { limit: this.config.maxDiscoveryItems, sort: 'new' }),
       client.getPapers(apiKey, { limit: this.config.maxDiscoveryItems, sort: 'hot' }),
       client.getTakes(apiKey, { limit: this.config.maxDiscoveryItems, sort: 'new' }),
       client.getTakes(apiKey, { limit: this.config.maxDiscoveryItems, sort: 'hot' }),
+      client.getReviews(apiKey, { limit: this.config.maxDiscoveryItems, sort: 'new' }),
+      client.getReviews(apiKey, { limit: this.config.maxDiscoveryItems, sort: 'hot' }),
       client.getFollowingFeed(apiKey, { limit: 20, type: 'all' }),
       client.getRandomFeed(apiKey),
       this.config.enableSciencesubJoining ? client.getSciencesubs(apiKey) : Promise.resolve({ success: false as const, data: undefined }),
@@ -679,12 +696,8 @@ export class ProactiveEngine {
         if (!seenPapers.has(p.id)) { seenPapers.add(p.id); rawPapers.push(p); }
       }
 
-      // Collect reviews from random feed
-      for (const r of data.reviews ?? []) {
-        if (r.reviewerAgentId !== agentId && !db.hasEngaged(agentId, r.id)) {
-          snapshot.reviews.push({ ...r, relevanceScore: 0.5 }); // reviews get flat score
-        }
-      }
+      // Collect reviews from random feed (deduplication handled below)
+      // Reviews are now primarily collected from dedicated hot/new feeds
     }
 
     // Score & filter papers
@@ -743,9 +756,48 @@ export class ProactiveEngine {
       }
     }
 
+    // ── Collect & deduplicate reviews ──
+    const seenReviews = new Set<string>();
+    const rawReviews: Agent4ScienceReview[] = [];
+
+    for (const result of [reviewsNew, reviewsHot]) {
+      if (!result.success || !result.data) continue;
+      const reviews = Array.isArray(result.data) ? result.data : (result.data as { items?: Agent4ScienceReview[] }).items || [];
+      for (const r of reviews) {
+        if (!seenReviews.has(r.id)) { seenReviews.add(r.id); rawReviews.push(r); }
+      }
+    }
+
+    // Add following feed reviews
+    if (followingFeed.success && followingFeed.data) {
+      const data = followingFeed.data as { reviews?: Agent4ScienceReview[] };
+      for (const r of data.reviews ?? []) {
+        if (!seenReviews.has(r.id)) { seenReviews.add(r.id); rawReviews.push(r); }
+      }
+    }
+
+    // Add random feed reviews
+    if (randomFeed.success && randomFeed.data) {
+      const rData = randomFeed.data as { reviews?: Agent4ScienceReview[] };
+      for (const r of rData.reviews ?? []) {
+        if (!seenReviews.has(r.id)) { seenReviews.add(r.id); rawReviews.push(r); }
+      }
+    }
+
+    // Score & filter reviews
+    // Note: only exclude reviews already commented on (not just voted on),
+    // so agents can still comment on reviews they've voted on.
+    for (const review of rawReviews) {
+      if (review.reviewerAgentId === agentId) continue;
+      if (db.hasEngaged(agentId, review.id, 'comment')) continue;
+      const score = this.scoreReview(review, persona);
+      snapshot.reviews.push({ ...review, relevanceScore: score });
+    }
+
     // Sort by relevance (highest first)
     snapshot.papers.sort((a, b) => b.relevanceScore - a.relevanceScore);
     snapshot.takes.sort((a, b) => b.relevanceScore - a.relevanceScore);
+    snapshot.reviews.sort((a, b) => b.relevanceScore - a.relevanceScore);
 
     // ── Scan reply opportunities (read-only) ──
     snapshot.replyOpportunities = await this.scanReplyOpportunities(agentId, apiKey, snapshot);
@@ -815,6 +867,33 @@ export class ProactiveEngine {
   }
 
   /**
+   * Score a review's relevance to the agent's persona (0-1).
+   */
+  private scoreReview(review: Agent4ScienceReview, persona: AgentPersona): number {
+    let score = 0.3; // base score
+
+    // Topic relevance via paper tags (0-0.4)
+    const paperTags = review.paper?.tags || [];
+    if (paperTags.length > 0 && this.isTopicRelevant(paperTags, persona.preferredTopics)) {
+      score += 0.4;
+    }
+
+    // Recency bonus (0-0.15)
+    const ageHours = (Date.now() - new Date(review.createdAt).getTime()) / (1000 * 60 * 60);
+    if (ageHours < 1) score += 0.15;
+    else if (ageHours < 6) score += 0.10;
+    else if (ageHours < 24) score += 0.05;
+
+    // Comment count bonus (0-0.15)
+    const commentCount = review.commentCount || 0;
+    if (commentCount >= 5) score += 0.15;
+    else if (commentCount >= 2) score += 0.10;
+    else if (commentCount >= 1) score += 0.05;
+
+    return Math.min(1, score);
+  }
+
+  /**
    * Scan threads for reply candidates (read-only, no actions).
    * Prioritizes content with comments, falls back to top content by relevance.
    */
@@ -835,31 +914,42 @@ export class ProactiveEngine {
       .filter(t => (t.commentCount || 0) > 0)
       .sort((a, b) => (b.commentCount || 0) - (a.commentCount || 0));
 
-    const roots: { id: string; type: 'paper' | 'take' }[] = [];
+    const roots: { id: string; type: 'paper' | 'take' | 'review'; title?: string }[] = [];
     for (const p of papersWithComments.slice(0, 10)) {
-      roots.push({ id: p.id, type: 'paper' });
+      roots.push({ id: p.id, type: 'paper', title: p.title });
     }
     for (const t of takesWithComments.slice(0, 10)) {
-      roots.push({ id: t.id, type: 'take' });
+      roots.push({ id: t.id, type: 'take', title: t.title || t.hotTake?.slice(0, 60) });
+    }
+    const reviewsWithComments = [...snapshot.reviews]
+      .filter(r => (r.commentCount || 0) > 0)
+      .sort((a, b) => (b.commentCount || 0) - (a.commentCount || 0));
+    for (const r of reviewsWithComments.slice(0, 5)) {
+      roots.push({ id: r.id, type: 'review', title: r.summary?.slice(0, 60) });
     }
 
-    // Fallback: if no content has comments yet, scan top papers/takes by relevance
+    // Fallback: if no content has comments yet, scan top papers/takes/reviews by relevance
     // (they might have comments the listing didn't report, or comments from this cycle)
     if (roots.length === 0) {
       for (const p of snapshot.papers.slice(0, 5)) {
-        roots.push({ id: p.id, type: 'paper' });
+        roots.push({ id: p.id, type: 'paper', title: p.title });
       }
       for (const t of snapshot.takes.slice(0, 5)) {
-        roots.push({ id: t.id, type: 'take' });
+        roots.push({ id: t.id, type: 'take', title: t.title || t.hotTake?.slice(0, 60) });
+      }
+      for (const r of snapshot.reviews.slice(0, 3)) {
+        roots.push({ id: r.id, type: 'review', title: r.summary?.slice(0, 60) });
       }
     }
 
     roots.sort(() => Math.random() - 0.5);
 
     logger.info({
+      agent: agentName(agentId),
       agentId,
       papersWithComments: papersWithComments.length,
       takesWithComments: takesWithComments.length,
+      reviewsWithComments: reviewsWithComments.length,
       rootsToScan: roots.length,
       usingFallback: roots.length === 0 || (papersWithComments.length === 0 && takesWithComments.length === 0),
       commentCounts: snapshot.papers.slice(0, 5).map(p => ({ id: p.id.slice(-8), cc: p.commentCount })),
@@ -867,7 +957,7 @@ export class ProactiveEngine {
 
     type ReplyableComment = { id: string; body: string; agentId?: string; parentId?: string | null; depth?: number };
 
-    for (const { id: rootId, type: rootType } of roots) {
+    for (const { id: rootId, type: rootType, title: rootTitle } of roots) {
       try {
         let comments: ReplyableComment[] = [];
 
@@ -877,10 +967,12 @@ export class ProactiveEngine {
           const data = threadResult.data;
           comments = Array.isArray(data) ? data : (data as { comments?: ReplyableComment[] }).comments ?? [];
         } else {
-          // Fallback: fetch comments directly from paper/take comments endpoint
+          // Fallback: fetch comments directly from paper/take/review comments endpoint
           const fallbackResult = rootType === 'paper'
             ? await client.getPaperComments(rootId, apiKey)
-            : await client.getTakeComments(rootId, apiKey);
+            : rootType === 'review'
+              ? await client.getReviewComments(rootId, apiKey)
+              : await client.getTakeComments(rootId, apiKey);
           if (fallbackResult.success && fallbackResult.data) {
             const fbData = fallbackResult.data;
             comments = Array.isArray(fbData) ? fbData : (fbData as { comments?: ReplyableComment[] }).comments ?? [];
@@ -892,6 +984,7 @@ export class ProactiveEngine {
         }
 
         logger.info({
+          agent: agentName(agentId),
           agentId,
           rootId: rootId.slice(-8),
           rootType,
@@ -914,15 +1007,28 @@ export class ProactiveEngine {
           }, 'Thread has comments but none replyable — breakdown');
         }
 
+        // Compute thread-level stats for prioritization
+        const uniqueParticipants = new Set(
+          (comments as ReplyableComment[]).filter(c => c.agentId).map(c => c.agentId!)
+        );
+
         for (const c of replyable) {
           if (!c.agentId) continue;
+          // Count siblings — other replies to the same parent
+          const siblingCount = (comments as ReplyableComment[]).filter(
+            (s) => s.parentId === c.parentId && s.id !== c.id
+          ).length;
+
           opportunities.push({
             commentId: c.id,
             commentBody: c.body,
             commentAuthorId: c.agentId,
             rootId,
             rootType,
+            rootTitle,
             reciprocityMultiplier: this.getReciprocityMultiplier(agentId, c.agentId),
+            threadParticipantCount: uniqueParticipants.size,
+            siblingCount,
           });
         }
       } catch (err) {
@@ -1013,7 +1119,7 @@ export class ProactiveEngine {
       executor.queueAction(agentId, 'vote', target.id, target.type, { direction: target.direction }, 'low');
       db.recordEngagement(agentId, target.id, target.type, 'vote');
       votesQueued++;
-      logger.debug(`${agentId} maintenance-voted ${target.direction} on ${target.type} ${target.id}`);
+      logger.debug(`${agentName(agentId)} maintenance-voted ${target.direction} on ${target.type} ${target.id}`);
     }
 
     // ── At most 1 follow ──
@@ -1027,7 +1133,7 @@ export class ProactiveEngine {
           const [handle, targetId] = candidates[Math.floor(Math.random() * candidates.length)];
           executor.queueAction(agentId, 'follow', handle, 'agent', {}, 'low');
           db.recordFollow(agentId, targetId);
-          logger.info(`${agentId} will follow @${handle}`);
+          logger.info(`${agentName(agentId)} will follow @${handle}`);
         }
       }
     }
@@ -1041,7 +1147,7 @@ export class ProactiveEngine {
           if (joinResult.success || joinResult.code === 'ALREADY_MEMBER') {
             if (joinResult.success) rateLimiter.tryConsume(agentId, 'sciencesub');
             db.recordSciencesubJoin(agentId, candidate.slug);
-            logger.info(`${agentId} joined sciencesub ${candidate.slug} (relevance: ${(candidate.relevance * 100).toFixed(0)}%)`);
+            logger.info(`${agentName(agentId)} joined sciencesub ${candidate.slug} (relevance: ${(candidate.relevance * 100).toFixed(0)}%)`);
           }
         } catch (error) {
           logger.error({ err: error, agentId, sciencesub: candidate.slug }, 'Failed to join sciencesub');
@@ -1061,7 +1167,7 @@ export class ProactiveEngine {
         const joinResult = await client.joinSciencesub(slug, apiKey);
         if (joinResult.success || joinResult.code === 'ALREADY_MEMBER') {
           db.recordSciencesubJoin(agentId, slug);
-          logger.info(`${agentId} auto-joined sciencesub ${slug} (engaged with content)`);
+          logger.info(`${agentName(agentId)} auto-joined sciencesub ${slug} (engaged with content)`);
         }
       } catch {
         // Ignore join errors — transient network issues
@@ -1090,18 +1196,16 @@ export class ProactiveEngine {
     // Try up to 5 rolls to find a viable action
     for (let attempt = 0; attempt < 5; attempt++) {
       const action = this.pickSingleAction();
-      logger.info({ agentId, action, attempt }, `Decided action: ${action}`);
 
       try {
         switch (action) {
           case 'comment_paper': {
-            // Find paper not yet commented on (action-specific check — voting doesn't block commenting)
-            // Falls back to random paper if all have been commented on (allows re-engagement over time)
             let target = snapshot.papers.find(p => !db.hasEngaged(agentId, p.id, 'comment'));
             if (!target && snapshot.papers.length > 0) {
               target = snapshot.papers[Math.floor(Math.random() * snapshot.papers.length)];
             }
             if (target && rateLimiter.canPerform(agentId, 'comment')) {
+              logger.info({ agentId, action, attempt }, `${agentName(agentId)} → comment_paper "${target.title}"`);
               await this.queueCommentOnPaper(agentId, target, persona);
               return;
             }
@@ -1109,12 +1213,12 @@ export class ProactiveEngine {
           }
 
           case 'comment_take': {
-            // Find take not yet commented on (action-specific check)
             let target = snapshot.takes.find(t => !db.hasEngaged(agentId, t.id, 'comment'));
             if (!target && snapshot.takes.length > 0) {
               target = snapshot.takes[Math.floor(Math.random() * snapshot.takes.length)];
             }
             if (target && rateLimiter.canPerform(agentId, 'comment')) {
+              logger.info({ agentId, action, attempt }, `${agentName(agentId)} → comment_take "${target.title || target.hotTake?.slice(0, 60)}"`);
               await this.queueCommentOnTake(agentId, target, persona);
               return;
             }
@@ -1127,6 +1231,7 @@ export class ProactiveEngine {
               reviewTarget = snapshot.reviews[Math.floor(Math.random() * snapshot.reviews.length)];
             }
             if (reviewTarget && rateLimiter.canPerform(agentId, 'comment')) {
+              logger.info({ agentId, action, attempt }, `${agentName(agentId)} → comment_review by ${agentName(reviewTarget.reviewerAgentId || '')} (${reviewTarget.id})`);
               await this.queueCommentOnReview(agentId, reviewTarget, persona);
               return;
             }
@@ -1135,6 +1240,7 @@ export class ProactiveEngine {
 
           case 'reply': {
             if (snapshot.replyOpportunities.length > 0 && rateLimiter.canPerform(agentId, 'comment')) {
+              logger.info({ agentId, action, attempt }, `${agentName(agentId)} → reply (${snapshot.replyOpportunities.length} opportunities)`);
               const success = await this.tryReply(agentId, persona, apiKey, snapshot);
               if (success) return;
             }
@@ -1143,17 +1249,15 @@ export class ProactiveEngine {
 
           case 'take_on_paper': {
             if (!this.config.enableTakeCreation) break;
-            // Skip if there's already a pending take in the queue
             if (db.hasPendingAction(agentId, 'take')) {
               logger.debug({ agentId }, 'Skipping take_on_paper: already has pending take in queue');
               break;
             }
-            // Diversify paper selection: pick randomly from top candidates so agents don't all pile on the same paper
             const eligibleForTake = snapshot.papers.filter(p => !db.hasEngaged(agentId, p.id, 'take'));
             if (eligibleForTake.length > 0 && rateLimiter.canPerform(agentId, 'take')) {
               const idx = Math.floor(Math.random() * Math.min(eligibleForTake.length, 5));
-              // Pass existing takes on this paper so the LLM writes something different
               const selectedPaper = eligibleForTake[idx];
+              logger.info({ agentId, action, attempt }, `${agentName(agentId)} → take_on_paper "${selectedPaper.title}"`);
               const existingTakesOnPaper = snapshot.takes
                 .filter((t: Agent4ScienceTake) => t.paperId === selectedPaper.id && (t.title || t.hotTake))
                 .map((t: Agent4ScienceTake) => `- "${t.title}" (${t.stance || 'neutral'}): ${t.hotTake || ''}`.slice(0, 200));
@@ -1164,16 +1268,16 @@ export class ProactiveEngine {
           }
 
           case 'review': {
-            // Skip if there's already a pending review in the queue
             if (db.hasPendingAction(agentId, 'review')) {
               logger.debug({ agentId }, 'Skipping review: already has pending review in queue');
               break;
             }
-            // Diversify: pick randomly from top candidates (review-specific engagement check)
             const eligibleForReview = snapshot.papers.filter(p => !db.hasEngaged(agentId, p.id, 'review'));
             if (eligibleForReview.length > 0 && rateLimiter.canPerform(agentId, 'review')) {
               const idx = Math.floor(Math.random() * Math.min(eligibleForReview.length, 5));
-              await this.queueReviewOnPaper(agentId, eligibleForReview[idx], persona);
+              const reviewPaper = eligibleForReview[idx];
+              logger.info({ agentId, action, attempt }, `${agentName(agentId)} → review "${reviewPaper.title}"`);
+              await this.queueReviewOnPaper(agentId, reviewPaper, persona);
               return;
             }
             break;
@@ -1181,12 +1285,12 @@ export class ProactiveEngine {
 
           case 'standalone_take': {
             if (!this.config.enableTakeCreation) break;
-            // Skip if there's already a pending take in the queue
             if (db.hasPendingAction(agentId, 'take')) {
               logger.debug({ agentId }, 'Skipping standalone_take: already has pending take in queue');
               break;
             }
             if (rateLimiter.canPerform(agentId, 'take')) {
+              logger.info({ agentId, action, attempt }, `${agentName(agentId)} → standalone_take`);
               await this.queueStandaloneTake(agentId, persona, apiKey, snapshot);
               return;
             }
@@ -1224,10 +1328,13 @@ export class ProactiveEngine {
     );
     if (candidates.length === 0) return false;
 
-    // Sort by reciprocity (highest first) with some randomness
+    // Sort by combined score: reciprocity + thread heat (active multi-agent discussions prioritized)
     candidates.sort((a, b) => {
-      const aScore = a.reciprocityMultiplier + Math.random() * 0.5;
-      const bScore = b.reciprocityMultiplier + Math.random() * 0.5;
+      // Thread heat: multi-participant threads are more interesting to join
+      const aThreadHeat = Math.min(a.threadParticipantCount * 0.5, 2.0) + Math.min(a.siblingCount * 0.3, 1.5);
+      const bThreadHeat = Math.min(b.threadParticipantCount * 0.5, 2.0) + Math.min(b.siblingCount * 0.3, 1.5);
+      const aScore = a.reciprocityMultiplier + aThreadHeat + Math.random() * 0.5;
+      const bScore = b.reciprocityMultiplier + bThreadHeat + Math.random() * 0.5;
       return bScore - aScore;
     });
 
@@ -1251,6 +1358,11 @@ export class ProactiveEngine {
         if (takeResult.success && takeResult.data) {
           rootContent = `${takeResult.data.title}\n\n${takeResult.data.hotTake || takeResult.data.summary?.join(' ') || ''}`;
         }
+      } else if (target.rootType === 'review') {
+        const review = snapshot.reviews.find(r => r.id === target.rootId);
+        if (review) {
+          rootContent = [review.summary, review.strengths?.join('; '), review.weaknesses?.join('; '), review.suggestions].filter(Boolean).join('\n\n');
+        }
       }
     } catch {
       // Non-critical — we still have thread context
@@ -1267,7 +1379,7 @@ export class ProactiveEngine {
 
     // Check similarity to recent comments
     if (isTooSimilarToRecent(agentId, generated.body, db, 0.7, 10)) {
-      logger.debug(`${agentId} reply too similar to recent comments, skipping`);
+      logger.debug(`${agentName(agentId)} reply too similar to recent comments, skipping`);
       return false;
     }
 
@@ -1285,7 +1397,7 @@ export class ProactiveEngine {
     db.recordEngagement(agentId, target.commentId, 'comment', 'comment');
     db.recordInteraction(agentId, target.commentAuthorId, 'reply');
 
-    logger.info(`${agentId} queued reply to comment ${target.commentId} (reciprocity: ${target.reciprocityMultiplier.toFixed(1)}×)`);
+    logger.info(`${agentName(agentId)} queued reply on "${target.rootTitle || target.rootId}" to ${agentName(target.commentAuthorId)} (reciprocity: ${target.reciprocityMultiplier.toFixed(1)}×)`);
     return true;
   }
 
@@ -1435,30 +1547,16 @@ export class ProactiveEngine {
         // Pick the oldest unanswered comment (authors should respond in order)
         const target = unreplied[unreplied.length - 1] as ReplyableComment;
 
-        // Author-framed LLM prompt
-        const prompt = `You are ${persona.voice === 'meme-lord' ? 'a witty researcher' : `a ${persona.voice} researcher`} and you are the AUTHOR of this ${rootType}.
+        // Use generateComment with author_reply trigger to get full persona system prompt
+        const generated = await llm.generateComment(persona, {
+          targetType: rootType,
+          targetContent: target.body,
+          triggerType: 'author_reply',
+          fromAgent: target.agentId,
+          rootTitle,
+          rootType,
+        });
 
-Your ${rootType}: "${rootTitle}"
-
-Someone commented on your work:
-"${target.body}"
-
-Reply as the author — defend your approach, clarify your reasoning, acknowledge valid critique, or push back on mischaracterizations. Stay in character.
-${persona.spiceLevel >= 7 ? "Don't be afraid to push back!" : "Be thoughtful and substantive."}
-Spice level: ${persona.spiceLevel}/10.
-
-Respond in JSON format:
-{
-  "intent": "clarify" | "rebuttal" | "support",
-  "body": "Your reply as the author (1-2 paragraphs)",
-  "confidence": 0.0-1.0
-}`;
-
-        const response = await llm.complete([{ role: 'user', content: prompt }]);
-        const jsonMatch = response.content.match(/\{[\s\S]*\}/);
-        if (!jsonMatch) continue;
-
-        const generated = JSON.parse(jsonMatch[0]);
         if (!generated.body) continue;
 
         const payload = {
@@ -1474,7 +1572,7 @@ Respond in JSON format:
         if (target.agentId) db.recordInteraction(agentId, target.agentId, 'reply');
 
         repliesQueued++;
-        logger.info(`${agentId} (author) queued reply to comment ${target.id} on their ${rootType}`);
+        logger.info(`${agentName(agentId)} (author) queued reply to comment ${target.id} on their ${rootType}`);
       } catch (error) {
         logger.debug({ err: error, agentId, rootId }, 'Author reply discovery skip');
       }
@@ -1492,7 +1590,7 @@ Respond in JSON format:
   ): Promise<void> {
     const rateLimiter = getRateLimiter();
     if (!rateLimiter.canPerform(agentId, 'sciencesub')) {
-      logger.debug(`${agentId} rate limited for sciencesub creation`);
+      logger.debug(`${agentName(agentId)} rate limited for sciencesub creation`);
       return;
     }
 
@@ -1770,7 +1868,7 @@ Respond in JSON format:
         ...review,
       }, 'normal');
       db.recordEngagement(agentId, paper.id, 'paper', 'review');
-      logger.info(`${agentId} queued review on paper ${paper.id}`);
+      logger.info(`${agentName(agentId)} queued review on paper "${paper.title}"`);
     } catch (error) {
       logger.error({ err: error, agentId, paperId: paper.id }, 'Failed to generate review');
     }
@@ -1787,18 +1885,21 @@ Respond in JSON format:
    * @param maxDepth - Maximum parent levels to fetch (default: 3)
    * @returns Formatted thread context string
    */
+  /**
+   * Build rich multi-agent conversation context for a reply.
+   * Returns the parent chain PLUS sibling comments (other replies to the same parent),
+   * and a participant summary showing who's in the discussion and their positions.
+   */
   private async getThreadContext(
     rootId: string,
-    _rootType: 'paper' | 'take',
+    _rootType: 'paper' | 'take' | 'review',
     commentId: string,
     apiKey: string,
-    maxDepth: number = 3
+    maxDepth: number = 5
   ): Promise<string> {
     const client = getAgent4ScienceClient();
-    const context: string[] = [];
 
     try {
-      // Fetch the thread with all comments
       const result = await client.getThread(rootId, apiKey);
 
       if (!result.success || !result.data) {
@@ -1806,24 +1907,85 @@ Respond in JSON format:
       }
 
       const allComments = (result.data as any).comments || [];
+      if (allComments.length === 0) return '';
 
-      // Build parent chain from commentId upwards
+      // Find the target comment
+      const targetComment = allComments.find((c: any) => c.id === commentId);
+      if (!targetComment) return '';
+
+      // 1. Build parent chain (oldest first)
+      const parentChain: string[] = [];
       let currentId = commentId;
       let depth = 0;
 
       while (currentId && depth < maxDepth) {
         const comment = allComments.find((c: any) => c.id === currentId);
         if (!comment) break;
-
-        // Prepend to show oldest first
-        const agentHandle = comment.agentId || 'Agent';
-        context.unshift(`${agentHandle}: ${comment.body}`);
-
+        const handle = comment.agent?.handle || comment.agentId || 'Agent';
+        parentChain.unshift(`@${handle}: "${comment.body}"`);
         currentId = comment.parentId || '';
         depth++;
       }
 
-      return context.join('\n\n---\n\n');
+      // 2. Find sibling comments — other replies to the same parent as the target
+      const siblingContext: string[] = [];
+      if (targetComment.parentId) {
+        const siblings = allComments.filter(
+          (c: any) => c.parentId === targetComment.parentId && c.id !== commentId
+        );
+        for (const sib of siblings.slice(0, 5)) {
+          const handle = sib.agent?.handle || sib.agentId || 'Agent';
+          siblingContext.push(`@${handle} (${sib.intent || 'comment'}): "${sib.body}"`);
+        }
+      }
+
+      // 3. Find child comments — direct replies to the target (if any)
+      const childContext: string[] = [];
+      const children = allComments.filter(
+        (c: any) => c.parentId === commentId
+      );
+      for (const child of children.slice(0, 3)) {
+        const handle = child.agent?.handle || child.agentId || 'Agent';
+        childContext.push(`@${handle} (${child.intent || 'comment'}): "${child.body}"`);
+      }
+
+      // 4. Build participant map — who's in this thread and what positions they hold
+      const participants = new Map<string, { intent: string; count: number }>();
+      for (const c of allComments) {
+        const handle = c.agent?.handle || c.agentId || 'Agent';
+        const existing = participants.get(handle);
+        if (existing) {
+          existing.count++;
+        } else {
+          participants.set(handle, { intent: c.intent || 'comment', count: 1 });
+        }
+      }
+
+      // 5. Assemble the full context
+      let context = '';
+
+      if (participants.size > 1) {
+        context += `=== DISCUSSION PARTICIPANTS (${participants.size} researchers) ===\n`;
+        for (const [handle, info] of participants) {
+          context += `- @${handle}: ${info.count} comment${info.count > 1 ? 's' : ''}, last intent: ${info.intent}\n`;
+        }
+        context += '\n';
+      }
+
+      context += `=== CONVERSATION THREAD ===\n`;
+      context += parentChain.join('\n\n');
+
+      if (siblingContext.length > 0) {
+        context += `\n\n=== OTHER REPLIES IN THIS BRANCH (${siblingContext.length} other researchers also responded) ===\n`;
+        context += siblingContext.join('\n\n');
+      }
+
+      if (childContext.length > 0) {
+        context += `\n\n=== REPLIES TO THE COMMENT YOU'RE JOINING (others have already responded) ===\n`;
+        context += childContext.join('\n\n');
+      }
+
+      return context;
     } catch (error) {
       logger.debug({ err: error, rootId, commentId }, 'Failed to fetch thread context');
       return '';
@@ -1851,7 +2013,7 @@ Respond in JSON format:
 
       executor.queueAction(agentId, 'comment', paper.id, 'paper', comment as unknown as Record<string, unknown>, 'normal');
       db.recordEngagement(agentId, paper.id, 'paper', 'comment');
-      logger.info(`${agentId} queued comment on paper ${paper.id}`);
+      logger.info(`${agentName(agentId)} queued comment on paper "${paper.title}"`);
     } catch (error) {
       logger.error({ err: error, agentId, paperId: paper.id }, 'Failed to generate comment');
     }
@@ -1878,7 +2040,7 @@ Respond in JSON format:
 
       executor.queueAction(agentId, 'comment', take.id, 'take', comment as unknown as Record<string, unknown>, 'normal');
       db.recordEngagement(agentId, take.id, 'take', 'comment');
-      logger.info(`${agentId} queued comment on take ${take.id}`);
+      logger.info(`${agentName(agentId)} queued comment on take "${take.title || take.hotTake?.slice(0, 60)}"`);
     } catch (error) {
       logger.error({ err: error, agentId, takeId: take.id }, 'Failed to generate comment');
     }
@@ -1912,7 +2074,7 @@ Respond in JSON format:
 
       executor.queueAction(agentId, 'comment', review.id, 'review', comment as unknown as Record<string, unknown>, 'normal');
       db.recordEngagement(agentId, review.id, 'review', 'comment');
-      logger.info(`${agentId} queued comment on review ${review.id}`);
+      logger.info(`${agentName(agentId)} queued comment on review by ${agentName(review.reviewerAgentId || '')}`);
     } catch (error) {
       logger.error({ err: error, agentId, reviewId: review.id }, 'Failed to generate comment on review');
     }

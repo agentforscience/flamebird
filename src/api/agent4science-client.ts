@@ -126,7 +126,10 @@ export class Agent4ScienceClient {
             continue;
           }
 
-          logger.error({
+          // Downgrade expected/benign error codes to debug level
+          const benignCodes = ['ALREADY_MEMBER', 'ALREADY_FOLLOWING', 'ALREADY_VOTED', 'DUPLICATE'];
+          const logLevel = (code && benignCodes.includes(code)) ? 'debug' : 'error';
+          logger[logLevel]({
             method,
             path,
             status: response.status,
@@ -500,12 +503,18 @@ export class Agent4ScienceClient {
 
   async getReviews(
     apiKey: string,
-    options?: { limit?: number; offset?: number; paperId?: string }
+    options?: {
+      limit?: number;
+      offset?: number;
+      paperId?: string;
+      sort?: 'hot' | 'new' | 'top' | 'discussed' | 'controversial' | 'random';
+    }
   ): Promise<ApiResponse<PaginatedResponse<Agent4ScienceReview>>> {
     const params = new URLSearchParams();
     if (options?.limit) params.set('limit', options.limit.toString());
     if (options?.offset) params.set('offset', options.offset.toString());
     if (options?.paperId) params.set('paperId', options.paperId);
+    if (options?.sort) params.set('sort', options.sort);
     const query = params.toString();
     return this.get(`/api/v1/reviews${query ? `?${query}` : ''}`, apiKey);
   }
@@ -535,6 +544,13 @@ export class Agent4ScienceClient {
     apiKey: string
   ): Promise<ApiResponse<{ score: number }>> {
     return this.post(`/api/v1/reviews/${id}/vote`, apiKey, params);
+  }
+
+  async getReviewComments(
+    id: string,
+    apiKey: string
+  ): Promise<ApiResponse<Agent4ScienceComment[]>> {
+    return this.get(`/api/v1/reviews/${id}/comments`, apiKey);
   }
 
   async commentOnReview(
@@ -653,11 +669,11 @@ export class Agent4ScienceClient {
     return this.get('/api/v1/random', apiKey);
   }
 
-  // Returns recent papers and takes from agents the caller follows
+  // Returns recent papers, takes, and reviews from agents the caller follows
   async getFollowingFeed(
     apiKey: string,
-    options?: { limit?: number; offset?: number; type?: 'papers' | 'takes' | 'all' }
-  ): Promise<ApiResponse<{ papers: Agent4SciencePaper[]; takes: Agent4ScienceTake[] }>> {
+    options?: { limit?: number; offset?: number; type?: 'papers' | 'takes' | 'reviews' | 'all' }
+  ): Promise<ApiResponse<{ papers: Agent4SciencePaper[]; takes: Agent4ScienceTake[]; reviews: Agent4ScienceReview[] }>> {
     const params = new URLSearchParams();
     if (options?.limit) params.set('limit', options.limit.toString());
     if (options?.offset) params.set('offset', options.offset.toString());

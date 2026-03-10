@@ -52,8 +52,8 @@ describe('ensureFirstTagIsSciencesub', () => {
   });
 });
 
-describe('play.ts actionWeights mapping (granular)', () => {
-  // Simulate the new direct-passthrough normalization in loadSettingsOverrides()
+describe('actionWeights mapping (granular)', () => {
+  // Simulate the normalization in loadSettingsOverrides()
   function normalizeWeights(weights: Record<string, number>) {
     const total = Object.values(weights).reduce((a, b) => a + b, 0);
     const actionWeights: Record<string, number> = {};
@@ -61,16 +61,23 @@ describe('play.ts actionWeights mapping (granular)', () => {
     return actionWeights;
   }
 
-  // Derive sample weights from SINGLE_ACTION_WEIGHTS (the single source of truth)
-  const SAMPLE_WEIGHTS: Record<string, number> = Object.fromEntries(
-    Object.entries(SINGLE_ACTION_WEIGHTS).map(([k, v]) => [k, Math.round(v * 100)])
-  );
+  // Sample weights matching what settings.json would contain
+  const SAMPLE_WEIGHTS: Record<string, number> = {
+    comment_paper: 15,
+    comment_take: 15,
+    comment_review: 15,
+    reply: 40,
+    take_on_paper: 5,
+    review: 5,
+    standalone_take: 5,
+  };
 
-  it('all actionWeight keys match SINGLE_ACTION_WEIGHTS keys', () => {
+  const VALID_KEYS = new Set(Object.keys(SINGLE_ACTION_WEIGHTS));
+
+  it('all actionWeight keys match valid action keys', () => {
     const weights = normalizeWeights(SAMPLE_WEIGHTS);
-    const validKeys = new Set(Object.keys(SINGLE_ACTION_WEIGHTS));
     for (const key of Object.keys(weights)) {
-      expect(validKeys.has(key)).toBe(true);
+      expect(VALID_KEYS.has(key)).toBe(true);
     }
   });
 
@@ -90,24 +97,10 @@ describe('play.ts actionWeights mapping (granular)', () => {
     expect(weights['take_on_paper']).toBeGreaterThan(0);
   });
 
-  it('merged weights have no phantom keys', () => {
+  it('normalized weights have no phantom keys', () => {
     const actionWeights = normalizeWeights(SAMPLE_WEIGHTS);
-    const merged = { ...SINGLE_ACTION_WEIGHTS, ...actionWeights };
-    const validKeys = new Set(Object.keys(SINGLE_ACTION_WEIGHTS));
-    for (const key of Object.keys(merged)) {
-      expect(validKeys.has(key)).toBe(true);
-    }
-  });
-
-  it('no rolls are wasted on invalid action types', () => {
-    const actionWeights = normalizeWeights(SAMPLE_WEIGHTS);
-    const merged = { ...SINGLE_ACTION_WEIGHTS, ...actionWeights };
-
-    const validCases = new Set(Object.keys(SINGLE_ACTION_WEIGHTS));
-
-    for (const key of Object.keys(merged)) {
-      expect(validCases.has(key)).toBe(true);
+    for (const key of Object.keys(actionWeights)) {
+      expect(VALID_KEYS.has(key)).toBe(true);
     }
   });
 });
-

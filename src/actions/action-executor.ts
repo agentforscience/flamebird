@@ -21,6 +21,16 @@ import { createLogger } from '../logging/logger.js';
 
 const logger = createLogger('executor');
 
+/** Resolve agent ID to @handle for readable logs. */
+function agentName(agentId: string): string {
+  try {
+    const runtime = getAgentManager().getRuntime(agentId);
+    return runtime ? `@${runtime.config.handle}` : agentId.slice(-12);
+  } catch {
+    return agentId.slice(-12);
+  }
+}
+
 export interface ActionExecutorConfig {
   maxRetries: number;
   retryDelayMs: number;
@@ -68,7 +78,7 @@ export class ActionExecutor {
     const db = getDatabase();
     db.queueAction(action);
 
-    logger.info(`Queued ${type} action for agent ${agentId} -> ${targetType}:${targetId}`);
+    logger.info(`Queued ${type} for ${agentName(agentId)} -> ${targetType}:${targetId}`);
 
     return action;
   }
@@ -257,7 +267,7 @@ export class ActionExecutor {
           action.payload
         );
 
-        logger.info(`Executed ${action.type}: ${action.agentId} -> ${action.targetId}`);
+        logger.info(`Executed ${action.type}: ${agentName(action.agentId)} -> ${action.targetId}`);
       } else {
         throw new Error(result.error || 'Action failed');
       }

@@ -26,7 +26,6 @@ import {
 } from '../../tools/paper-tools.js';
 import { config as loadEnv } from 'dotenv';
 import type { RateLimitConfig, ProactiveConfig } from '../../types.js';
-import { SINGLE_ACTION_WEIGHTS } from '../../engagement/proactive-engine.js';
 
 // =====================================================
 // SETUP WIZARD - First-time user experience
@@ -1572,10 +1571,15 @@ const DEFAULT_SETTINGS: RuntimeSettings = {
     follow: 60000,     // 1min
     sciencesub: 0,     // no cooldown
   },
-  // Derived from SINGLE_ACTION_WEIGHTS (the engine's source of truth), scaled to integers.
-  activityWeights: Object.fromEntries(
-    Object.entries(SINGLE_ACTION_WEIGHTS).map(([k, v]) => [k, Math.round(v * 100)])
-  ) as RuntimeSettings['activityWeights'],
+  activityWeights: {
+    comment_paper:   15,
+    comment_take:    15,
+    comment_review:  15,
+    reply:           40,
+    take_on_paper:   5,
+    review:          5,
+    standalone_take: 5,
+  },
   enabledActivities: {
     papers: true,
     takes: true,
@@ -1808,15 +1812,16 @@ async function settingsMenu(): Promise<void> {
 }
 
 /**
- * Scale SINGLE_ACTION_WEIGHTS by per-key multipliers.
+ * Scale default activity weights by per-key multipliers.
  * Keys not in the multipliers map keep their default weight.
  * Result is rounded to integers for readability in settings.json.
  */
 function scaleWeights(multipliers: Partial<Record<string, number>>): RuntimeSettings['activityWeights'] {
+  const base = DEFAULT_SETTINGS.activityWeights;
   return Object.fromEntries(
-    Object.entries(SINGLE_ACTION_WEIGHTS).map(([k, v]) => [
+    Object.entries(base).map(([k, v]) => [
       k,
-      Math.round(v * (multipliers[k] ?? 1) * 100),
+      Math.round(v * (multipliers[k] ?? 1)),
     ])
   ) as RuntimeSettings['activityWeights'];
 }
@@ -2129,7 +2134,7 @@ async function adjustActivityWeights(settings: RuntimeSettings): Promise<void> {
     return;
   }
 
-  // Quick presets — derived from SINGLE_ACTION_WEIGHTS with explicit multipliers
+  // Quick presets — scale default weights with multipliers
   if (selectedActivity === '__boost_engagement__') {
     // 1.5x comments/replies, 0.5x takes/reviews
     settings.activityWeights = scaleWeights({

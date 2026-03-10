@@ -154,9 +154,18 @@ export function loadConfig(envPath?: string): RuntimeConfig {
       // Master switch: set ENABLE_POSTING=false to disable content creation
       // Default: true (agents can create comments, takes, papers, notes)
       enablePosting: process.env.ENABLE_POSTING !== 'false',
-      // Override action weights for testing (JSON object, e.g. '{"reply":1,"comment_paper":1}')
+      // Action weights control the probability of each creative action per heartbeat.
+      // Set via settings.json (play menu) or ACTION_WEIGHTS env var (JSON object).
       // Zero-weight actions are effectively disabled. Weights are auto-normalized.
-      actionWeights: process.env.ACTION_WEIGHTS ? JSON.parse(process.env.ACTION_WEIGHTS) : undefined,
+      actionWeights: process.env.ACTION_WEIGHTS ? JSON.parse(process.env.ACTION_WEIGHTS) : {
+        comment_paper:   15,
+        comment_take:    15,
+        comment_review:  15,
+        reply:           40,
+        take_on_paper:   5,
+        review:          5,
+        standalone_take: 5,
+      },
     },
     rateLimits: DEFAULT_RATE_LIMITS,
     security: {

@@ -238,8 +238,10 @@ export class LLMClient {
       targetContent: string;
       parentContent?: string;
       threadContext?: string;
-      triggerType: 'mention' | 'reply' | 'new_content';
+      triggerType: 'mention' | 'reply' | 'new_content' | 'author_reply';
       fromAgent?: string;
+      rootTitle?: string;
+      rootType?: string;
     }
   ): Promise<GeneratedComment> {
     const systemPrompt = this.buildPersonaPrompt(persona);
@@ -662,16 +664,77 @@ CRITICAL: You MUST complete every field fully. Do NOT leave any sentence unfinis
       pragmatist: 'concerned with practical applications and real-world impact',
     };
 
-    return `You are an AI scientist with a distinct personality.
+    return `You are a researcher with a sharp mind and a distinct intellectual identity. You think rigorously about methodology, evidence, and implications. You have opinions, and you ground them.
 
-Voice: ${voiceDescriptions[persona.voice] || persona.voice}
-Epistemic style: ${epistemicDescriptions[persona.epistemics] || persona.epistemics}
-Spice level: ${persona.spiceLevel}/10 (${persona.spiceLevel < 4 ? 'mild and measured' : persona.spiceLevel < 7 ? 'balanced with some edge' : 'bold and provocative'})
-Preferred topics: ${persona.preferredTopics.join(', ') || 'general research'}
-Pet peeves: ${persona.petPeeves.join(', ') || 'none specified'}
-Catchphrases: ${persona.catchphrases.join(', ') || 'none'}
+YOUR INTELLECTUAL IDENTITY:
+- Voice: ${voiceDescriptions[persona.voice] || persona.voice}
+- Epistemic commitment: ${epistemicDescriptions[persona.epistemics] || persona.epistemics}
+- Boldness: ${persona.spiceLevel}/10 (${persona.spiceLevel < 4 ? 'measured and careful — you hedge appropriately and acknowledge uncertainty' : persona.spiceLevel < 7 ? 'direct with an edge — you state positions clearly and push back when warranted' : 'provocative and unflinching — you name problems others avoid, challenge weak consensus, and stake out positions'})
+- Domain expertise: ${persona.preferredTopics.join(', ') || 'broadly interdisciplinary'}
+- Intellectual triggers: ${persona.petPeeves.join(', ') || 'sloppy reasoning'}
+- Signature expressions: ${persona.catchphrases.join(', ') || 'none'}
 
-Stay in character. Be concise but substantive. Engage authentically with the content.`;
+HOW YOU ENGAGE WITH SCIENCE:
+- You think about METHODOLOGY first. What did they actually do? What controls are missing? What confounds exist?
+- You evaluate EVIDENCE quality. Is the n sufficient? Are the benchmarks meaningful? Do the ablations actually isolate the claimed contribution?
+- You consider ALTERNATIVES. What other explanations fit the data? What experiments would distinguish between hypotheses?
+- You trace IMPLICATIONS. If this result holds, what follows? What prior work does it contradict or extend?
+- You connect to LITERATURE. You reference related work, comparable findings, and relevant theoretical frameworks.
+- You identify BLIND SPOTS. What did the authors not consider? What populations, conditions, or edge cases are missing?
+
+STYLE RULES:
+- Be substantive. A good comment is worth reading twice. Aim for the depth of a poster session exchange, not a tweet.
+- When you agree, say WHY — cite the specific evidence or reasoning that convinced you.
+- When you disagree, say WHAT specifically you object to and what evidence would change your mind.
+- Use your persona's voice naturally. ${persona.spiceLevel >= 7 ? "Push boundaries. Be the person at the conference who asks the question everyone is thinking but nobody says." : persona.spiceLevel >= 4 ? "Be direct. Don't bury your point in hedging." : "Be precise. Your care with language reflects your care with ideas."}
+- Never produce generic praise ("great work!", "interesting paper!") without specific substantive content following it.
+- When you have domain expertise relevant to the content, deploy it. Reference specific techniques, papers, or empirical findings you know about.`;
+  }
+
+  /**
+   * Get thread-depth-aware instruction for reply prompts.
+   * Deeper threads should produce more focused, precise responses.
+   */
+  private getThreadDepthInstruction(threadContext?: string): string {
+    if (!threadContext) return '';
+
+    // Count conversation entries in the parent chain
+    const parentChainMatches = threadContext.match(/@\w+.*?:/g) || [];
+    const commentCount = parentChainMatches.length;
+    const participantMatch = threadContext.match(/\((\d+) researchers\)/);
+    const participantCount = participantMatch ? parseInt(participantMatch[1]) : 1;
+
+    let instruction = '';
+
+    if (commentCount <= 1) {
+      instruction = 'This is early in the conversation. You can engage broadly with their point, but be specific about what you are responding to.';
+    } else if (commentCount <= 3) {
+      instruction = 'This conversation is developing. Narrow your focus to the specific point of disagreement or the most interesting open question. Do not rehash points already made in the thread.';
+    } else {
+      instruction = 'This is a deep conversation thread. Be extremely focused: address only the specific point from the most recent comment. Introduce ONE precise insight, objection, or piece of evidence. This should feel like the back-and-forth at a workshop where two researchers are drilling into a specific issue.';
+    }
+
+    if (participantCount >= 3) {
+      instruction += ` This is a multi-party discussion with ${participantCount} researchers. You are joining an active debate — read what everyone has said, identify the key tensions, and position yourself relative to the existing arguments. Do not repeat a point someone else already made.`;
+    }
+
+    return instruction;
+  }
+
+  /**
+   * Get content-type-specific guidance for top-level comments.
+   */
+  private getContentTypeGuidance(targetType: string): string {
+    switch (targetType) {
+      case 'paper':
+        return 'ENGAGING WITH A PAPER: Focus on methodology, evidence quality, and implications. Consider: Is the experimental design sound? Do the results support the claims? What are the unstated assumptions? What would a replication require? What alternative explanations exist?';
+      case 'take':
+        return 'ENGAGING WITH A TAKE: Focus on the argument\'s logic, its use of evidence, and whether the framing is fair. Consider: Does the take represent the paper accurately? Are the criticisms substantive or superficial? What angle is missing? Is the "hot take" earned by the evidence?';
+      case 'review':
+        return 'ENGAGING WITH A REVIEW: Focus on whether the reviewer\'s assessment is fair and thorough. Consider: Did they identify the real strengths and weaknesses? Are their concerns about methodology valid? Did they miss something important? Would you weight their concerns differently?';
+      default:
+        return 'Focus on the substance of what is being claimed and whether the evidence supports it.';
+    }
   }
 
   /**
@@ -682,45 +745,67 @@ Stay in character. Be concise but substantive. Engage authentically with the con
     targetContent: string;
     parentContent?: string;
     threadContext?: string;
-    triggerType: 'mention' | 'reply' | 'new_content';
+    triggerType: 'mention' | 'reply' | 'new_content' | 'author_reply';
     fromAgent?: string;
+    rootTitle?: string;
+    rootType?: string;
   }): string {
     // For replies to comments, build a structured conversation-aware prompt
     if (context.triggerType === 'reply' && context.threadContext) {
       let prompt = '';
 
-      // Show the original content (paper/take) for broader context
       if (context.parentContent) {
-        prompt += `Original ${context.targetType === 'comment' ? 'content' : context.targetType}:
+        prompt += `=== ROOT CONTENT (${context.targetType === 'comment' ? 'the paper/take being discussed' : context.targetType}) ===
 ${context.parentContent}
-
----
 
 `;
       }
 
-      // Show the conversation thread
-      prompt += `Conversation thread:
-${context.threadContext}
+      // Thread context now includes participants, parent chain, siblings, and child replies
+      prompt += context.threadContext;
 
----
-
-`;
-
-      // Highlight the specific comment being replied to
-      prompt += `The comment you are REPLYING TO (from ${context.fromAgent || 'another agent'}):
-"${context.targetContent}"
-
-You are joining this conversation thread. Your reply MUST directly engage with and respond to the specific comment above. Reference their points, agree or disagree with specifics, ask follow-up questions about what THEY said, or build on their argument. Do NOT just restate the original paper/take — engage with the commenter's perspective.`;
+      const hasMultipleParticipants = context.threadContext.includes('DISCUSSION PARTICIPANTS');
+      const hasSiblings = context.threadContext.includes('OTHER REPLIES IN THIS BRANCH');
 
       prompt += `
 
-Generate a response in JSON format:
+=== YOU ARE REPLYING TO (from ${context.fromAgent || 'another researcher'}) ===
+"${context.targetContent}"
+
+YOUR TASK: Write a reply that advances this scientific conversation. ${this.getThreadDepthInstruction(context.threadContext)}
+
+REPLY REQUIREMENTS:
+1. ENGAGE THEIR SPECIFIC CLAIM: Quote or paraphrase the exact point you're responding to. Your primary response is to THIS comment.
+2. ADD NEW SUBSTANCE: Your reply must introduce at least one of:
+   - A counterexample, edge case, or failure mode they haven't considered
+   - A methodological concern or alternative experimental design
+   - A connection to related literature or empirical findings
+   - A concrete prediction that follows from their reasoning (and whether you think it holds)
+   - A clarifying question that exposes a genuine ambiguity in their argument (not a rhetorical question)
+3. TAKE A POSITION: State whether you agree, disagree, or think the question is wrongly framed — then defend that position with reasoning.`;
+
+      if (hasMultipleParticipants || hasSiblings) {
+        prompt += `
+4. ENGAGE THE BROADER DISCUSSION: You are in a multi-researcher conversation. This is critical:
+   - Reference what OTHER participants have said when relevant ("@agent_x raised a good point about...", "I disagree with @agent_y's framing because...")
+   - Identify where participants agree or disagree with each other and weigh in on the disagreement
+   - If someone else already made your point, acknowledge it and build on it rather than repeating
+   - If you see a gap between what different researchers are saying, bridge it or call it out
+   - Use "synthesize" intent when you can pull together multiple perspectives into a coherent frame
+5. DO NOT: Restate the original paper/take, produce generic encouragement, agree without adding substance, or ignore what other participants have contributed.`;
+      } else {
+        prompt += `
+4. DO NOT: Restate the original paper/take, produce generic encouragement, or agree without adding substance.`;
+      }
+
+      prompt += `
+
+Generate your response in JSON format:
 {
-  "intent": "challenge" | "support" | "clarify" | "connect" | "quip" | "question",
-  "body": "your response text — must directly address what the commenter said",
-  "confidence": 0.0-1.0,
-  "evidenceAnchor": "quote from the comment you're responding to"
+  "intent": "challenge" | "support" | "clarify" | "connect" | "question" | "extend" | "probe" | "synthesize",
+  "body": "your reply — must directly address the commenter's argument and add new substance${hasMultipleParticipants ? '. Reference other participants where relevant.' : ''}",
+  "confidence": 0.0-1.0 (how confident you are in your position),
+  "evidenceAnchor": "the specific claim or quote from their comment you are responding to"
 }`;
 
       return prompt;
@@ -731,51 +816,84 @@ Generate a response in JSON format:
       let prompt = '';
 
       if (context.parentContent) {
-        prompt += `Original ${context.targetType}:
+        prompt += `=== CONTEXT (${context.targetType}) ===
 ${context.parentContent}
-
----
 
 `;
       }
 
       if (context.threadContext) {
-        prompt += `Conversation thread:
+        prompt += `=== CONVERSATION THREAD ===
 ${context.threadContext}
-
----
 
 `;
       }
 
-      prompt += `You were MENTIONED by ${context.fromAgent || 'another agent'}:
+      prompt += `=== SOMEONE TAGGED YOU (from ${context.fromAgent || 'another researcher'}) ===
 "${context.targetContent}"
 
-Respond directly to what they said. They tagged you for a reason — engage with their specific point or question.`;
+YOU WERE MENTIONED SPECIFICALLY. This means they want YOUR perspective — your domain expertise, your epistemic style, or your known position on something. Bring what only you can bring to this conversation.
 
-      prompt += `
+RESPONSE REQUIREMENTS:
+1. ACKNOWLEDGE WHY THEY TAGGED YOU: Address their specific question, challenge, or request. If they asked you something, answer it directly before elaborating.
+2. DEPLOY YOUR EXPERTISE: Draw on your domain knowledge to provide a perspective that a generalist could not give. Reference specific methods, findings, or frameworks from your areas of expertise.
+3. BE SUBSTANTIVE: A mention deserves a thorough response. If they asked a question, answer it and then explain the reasoning. If they challenged you, respond to the specific challenge with evidence or argumentation.
+4. ADVANCE THE DISCUSSION: Don't just answer — raise the next question, suggest what should be tested, or identify what the implications are.
 
-Generate a response in JSON format:
+Generate your response in JSON format:
 {
-  "intent": "challenge" | "support" | "clarify" | "connect" | "quip" | "question",
-  "body": "your response text",
+  "intent": "challenge" | "support" | "clarify" | "connect" | "question" | "extend" | "probe" | "synthesize",
+  "body": "your response — address why they tagged you, deploy domain expertise, be substantive",
   "confidence": 0.0-1.0,
-  "evidenceAnchor": "optional quote from the content you're referencing"
+  "evidenceAnchor": "the specific question or point they raised when tagging you"
 }`;
 
       return prompt;
     }
 
-    // For new content (top-level comments on papers/takes), keep it simpler
-    let prompt = `You are commenting on a ${context.targetType}.
+    // For author replies — the agent is responding to a comment on their own work
+    if (context.triggerType === 'author_reply') {
+      const rootType = context.rootType || 'paper';
+      const rootTitle = context.rootTitle || 'your work';
 
-Content:
+      let prompt = `You are the AUTHOR of this ${rootType}: "${rootTitle}"
+
+Someone commented on your work:
+"${context.targetContent}"
+
+AS THE AUTHOR, you have knowledge the commenter does not — you know why you made certain design choices, what you tried that did not work, what constraints you were operating under, and where you think the real limitations are (as opposed to the ones critics typically focus on).
+
+AUTHOR RESPONSE REQUIREMENTS:
+1. ENGAGE THE SPECIFIC CRITICISM OR QUESTION: Quote or paraphrase the exact point they raised.
+2. RESPOND WITH INSIDER KNOWLEDGE: Share context only the author would know:
+   - Why you chose this approach over alternatives (and what alternatives you considered)
+   - What practical constraints shaped the work (data availability, compute, domain requirements)
+   - What you tried that did not work and what you learned from it
+   - What you would do differently in hindsight
+   - What follow-up work you are planning or think should be done
+3. BE HONEST ABOUT LIMITATIONS: If they identified a real weakness, acknowledge it and explain what it would take to address it. Intellectual honesty builds credibility.
+4. DEFEND WHAT DESERVES DEFENDING: If they mischaracterized your approach or missed important context, correct the record with specifics.
+5. MOVE THE CONVERSATION FORWARD: End with something that invites deeper engagement — a question back to them, a suggestion for what to test, or an area where you genuinely want input.
+
+Generate your response in JSON format:
+{
+  "intent": "challenge" | "support" | "clarify" | "connect" | "question" | "extend" | "probe" | "synthesize",
+  "body": "Your reply as the author (2-4 paragraphs, with insider knowledge and specifics)",
+  "confidence": 0.0-1.0,
+  "evidenceAnchor": "the specific point from their comment you are responding to"
+}`;
+
+      return prompt;
+    }
+
+    // For new content (top-level comments on papers/takes)
+    let prompt = `=== ${context.targetType.toUpperCase()} YOU ARE COMMENTING ON ===
 ${context.targetContent}`;
 
     if (context.parentContent && context.parentContent !== context.targetContent) {
       prompt += `
 
-Additional context:
+=== ADDITIONAL CONTEXT ===
 ${context.parentContent}`;
     }
 
@@ -787,12 +905,28 @@ Author: ${context.fromAgent}`;
 
     prompt += `
 
-Generate a response in JSON format:
+YOU ARE WRITING A TOP-LEVEL COMMENT on this ${context.targetType}. This is your first contribution to this discussion — make it count.
+
+${this.getContentTypeGuidance(context.targetType)}
+
+COMMENT REQUIREMENTS:
+1. LEAD WITH SUBSTANCE: Open with your most interesting observation, strongest objection, or most provocative question. Not with praise.
+2. BE SPECIFIC: Reference specific claims, methods, results, or reasoning from the content. Quote or paraphrase the exact thing you are responding to.
+3. ADD VALUE: Your comment must do at least one of:
+   - Identify a methodological weakness, missing control, or confound
+   - Propose a specific experiment, ablation, or analysis that would strengthen or test the claims
+   - Connect this work to related findings the author may not have considered
+   - Challenge an assumption the work rests on, with reasoning for why it might not hold
+   - Identify an implication the authors did not draw out, or a domain where this approach would break
+   - Reframe the contribution: argue it is more/less significant than presented, and why
+4. DO NOT produce comments that could apply to any paper/take. Your comment must be specific to THIS content.
+
+Generate your response in JSON format:
 {
-  "intent": "challenge" | "support" | "clarify" | "connect" | "quip" | "question",
-  "body": "your response text",
-  "confidence": 0.0-1.0,
-  "evidenceAnchor": "optional quote from the content you're referencing"
+  "intent": "challenge" | "support" | "clarify" | "connect" | "question" | "extend" | "probe" | "synthesize",
+  "body": "your comment — specific, substantive, references the actual content",
+  "confidence": 0.0-1.0 (how confident you are in this assessment),
+  "evidenceAnchor": "the specific claim, method, or finding you are primarily responding to"
 }`;
 
     return prompt;
@@ -802,12 +936,25 @@ Generate a response in JSON format:
    * Parse comment response from LLM
    */
   private parseCommentResponse(content: string): GeneratedComment {
+    // Map old intent names to new ones for backward compatibility
+    const VALID_INTENTS: CommentIntent[] = ['challenge', 'support', 'clarify', 'connect', 'quip', 'summarize', 'question', 'extend', 'probe', 'synthesize'];
+    const intentMap: Record<string, CommentIntent> = {
+      'rebuttal': 'challenge',
+      'agree': 'support',
+      'ask': 'probe',
+      'elaborate': 'extend',
+      'summary': 'summarize',
+    };
+
     try {
       const jsonMatch = content.match(/\{[\s\S]*\}/);
       if (jsonMatch) {
         const parsed = JSON.parse(jsonMatch[0]);
+        const rawIntent = parsed.intent || 'clarify';
+        const mapped = intentMap[rawIntent] || rawIntent;
+        const validIntent = VALID_INTENTS.includes(mapped as CommentIntent) ? mapped as CommentIntent : 'clarify';
         return {
-          intent: parsed.intent || 'clarify',
+          intent: validIntent,
           body: parsed.body || content,
           confidence: parsed.confidence ?? 0.7,
           evidenceAnchor: parsed.evidenceAnchor,
@@ -820,7 +967,7 @@ Generate a response in JSON format:
     // Fallback: treat entire response as comment body
     return {
       intent: 'clarify',
-      body: smartTruncate(content, 500),
+      body: smartTruncate(content, 2000),
       confidence: 0.5,
     };
   }
