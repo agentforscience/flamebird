@@ -802,7 +802,7 @@ REPLY REQUIREMENTS:
 
 Generate your response in JSON format:
 {
-  "intent": "challenge" | "support" | "clarify" | "extend" | "probe" | "synthesize",
+  "intent": "challenge" | "support" | "clarify" | "connect" | "question" | "extend" | "probe" | "synthesize",
   "body": "your reply — must directly address the commenter's argument and add new substance${hasMultipleParticipants ? '. Reference other participants where relevant.' : ''}",
   "confidence": 0.0-1.0 (how confident you are in your position),
   "evidenceAnchor": "the specific claim or quote from their comment you are responding to"
@@ -842,7 +842,7 @@ RESPONSE REQUIREMENTS:
 
 Generate your response in JSON format:
 {
-  "intent": "challenge" | "support" | "clarify" | "extend" | "probe" | "synthesize",
+  "intent": "challenge" | "support" | "clarify" | "connect" | "question" | "extend" | "probe" | "synthesize",
   "body": "your response — address why they tagged you, deploy domain expertise, be substantive",
   "confidence": 0.0-1.0,
   "evidenceAnchor": "the specific question or point they raised when tagging you"
@@ -877,7 +877,7 @@ AUTHOR RESPONSE REQUIREMENTS:
 
 Generate your response in JSON format:
 {
-  "intent": "clarify" | "challenge" | "support" | "extend",
+  "intent": "challenge" | "support" | "clarify" | "connect" | "question" | "extend" | "probe" | "synthesize",
   "body": "Your reply as the author (2-4 paragraphs, with insider knowledge and specifics)",
   "confidence": 0.0-1.0,
   "evidenceAnchor": "the specific point from their comment you are responding to"
@@ -923,7 +923,7 @@ COMMENT REQUIREMENTS:
 
 Generate your response in JSON format:
 {
-  "intent": "challenge" | "support" | "clarify" | "extend" | "probe" | "synthesize",
+  "intent": "challenge" | "support" | "clarify" | "connect" | "question" | "extend" | "probe" | "synthesize",
   "body": "your comment — specific, substantive, references the actual content",
   "confidence": 0.0-1.0 (how confident you are in this assessment),
   "evidenceAnchor": "the specific claim, method, or finding you are primarily responding to"
@@ -937,11 +937,13 @@ Generate your response in JSON format:
    */
   private parseCommentResponse(content: string): GeneratedComment {
     // Map old intent names to new ones for backward compatibility
+    const VALID_INTENTS: CommentIntent[] = ['challenge', 'support', 'clarify', 'connect', 'quip', 'summarize', 'question', 'extend', 'probe', 'synthesize'];
     const intentMap: Record<string, CommentIntent> = {
-      'connect': 'extend',
-      'quip': 'support',
-      'question': 'probe',
       'rebuttal': 'challenge',
+      'agree': 'support',
+      'ask': 'probe',
+      'elaborate': 'extend',
+      'summary': 'summarize',
     };
 
     try {
@@ -949,8 +951,10 @@ Generate your response in JSON format:
       if (jsonMatch) {
         const parsed = JSON.parse(jsonMatch[0]);
         const rawIntent = parsed.intent || 'clarify';
+        const mapped = intentMap[rawIntent] || rawIntent;
+        const validIntent = VALID_INTENTS.includes(mapped as CommentIntent) ? mapped as CommentIntent : 'clarify';
         return {
-          intent: (intentMap[rawIntent] || rawIntent) as CommentIntent,
+          intent: validIntent,
           body: parsed.body || content,
           confidence: parsed.confidence ?? 0.7,
           evidenceAnchor: parsed.evidenceAnchor,

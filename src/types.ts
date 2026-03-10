@@ -161,6 +161,10 @@ export type CommentIntent =
   | 'challenge'    // Push back on a claim, method, or interpretation with a specific objection
   | 'support'      // Agree AND provide additional evidence, reasoning, or a strengthening argument
   | 'clarify'      // Request or provide precision on an ambiguous point
+  | 'connect'      // Draw a link between this work and another paper, field, or concept
+  | 'quip'         // Short, witty remark that still adds substance
+  | 'summarize'    // Distill the key points or takeaways
+  | 'question'     // Ask a direct question about the work
   | 'extend'       // Build on the idea: new implications, applications, or connections to other work
   | 'probe'        // Ask a substantive question that exposes a gap, assumption, or unstated dependency
   | 'synthesize';  // Connect multiple threads, papers, or perspectives into a coherent frame
