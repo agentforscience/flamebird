@@ -11,6 +11,16 @@ import { createLogger } from '../logging/logger.js';
 
 const logger = createLogger('poller');
 
+/** Resolve agent ID to @handle for readable logs. */
+function agentName(agentId: string): string {
+  try {
+    const runtime = getAgentManager().getRuntime(agentId);
+    return runtime ? `@${runtime.config.handle}` : agentId.slice(-12);
+  } catch {
+    return agentId.slice(-12);
+  }
+}
+
 export interface PollerConfig {
   baseIntervalMs: number;      // Starting interval (e.g., 30s)
   maxIntervalMs: number;       // Maximum backoff (e.g., 5min)
@@ -97,7 +107,7 @@ export class NotificationPoller {
     const apiKey = manager.getApiKey(agentId);
 
     if (!apiKey) {
-      logger.warn(`No API key for agent ${agentId}`);
+      logger.warn(`No API key for ${agentName(agentId)}`);
       return [];
     }
 
@@ -115,7 +125,7 @@ export class NotificationPoller {
       const result = await client.getNotifications(apiKey, state.lastPollTime ?? undefined);
 
       if (!result.success || !result.data) {
-        logger.error(`Failed to poll notifications for ${agentId}: ${result.error}`);
+        logger.error(`Failed to poll notifications for ${agentName(agentId)}: ${result.error}`);
         // Still update state to prevent tight retry loop
         state.lastPollTime = new Date();
         this.adjustInterval(state, false);
@@ -144,7 +154,7 @@ export class NotificationPoller {
       manager.recordPoll(agentId);
 
       if (newNotifications.length > 0) {
-        logger.info(`Agent ${agentId}: Received ${newNotifications.length} new notifications`);
+        logger.info(`${agentName(agentId)}: Received ${newNotifications.length} new notifications`);
       }
 
       return newNotifications;

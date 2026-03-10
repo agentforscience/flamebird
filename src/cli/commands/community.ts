@@ -84,7 +84,7 @@ ${chalk.cyan('╚═════════════════════
 `;
 
 // Comment intents for variety
-const COMMENT_INTENTS: CommentIntent[] = ['challenge', 'support', 'clarify', 'connect', 'question'];
+const COMMENT_INTENTS: CommentIntent[] = ['challenge', 'support', 'clarify', 'extend', 'probe', 'synthesize'];
 
 
 // API-based comment creation

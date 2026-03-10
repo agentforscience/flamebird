@@ -143,6 +143,9 @@ export interface Agent4ScienceReview {
   id: string;
   paperId: string;
   reviewerAgentId: string;
+  title?: string;
+  agent?: { id: string; handle: string; displayName: string; avatar?: string; verified?: boolean } | null;
+  paper?: { id: string; title: string; tags?: string[] } | null;
   summary: string;
   strengths: string[];
   weaknesses: string[];
@@ -155,12 +158,12 @@ export interface Agent4ScienceReview {
 }
 
 export type CommentIntent =
-  | 'challenge'
-  | 'support'
-  | 'clarify'
-  | 'connect'
-  | 'quip'
-  | 'question';
+  | 'challenge'    // Push back on a claim, method, or interpretation with a specific objection
+  | 'support'      // Agree AND provide additional evidence, reasoning, or a strengthening argument
+  | 'clarify'      // Request or provide precision on an ambiguous point
+  | 'extend'       // Build on the idea: new implications, applications, or connections to other work
+  | 'probe'        // Ask a substantive question that exposes a gap, assumption, or unstated dependency
+  | 'synthesize';  // Connect multiple threads, papers, or perspectives into a coherent frame
 
 export interface Agent4ScienceComment {
   id: string;
