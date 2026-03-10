@@ -53,7 +53,7 @@ interface FeedSnapshot {
     commentBody: string;
     commentAuthorId: string;
     rootId: string;
-    rootType: 'paper' | 'take';
+    rootType: 'paper' | 'take' | 'review';
     rootTitle?: string;
     reciprocityMultiplier: number;
     threadParticipantCount: number;  // How many unique agents are in this thread
@@ -914,15 +914,21 @@ export class ProactiveEngine {
       .filter(t => (t.commentCount || 0) > 0)
       .sort((a, b) => (b.commentCount || 0) - (a.commentCount || 0));
 
-    const roots: { id: string; type: 'paper' | 'take'; title?: string }[] = [];
+    const roots: { id: string; type: 'paper' | 'take' | 'review'; title?: string }[] = [];
     for (const p of papersWithComments.slice(0, 10)) {
       roots.push({ id: p.id, type: 'paper', title: p.title });
     }
     for (const t of takesWithComments.slice(0, 10)) {
       roots.push({ id: t.id, type: 'take', title: t.title || t.hotTake?.slice(0, 60) });
     }
+    const reviewsWithComments = [...snapshot.reviews]
+      .filter(r => (r.commentCount || 0) > 0)
+      .sort((a, b) => (b.commentCount || 0) - (a.commentCount || 0));
+    for (const r of reviewsWithComments.slice(0, 5)) {
+      roots.push({ id: r.id, type: 'review', title: r.summary?.slice(0, 60) });
+    }
 
-    // Fallback: if no content has comments yet, scan top papers/takes by relevance
+    // Fallback: if no content has comments yet, scan top papers/takes/reviews by relevance
     // (they might have comments the listing didn't report, or comments from this cycle)
     if (roots.length === 0) {
       for (const p of snapshot.papers.slice(0, 5)) {
@@ -930,6 +936,9 @@ export class ProactiveEngine {
       }
       for (const t of snapshot.takes.slice(0, 5)) {
         roots.push({ id: t.id, type: 'take', title: t.title || t.hotTake?.slice(0, 60) });
+      }
+      for (const r of snapshot.reviews.slice(0, 3)) {
+        roots.push({ id: r.id, type: 'review', title: r.summary?.slice(0, 60) });
       }
     }
 
@@ -940,6 +949,7 @@ export class ProactiveEngine {
       agentId,
       papersWithComments: papersWithComments.length,
       takesWithComments: takesWithComments.length,
+      reviewsWithComments: reviewsWithComments.length,
       rootsToScan: roots.length,
       usingFallback: roots.length === 0 || (papersWithComments.length === 0 && takesWithComments.length === 0),
       commentCounts: snapshot.papers.slice(0, 5).map(p => ({ id: p.id.slice(-8), cc: p.commentCount })),
@@ -1345,6 +1355,11 @@ export class ProactiveEngine {
         const takeResult = await getAgent4ScienceClient().getTake(target.rootId, apiKey);
         if (takeResult.success && takeResult.data) {
           rootContent = `${takeResult.data.title}\n\n${takeResult.data.hotTake || takeResult.data.summary?.join(' ') || ''}`;
+        }
+      } else if (target.rootType === 'review') {
+        const review = snapshot.reviews.find(r => r.id === target.rootId);
+        if (review) {
+          rootContent = [review.summary, review.strengths?.join('; '), review.weaknesses?.join('; '), review.suggestions].filter(Boolean).join('\n\n');
         }
       }
     } catch {
@@ -1875,7 +1890,7 @@ export class ProactiveEngine {
    */
   private async getThreadContext(
     rootId: string,
-    _rootType: 'paper' | 'take',
+    _rootType: 'paper' | 'take' | 'review',
     commentId: string,
     apiKey: string,
     maxDepth: number = 5
