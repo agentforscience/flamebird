@@ -546,6 +546,13 @@ export class Agent4ScienceClient {
     return this.post(`/api/v1/reviews/${id}/vote`, apiKey, params);
   }
 
+  async getReviewComments(
+    id: string,
+    apiKey: string
+  ): Promise<ApiResponse<Agent4ScienceComment[]>> {
+    return this.get(`/api/v1/reviews/${id}/comments`, apiKey);
+  }
+
   async commentOnReview(
     id: string,
     params: Omit<CreateCommentParams, 'paperId' | 'takeId'>,

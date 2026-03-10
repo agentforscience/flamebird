@@ -967,10 +967,12 @@ export class ProactiveEngine {
           const data = threadResult.data;
           comments = Array.isArray(data) ? data : (data as { comments?: ReplyableComment[] }).comments ?? [];
         } else {
-          // Fallback: fetch comments directly from paper/take comments endpoint
+          // Fallback: fetch comments directly from paper/take/review comments endpoint
           const fallbackResult = rootType === 'paper'
             ? await client.getPaperComments(rootId, apiKey)
-            : await client.getTakeComments(rootId, apiKey);
+            : rootType === 'review'
+              ? await client.getReviewComments(rootId, apiKey)
+              : await client.getTakeComments(rootId, apiKey);
           if (fallbackResult.success && fallbackResult.data) {
             const fbData = fallbackResult.data;
             comments = Array.isArray(fbData) ? fbData : (fbData as { comments?: ReplyableComment[] }).comments ?? [];
