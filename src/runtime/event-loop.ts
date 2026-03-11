@@ -29,10 +29,16 @@ const logger = createLogger('runtime');
 function agentName(agentId: string): string {
   try {
     const runtime = getAgentManager().getRuntime(agentId);
-    return runtime ? `@${runtime.config.handle}` : agentId.slice(-12);
+    if (!runtime) return agentId.slice(-12);
+    const dn = runtime.config.displayName;
+    return dn && dn !== runtime.config.handle ? `@${runtime.config.handle} (${dn})` : `@${runtime.config.handle}`;
   } catch {
     return agentId.slice(-12);
   }
+}
+
+function agentLog(agentId: string) {
+  return { agent: agentName(agentId), agentId };
 }
 
 export interface EventLoopConfig {
@@ -174,19 +180,19 @@ export class EventLoop {
         // Fetch available sciencesubs with 1 retry (transient server issues)
         let subsResult = await client.getSciencesubs(apiKey);
         if (!subsResult.success || !subsResult.data) {
-          logger.warn({ agentId, error: subsResult.error }, 'getSciencesubs failed, retrying in 2s...');
+          logger.warn({ ...agentLog(agentId), error: subsResult.error }, 'getSciencesubs failed, retrying in 2s...');
           await new Promise(resolve => setTimeout(resolve, 2000));
           subsResult = await client.getSciencesubs(apiKey);
         }
 
         if (!subsResult.success || !subsResult.data) {
-          logger.warn({ agentId, error: subsResult.error }, 'getSciencesubs failed after retry, skipping agent');
+          logger.warn({ ...agentLog(agentId), error: subsResult.error }, 'getSciencesubs failed after retry, skipping agent');
           continue;
         }
 
         const subs = Array.isArray(subsResult.data) ? subsResult.data : [];
         if (subs.length === 0) {
-          logger.warn({ agentId }, 'getSciencesubs returned empty list — no sciencesubs available to join');
+          logger.warn({ ...agentLog(agentId) }, 'getSciencesubs returned empty list — no sciencesubs available to join');
           continue;
         }
 
@@ -209,7 +215,7 @@ export class EventLoop {
         // any membership is better than none; discoverSciencesubs can optimize later
         const hasRelevantMatch = top5.some(s => s.score > 0);
         if (!hasRelevantMatch) {
-          logger.warn({ agentId, preferredTopics }, 'No relevant sciencesub matches found — falling back to first 5 subs');
+          logger.warn({ ...agentLog(agentId), preferredTopics }, 'No relevant sciencesub matches found — falling back to first 5 subs');
         }
 
         const subsToJoin = top5.map(s => s.sub);
@@ -226,7 +232,7 @@ export class EventLoop {
 
         logger.info(`${agentName(agentId)}: ${confirmed} sciencesub memberships confirmed on init (${subsToJoin.length} attempted)`);
       } catch (error) {
-        logger.warn({ err: error, agentId }, 'Failed to init sciencesubs for agent');
+        logger.warn({ err: error, ...agentLog(agentId) }, 'Failed to init sciencesubs for agent');
       }
     }
   }
@@ -347,7 +353,7 @@ export class EventLoop {
         manager.updateState(agentId, 'idle');
         await this.emit({ type: 'agent_state_changed', agentId, state: 'idle' });
       } catch (error) {
-        logger.error({ err: error, agentId }, 'Poll error for agent');
+        logger.error({ err: error, ...agentLog(agentId) }, 'Poll error for agent');
         manager.updateState(agentId, 'error', error instanceof Error ? error.message : 'Poll failed');
         await this.emit({
           type: 'error',
@@ -378,7 +384,7 @@ export class EventLoop {
         manager.updateState(agentId, 'idle');
         await this.emit({ type: 'agent_state_changed', agentId, state: 'idle' });
       } catch (error) {
-        logger.error({ err: error, agentId }, 'Discovery error for agent');
+        logger.error({ err: error, ...agentLog(agentId) }, 'Discovery error for agent');
         manager.updateState(agentId, 'error', error instanceof Error ? error.message : 'Discovery failed');
       }
     }
@@ -465,7 +471,7 @@ export class EventLoop {
         const result = await tickPaperGeneration(managerConfig);
         if (result?.success) {
           this.stats.papersGenerated++;
-          logger.info({ agentId, title: result.title }, 'Paper generated and published');
+          logger.info({ ...agentLog(agentId), title: result.title }, 'Paper generated and published');
           await this.emit({
             type: 'action_executed',
             result: {
@@ -475,7 +481,7 @@ export class EventLoop {
           });
         }
       } catch (error) {
-        logger.error({ err: error, agentId }, 'Paper generation tick error');
+        logger.error({ err: error, ...agentLog(agentId) }, 'Paper generation tick error');
       }
     }
   }
@@ -528,7 +534,7 @@ export class EventLoop {
         db.recordEngagement(agentId, targetId!, contentType, 'comment');
       }
     } catch (error) {
-      logger.error({ err: error, agentId }, 'Failed to handle notification');
+      logger.error({ err: error, ...agentLog(agentId) }, 'Failed to handle notification');
     }
   }
 
@@ -579,7 +585,7 @@ export class EventLoop {
                 commentRootId = commentResult.data.rootId;
               }
             } catch (commentErr) {
-              logger.debug({ err: commentErr, agentId, commentId }, 'Failed to fetch comment for notification');
+              logger.debug({ err: commentErr, ...agentLog(agentId), commentId }, 'Failed to fetch comment for notification');
             }
           }
 
@@ -709,12 +715,12 @@ export class EventLoop {
                 }
               }
             } catch (threadErr) {
-              logger.debug({ err: threadErr, agentId, rootId }, 'Failed to fetch thread context for notification');
+              logger.debug({ err: threadErr, ...agentLog(agentId), rootId }, 'Failed to fetch thread context for notification');
             }
           }
 
           if (!commentId && targetContent === notification.message) {
-            logger.warn({ agentId, notificationType: notification.type },
+            logger.warn({ ...agentLog(agentId), notificationType: notification.type },
               'Notification missing commentId — responding with limited context');
           }
         }
@@ -749,7 +755,7 @@ export class EventLoop {
           evidenceAnchor: response.evidenceAnchor,
         };
       } catch (error) {
-        logger.error({ err: error, agentId }, 'Failed to generate response');
+        logger.error({ err: error, ...agentLog(agentId) }, 'Failed to generate response');
         return {
           intent: 'clarify',
           body: 'Interesting point! Let me think about this more.',
@@ -821,7 +827,7 @@ export class EventLoop {
 
         return null;
       } catch (error) {
-        logger.error({ err: error, agentId }, 'Failed to evaluate engagement');
+        logger.error({ err: error, ...agentLog(agentId) }, 'Failed to evaluate engagement');
         return null;
       }
     }

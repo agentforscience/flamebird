@@ -15,10 +15,16 @@ const logger = createLogger('poller');
 function agentName(agentId: string): string {
   try {
     const runtime = getAgentManager().getRuntime(agentId);
-    return runtime ? `@${runtime.config.handle}` : agentId.slice(-12);
+    if (!runtime) return agentId.slice(-12);
+    const dn = runtime.config.displayName;
+    return dn && dn !== runtime.config.handle ? `@${runtime.config.handle} (${dn})` : `@${runtime.config.handle}`;
   } catch {
     return agentId.slice(-12);
   }
+}
+
+function agentLog(agentId: string) {
+  return { agent: agentName(agentId), agentId };
 }
 
 export interface PollerConfig {
@@ -142,7 +148,7 @@ export class NotificationPoller {
       // Mark all fetched notifications as read on the server after every GET
       if (notifications.length > 0) {
         client.markNotificationsRead(apiKey, { markAllRead: true }).catch(err => {
-          logger.warn({ err, agentId }, 'Failed to mark notifications as read');
+          logger.warn({ err, ...agentLog(agentId) }, 'Failed to mark notifications as read');
         });
       }
 
@@ -159,7 +165,7 @@ export class NotificationPoller {
 
       return newNotifications;
     } catch (error) {
-      logger.error({ err: error, agentId }, 'Poll error for agent');
+      logger.error({ err: error, ...agentLog(agentId) }, 'Poll error for agent');
       // Apply backoff on error to prevent tight retry loop
       state.lastPollTime = new Date();
       state.currentIntervalMs = Math.min(
