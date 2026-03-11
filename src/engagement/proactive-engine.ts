@@ -25,7 +25,13 @@ const logger = createLogger('proactive');
 /** Resolve agent ID to @handle for readable logs. Falls back to last 8 chars of ID. */
 function agentName(agentId: string): string {
   const runtime = getAgentManager().getRuntime(agentId);
-  return runtime ? `@${runtime.config.handle}` : agentId.slice(-12);
+  if (!runtime) return agentId.slice(-12);
+  const dn = runtime.config.displayName;
+  return dn && dn !== runtime.config.handle ? `@${runtime.config.handle} (${dn})` : `@${runtime.config.handle}`;
+}
+
+function agentLog(agentId: string) {
+  return { agent: agentName(agentId), agentId };
 }
 
 export const DEFAULT_PROACTIVE_CONFIG: ProactiveConfig = {
@@ -445,7 +451,7 @@ export class ProactiveEngine {
         await this.maybeCreateSciencesubProactive(agentId, agent.config.persona, apiKey);
       }
     } catch (error) {
-      logger.error({ err: error, agentId }, 'Discovery failed');
+      logger.error({ err: error, ...agentLog(agentId) }, 'Discovery failed');
     }
   }
 
@@ -481,13 +487,13 @@ export class ProactiveEngine {
     try {
       const result = await client.getSciencesubs(apiKey);
       if (!result.success || !result.data) {
-        logger.warn({ agentId, error: result.error }, 'ensureMinimumSciencesubs: getSciencesubs failed');
+        logger.warn({ ...agentLog(agentId), error: result.error }, 'ensureMinimumSciencesubs: getSciencesubs failed');
         return;
       }
 
       const subs = Array.isArray(result.data) ? result.data : [];
       if (subs.length === 0) {
-        logger.warn({ agentId }, 'ensureMinimumSciencesubs: no sciencesubs available');
+        logger.warn({ ...agentLog(agentId) }, 'ensureMinimumSciencesubs: no sciencesubs available');
         return;
       }
 
@@ -513,7 +519,7 @@ export class ProactiveEngine {
             confirmed++;
           }
         } catch (error) {
-          logger.debug({ err: error, agentId, slug: sub.slug }, 'ensureMinimumSciencesubs: join failed');
+          logger.debug({ err: error, ...agentLog(agentId), slug: sub.slug }, 'ensureMinimumSciencesubs: join failed');
         }
       }
 
@@ -522,7 +528,7 @@ export class ProactiveEngine {
         `ensureMinimumSciencesubs: ${confirmed} sciencesub memberships confirmed via API`
       );
     } catch (error) {
-      logger.warn({ err: error, agentId }, 'ensureMinimumSciencesubs failed');
+      logger.warn({ err: error, ...agentLog(agentId) }, 'ensureMinimumSciencesubs failed');
     }
   }
 
@@ -583,10 +589,10 @@ export class ProactiveEngine {
       try {
         sciencesubs = await client.getCachedSciencesubs(apiKey);
       } catch {
-        logger.debug({ agentId }, 'Failed to fetch sciencesubs for paper generation');
+        logger.debug({ ...agentLog(agentId) }, 'Failed to fetch sciencesubs for paper generation');
       }
 
-      logger.info({ agentId, topics }, 'Generating research paper');
+      logger.info({ ...agentLog(agentId), topics }, 'Generating research paper');
 
       const paper = await llm.generatePaper(persona, {
         topics,
@@ -611,7 +617,7 @@ export class ProactiveEngine {
 
         // Ensure first tag is a valid sciencesub slug
         paper.tags = ensureFirstTagIsSciencesub(paper.tags, sciencesubs);
-        logger.debug({ agentId, tags: paper.tags }, 'Enriched paper tags with sciencesub categories');
+        logger.debug({ ...agentLog(agentId), tags: paper.tags }, 'Enriched paper tags with sciencesub categories');
       }
 
       // Queue the paper creation
@@ -624,10 +630,10 @@ export class ProactiveEngine {
         'high' // Papers are high priority
       );
 
-      logger.info({ agentId, title: paper.title, tags: paper.tags }, 'Queued paper for creation');
+      logger.info({ ...agentLog(agentId), title: paper.title, tags: paper.tags }, 'Queued paper for creation');
       rateLimiter.tryConsume(agentId, 'paper');
     } catch (error) {
-      logger.error({ err: error, agentId }, 'Error generating paper');
+      logger.error({ err: error, ...agentLog(agentId) }, 'Error generating paper');
     }
   }
 
@@ -977,10 +983,10 @@ export class ProactiveEngine {
             const fbData = fallbackResult.data;
             comments = Array.isArray(fbData) ? fbData : (fbData as { comments?: ReplyableComment[] }).comments ?? [];
           } else {
-            logger.info({ agentId, rootId, rootType, error: fallbackResult.error }, 'Both thread and comments fetch failed');
+            logger.info({ ...agentLog(agentId), rootId, rootType, error: fallbackResult.error }, 'Both thread and comments fetch failed');
             continue;
           }
-          logger.info({ agentId, rootId: rootId.slice(-8), rootType, comments: comments.length }, 'Thread fetch failed, used comments fallback');
+          logger.info({ ...agentLog(agentId), rootId: rootId.slice(-8), rootType, comments: comments.length }, 'Thread fetch failed, used comments fallback');
         }
 
         logger.info({
@@ -1032,7 +1038,7 @@ export class ProactiveEngine {
           });
         }
       } catch (err) {
-        logger.info({ err, agentId, rootId }, 'Thread scan error');
+        logger.info({ err, ...agentLog(agentId), rootId }, 'Thread scan error');
       }
     }
 
@@ -1150,7 +1156,7 @@ export class ProactiveEngine {
             logger.info(`${agentName(agentId)} joined sciencesub ${candidate.slug} (relevance: ${(candidate.relevance * 100).toFixed(0)}%)`);
           }
         } catch (error) {
-          logger.error({ err: error, agentId, sciencesub: candidate.slug }, 'Failed to join sciencesub');
+          logger.error({ err: error, ...agentLog(agentId), sciencesub: candidate.slug }, 'Failed to join sciencesub');
         }
       }
     }
@@ -1205,7 +1211,7 @@ export class ProactiveEngine {
               target = snapshot.papers[Math.floor(Math.random() * snapshot.papers.length)];
             }
             if (target && rateLimiter.canPerform(agentId, 'comment')) {
-              logger.info({ agentId, action, attempt }, `${agentName(agentId)} → comment_paper "${target.title}"`);
+              logger.info({ ...agentLog(agentId), action, attempt }, `${agentName(agentId)} → comment_paper "${target.title}"`);
               await this.queueCommentOnPaper(agentId, target, persona);
               return;
             }
@@ -1218,7 +1224,7 @@ export class ProactiveEngine {
               target = snapshot.takes[Math.floor(Math.random() * snapshot.takes.length)];
             }
             if (target && rateLimiter.canPerform(agentId, 'comment')) {
-              logger.info({ agentId, action, attempt }, `${agentName(agentId)} → comment_take "${target.title || target.hotTake?.slice(0, 60)}"`);
+              logger.info({ ...agentLog(agentId), action, attempt }, `${agentName(agentId)} → comment_take "${target.title || target.hotTake?.slice(0, 60)}"`);
               await this.queueCommentOnTake(agentId, target, persona);
               return;
             }
@@ -1231,7 +1237,7 @@ export class ProactiveEngine {
               reviewTarget = snapshot.reviews[Math.floor(Math.random() * snapshot.reviews.length)];
             }
             if (reviewTarget && rateLimiter.canPerform(agentId, 'comment')) {
-              logger.info({ agentId, action, attempt }, `${agentName(agentId)} → comment_review by ${agentName(reviewTarget.reviewerAgentId || '')} (${reviewTarget.id})`);
+              logger.info({ ...agentLog(agentId), action, attempt }, `${agentName(agentId)} → comment_review by ${agentName(reviewTarget.reviewerAgentId || '')} (${reviewTarget.id})`);
               await this.queueCommentOnReview(agentId, reviewTarget, persona);
               return;
             }
@@ -1240,7 +1246,7 @@ export class ProactiveEngine {
 
           case 'reply': {
             if (snapshot.replyOpportunities.length > 0 && rateLimiter.canPerform(agentId, 'comment')) {
-              logger.info({ agentId, action, attempt }, `${agentName(agentId)} → reply (${snapshot.replyOpportunities.length} opportunities)`);
+              logger.info({ ...agentLog(agentId), action, attempt }, `${agentName(agentId)} → reply (${snapshot.replyOpportunities.length} opportunities)`);
               const success = await this.tryReply(agentId, persona, apiKey, snapshot);
               if (success) return;
             }
@@ -1250,14 +1256,14 @@ export class ProactiveEngine {
           case 'take_on_paper': {
             if (!this.config.enableTakeCreation) break;
             if (db.hasPendingAction(agentId, 'take')) {
-              logger.debug({ agentId }, 'Skipping take_on_paper: already has pending take in queue');
+              logger.debug({ ...agentLog(agentId) }, 'Skipping take_on_paper: already has pending take in queue');
               break;
             }
             const eligibleForTake = snapshot.papers.filter(p => !db.hasEngaged(agentId, p.id, 'take'));
             if (eligibleForTake.length > 0 && rateLimiter.canPerform(agentId, 'take')) {
               const idx = Math.floor(Math.random() * Math.min(eligibleForTake.length, 5));
               const selectedPaper = eligibleForTake[idx];
-              logger.info({ agentId, action, attempt }, `${agentName(agentId)} → take_on_paper "${selectedPaper.title}"`);
+              logger.info({ ...agentLog(agentId), action, attempt }, `${agentName(agentId)} → take_on_paper "${selectedPaper.title}"`);
               const existingTakesOnPaper = snapshot.takes
                 .filter((t: Agent4ScienceTake) => t.paperId === selectedPaper.id && (t.title || t.hotTake))
                 .map((t: Agent4ScienceTake) => `- "${t.title}" (${t.stance || 'neutral'}): ${t.hotTake || ''}`.slice(0, 200));
@@ -1269,14 +1275,14 @@ export class ProactiveEngine {
 
           case 'review': {
             if (db.hasPendingAction(agentId, 'review')) {
-              logger.debug({ agentId }, 'Skipping review: already has pending review in queue');
+              logger.debug({ ...agentLog(agentId) }, 'Skipping review: already has pending review in queue');
               break;
             }
             const eligibleForReview = snapshot.papers.filter(p => !db.hasEngaged(agentId, p.id, 'review'));
             if (eligibleForReview.length > 0 && rateLimiter.canPerform(agentId, 'review')) {
               const idx = Math.floor(Math.random() * Math.min(eligibleForReview.length, 5));
               const reviewPaper = eligibleForReview[idx];
-              logger.info({ agentId, action, attempt }, `${agentName(agentId)} → review "${reviewPaper.title}"`);
+              logger.info({ ...agentLog(agentId), action, attempt }, `${agentName(agentId)} → review "${reviewPaper.title}"`);
               await this.queueReviewOnPaper(agentId, reviewPaper, persona);
               return;
             }
@@ -1286,11 +1292,11 @@ export class ProactiveEngine {
           case 'standalone_take': {
             if (!this.config.enableTakeCreation) break;
             if (db.hasPendingAction(agentId, 'take')) {
-              logger.debug({ agentId }, 'Skipping standalone_take: already has pending take in queue');
+              logger.debug({ ...agentLog(agentId) }, 'Skipping standalone_take: already has pending take in queue');
               break;
             }
             if (rateLimiter.canPerform(agentId, 'take')) {
-              logger.info({ agentId, action, attempt }, `${agentName(agentId)} → standalone_take`);
+              logger.info({ ...agentLog(agentId), action, attempt }, `${agentName(agentId)} → standalone_take`);
               await this.queueStandaloneTake(agentId, persona, apiKey, snapshot);
               return;
             }
@@ -1298,14 +1304,14 @@ export class ProactiveEngine {
           }
         }
       } catch (error) {
-        logger.error({ err: error, agentId, action }, 'Failed to execute decided action');
+        logger.error({ err: error, ...agentLog(agentId), action }, 'Failed to execute decided action');
       }
 
       // Action failed or had no valid target — retry with a different roll
-      logger.debug({ agentId, action }, 'No valid target for action, re-rolling');
+      logger.debug({ ...agentLog(agentId), action }, 'No valid target for action, re-rolling');
     }
 
-    logger.debug({ agentId }, 'No viable creative action found after 5 attempts');
+    logger.debug({ ...agentLog(agentId) }, 'No viable creative action found after 5 attempts');
   }
 
   /**
@@ -1434,7 +1440,7 @@ export class ProactiveEngine {
       try {
         sciencesubs = await client.getCachedSciencesubs(apiKey);
       } catch {
-        logger.debug({ agentId }, 'Failed to fetch sciencesubs for standalone take');
+        logger.debug({ ...agentLog(agentId) }, 'Failed to fetch sciencesubs for standalone take');
       }
 
       const take = await llm.generateStandaloneTake(persona, {
@@ -1461,16 +1467,16 @@ export class ProactiveEngine {
       take.tags = ensureFirstTagIsSciencesub(take.tags, sciencesubs, topTags);
 
       if (take.tags.length === 0) {
-        logger.warn({ agentId }, 'Standalone take has no valid tags after enrichment, skipping');
+        logger.warn({ ...agentLog(agentId) }, 'Standalone take has no valid tags after enrichment, skipping');
         return;
       }
 
       // Queue with synthetic targetId (standalone takes use 'take' targetType)
       const targetId = `standalone_${Date.now().toString(36)}`;
       executor.queueAction(agentId, 'take', targetId, 'take', take as unknown as Record<string, unknown>, 'normal');
-      logger.info({ agentId, tags: take.tags }, 'Queued standalone take');
+      logger.info({ ...agentLog(agentId), tags: take.tags }, 'Queued standalone take');
     } catch (error) {
-      logger.error({ err: error, agentId }, 'Failed to generate standalone take');
+      logger.error({ err: error, ...agentLog(agentId) }, 'Failed to generate standalone take');
     }
   }
 
@@ -1574,7 +1580,7 @@ export class ProactiveEngine {
         repliesQueued++;
         logger.info(`${agentName(agentId)} (author) queued reply to comment ${target.id} on their ${rootType}`);
       } catch (error) {
-        logger.debug({ err: error, agentId, rootId }, 'Author reply discovery skip');
+        logger.debug({ err: error, ...agentLog(agentId), rootId }, 'Author reply discovery skip');
       }
     }
   }
@@ -1773,7 +1779,7 @@ export class ProactiveEngine {
         try {
           sciencesubs = await client.getCachedSciencesubs(apiKey);
         } catch {
-          logger.debug({ agentId }, 'Failed to fetch sciencesubs for take tags');
+          logger.debug({ ...agentLog(agentId) }, 'Failed to fetch sciencesubs for take tags');
         }
       }
 
@@ -1801,15 +1807,15 @@ export class ProactiveEngine {
       take.tags = ensureFirstTagIsSciencesub(take.tags, sciencesubs, paper.tags);
 
       if (take.tags.length === 0) {
-        logger.warn({ agentId, paperId: paper.id }, 'Take has no valid tags after enrichment, skipping');
+        logger.warn({ ...agentLog(agentId), paperId: paper.id }, 'Take has no valid tags after enrichment, skipping');
         return;
       }
 
       executor.queueAction(agentId, 'take', paper.id, 'paper', take as unknown as Record<string, unknown>, 'normal');
       db.recordEngagement(agentId, paper.id, 'paper', 'take');
-      logger.info({ agentId, paperId: paper.id, tags: take.tags }, 'Queued take on paper');
+      logger.info({ ...agentLog(agentId), paperId: paper.id, tags: take.tags }, 'Queued take on paper');
     } catch (error) {
-      logger.error({ err: error, agentId, paperId: paper.id }, 'Failed to generate take');
+      logger.error({ err: error, ...agentLog(agentId), paperId: paper.id }, 'Failed to generate take');
     }
   }
 
@@ -1829,25 +1835,25 @@ export class ProactiveEngine {
     const apiKey = agentManager.getApiKey(agentId);
 
     if (!apiKey) {
-      logger.warn({ agentId, paperId: paper.id }, 'Skipping review: no API key for agent');
+      logger.warn({ ...agentLog(agentId), paperId: paper.id }, 'Skipping review: no API key for agent');
       return;
     }
 
     try {
       // Anti-collusion: skip reviews on own papers or papers from followed agents
       if (paper.agentId === agentId) {
-        logger.debug({ agentId, paperId: paper.id }, 'Skipping review: cannot review own paper');
+        logger.debug({ ...agentLog(agentId), paperId: paper.id }, 'Skipping review: cannot review own paper');
         return;
       }
       if (paper.agentId && db.hasEngaged(agentId, paper.agentId, 'follow')) {
-        logger.debug({ agentId, paperId: paper.id, authorId: paper.agentId }, 'Skipping review: following paper author');
+        logger.debug({ ...agentLog(agentId), paperId: paper.id, authorId: paper.agentId }, 'Skipping review: following paper author');
         return;
       }
 
       // Verify paper still exists before generating a review
       const paperResult = await client.getPaper(paper.id, apiKey);
       if (!paperResult.success || !paperResult.data) {
-        logger.warn({ agentId, paperId: paper.id }, 'Skipping review: paper not found in database');
+        logger.warn({ ...agentLog(agentId), paperId: paper.id }, 'Skipping review: paper not found in database');
         return;
       }
 
@@ -1870,7 +1876,7 @@ export class ProactiveEngine {
       db.recordEngagement(agentId, paper.id, 'paper', 'review');
       logger.info(`${agentName(agentId)} queued review on paper "${paper.title}"`);
     } catch (error) {
-      logger.error({ err: error, agentId, paperId: paper.id }, 'Failed to generate review');
+      logger.error({ err: error, ...agentLog(agentId), paperId: paper.id }, 'Failed to generate review');
     }
   }
 
@@ -2015,7 +2021,7 @@ export class ProactiveEngine {
       db.recordEngagement(agentId, paper.id, 'paper', 'comment');
       logger.info(`${agentName(agentId)} queued comment on paper "${paper.title}"`);
     } catch (error) {
-      logger.error({ err: error, agentId, paperId: paper.id }, 'Failed to generate comment');
+      logger.error({ err: error, ...agentLog(agentId), paperId: paper.id }, 'Failed to generate comment');
     }
   }
 
@@ -2042,7 +2048,7 @@ export class ProactiveEngine {
       db.recordEngagement(agentId, take.id, 'take', 'comment');
       logger.info(`${agentName(agentId)} queued comment on take "${take.title || take.hotTake?.slice(0, 60)}"`);
     } catch (error) {
-      logger.error({ err: error, agentId, takeId: take.id }, 'Failed to generate comment');
+      logger.error({ err: error, ...agentLog(agentId), takeId: take.id }, 'Failed to generate comment');
     }
   }
 
@@ -2076,7 +2082,7 @@ export class ProactiveEngine {
       db.recordEngagement(agentId, review.id, 'review', 'comment');
       logger.info(`${agentName(agentId)} queued comment on review by ${agentName(review.reviewerAgentId || '')}`);
     } catch (error) {
-      logger.error({ err: error, agentId, reviewId: review.id }, 'Failed to generate comment on review');
+      logger.error({ err: error, ...agentLog(agentId), reviewId: review.id }, 'Failed to generate comment on review');
     }
   }
 

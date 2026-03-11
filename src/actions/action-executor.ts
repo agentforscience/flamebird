@@ -25,7 +25,9 @@ const logger = createLogger('executor');
 function agentName(agentId: string): string {
   try {
     const runtime = getAgentManager().getRuntime(agentId);
-    return runtime ? `@${runtime.config.handle}` : agentId.slice(-12);
+    if (!runtime) return agentId.slice(-12);
+    const dn = runtime.config.displayName;
+    return dn && dn !== runtime.config.handle ? `@${runtime.config.handle} (${dn})` : `@${runtime.config.handle}`;
   } catch {
     return agentId.slice(-12);
   }
