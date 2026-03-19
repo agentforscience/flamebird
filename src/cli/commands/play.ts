@@ -643,10 +643,11 @@ export async function playCommand(): Promise<void> {
     );
   }
 
-  // Community engine and setup - always available
+  // Challenges, community engine, and setup - always available
   const hasPaperAgents = agents.some(a => a.capability === 'neurico');
   choices.push(
     new inquirer.Separator() as unknown as { name: string; value: string },
+    { name: `${chalk.yellow('🏆')} ${chalk.bold('Challenges')} ${chalk.gray('- Browse open math challenges')}`, value: 'challenges' },
     { name: `${chalk.magenta('🌐')} ${chalk.bold('Community Engine')} ${chalk.gray('- Cross-agent interactions, learning, daemon')}`, value: 'community' },
   );
   if (hasPaperAgents) {
@@ -699,6 +700,9 @@ export async function playCommand(): Promise<void> {
     case 'manage':
       await manageAgents(agents, source);
       break;
+    case 'challenges':
+      await browseChallengesMenu();
+      break;
     case 'community':
       await communityCommand();
       break;
@@ -719,6 +723,77 @@ export async function playCommand(): Promise<void> {
       console.log(chalk.cyan('\n    Thanks for playing! Your agents await... 👋\n'));
       process.exit(0);
   }
+}
+
+// =====================================================
+// BROWSE CHALLENGES MENU
+// =====================================================
+
+async function browseChallengesMenu(): Promise<void> {
+  console.clear();
+  console.log(chalk.bold.yellow(`
+    ╔════════════════════════════════════════════════════════════════╗
+    ║                  🏆 OPEN CHALLENGES                            ║
+    ╚════════════════════════════════════════════════════════════════╝
+  `));
+
+  try {
+    const config = loadConfig();
+    createAgent4ScienceClient({ baseUrl: config.api.apiUrl });
+    const client = getAgent4ScienceClient();
+
+    // Use first available agent's key to fetch challenges
+    const { getAgentManager } = await import('../../agents/agent-manager.js');
+    const manager = getAgentManager();
+    const agentIds = manager.getAgentIds();
+    let apiKey = '';
+    for (const id of agentIds) {
+      const key = manager.getApiKey(id);
+      if (key) { apiKey = key; break; }
+    }
+
+    if (!apiKey) {
+      console.log(chalk.red('    No agent API keys available'));
+      await inquirer.prompt([{ type: 'input', name: 'ok', message: 'Press Enter to go back...' }]);
+      await playCommand();
+      return;
+    }
+
+    const result = await client.getChallenges(apiKey, { status: 'open', limit: 20 });
+    if (!result.success || !result.data?.length) {
+      console.log(chalk.yellow('    No open challenges found\n'));
+      await inquirer.prompt([{ type: 'input', name: 'ok', message: 'Press Enter to go back...' }]);
+      await playCommand();
+      return;
+    }
+
+    const challenges = result.data;
+
+    for (const ch of challenges) {
+      const daysLeft = Math.max(0, Math.floor((new Date(ch.closesAt).getTime() - Date.now()) / 86400000));
+      const preview = ch.description
+        .replace(/\*\*Source:\*\*[^\n]*/g, '')
+        .replace(/\*\*(.*?)\*\*/g, '$1')
+        .replace(/\$\$[^$]*\$\$/g, '[equation]')
+        .replace(/\$[^$]+\$/g, '[math]')
+        .replace(/\n+/g, ' ')
+        .trim()
+        .slice(0, 100);
+      console.log(chalk.bold(`    🏆 ${ch.title}`));
+      console.log(chalk.gray(`       ${ch.submissionCount} solutions · ${daysLeft}d left · ${ch.tags.slice(0, 3).join(', ')}`));
+      console.log(chalk.gray(`       ${preview}...`));
+      console.log('');
+    }
+
+    console.log(chalk.gray(`    ${challenges.length} open challenge(s)\n`));
+    console.log(chalk.gray('    To attempt a challenge, use Interactive Mode → Attempt a challenge\n'));
+
+  } catch (error) {
+    console.log(chalk.red(`    Error: ${error instanceof Error ? error.message : error}`));
+  }
+
+  await inquirer.prompt([{ type: 'input', name: 'ok', message: 'Press Enter to go back...' }]);
+  await playCommand();
 }
 
 // =====================================================

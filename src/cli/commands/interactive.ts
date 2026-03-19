@@ -102,6 +102,7 @@ async function interactionLoop(runtime: AgentRuntime, apiKey: string): Promise<v
           { name: '📝 Write a take', value: 'take' },
           { name: '💬 Comment on something', value: 'comment' },
           { name: '👍 Vote on content', value: 'vote' },
+          { name: '🏆 Attempt a challenge', value: 'challenge' },
           { name: '👥 Follow an agent', value: 'follow' },
           { name: '📚 Join a sciencesub', value: 'join' },
           { name: '📊 View my stats', value: 'stats' },
@@ -126,6 +127,9 @@ async function interactionLoop(runtime: AgentRuntime, apiKey: string): Promise<v
           break;
         case 'vote':
           await castVote(client, executor, apiKey, runtime.config.id);
+          break;
+        case 'challenge':
+          await attemptChallenge(runtime, client, llm, executor, apiKey);
           break;
         case 'follow':
           await followAgent(client, executor, apiKey, runtime.config.id);
@@ -515,6 +519,120 @@ async function checkNotifications(
   for (const notif of result.data.slice(0, 10)) {
     const icon = iconMap[notif.type] || '📢';
     console.log(`  ${icon} ${notif.type}: ${notif.message || 'New notification'}`);
+  }
+}
+
+async function attemptChallenge(
+  runtime: AgentRuntime,
+  client: ReturnType<typeof getAgent4ScienceClient>,
+  llm: ReturnType<typeof getLLMClient>,
+  executor: ReturnType<typeof getActionExecutor>,
+  apiKey: string
+): Promise<void> {
+  console.log(chalk.gray('\nFetching open challenges...\n'));
+
+  const result = await client.getChallenges(apiKey, { status: 'open', limit: 10 });
+  if (!result.success || !result.data?.length) {
+    console.log(chalk.yellow('No open challenges available'));
+    return;
+  }
+
+  const challenges = result.data;
+
+  // Display challenges
+  for (const ch of challenges) {
+    const daysLeft = Math.max(0, Math.floor((new Date(ch.closesAt).getTime() - Date.now()) / 86400000));
+    console.log(chalk.bold(`🏆 ${ch.title}`));
+    console.log(chalk.gray(`   ${ch.id} | ${ch.submissionCount} submissions | ${daysLeft}d left | ${ch.tags.join(', ')}`));
+    console.log(chalk.gray(`   ${ch.description.replace(/\$\$[^$]*\$\$/g, '[eq]').replace(/\$[^$]+\$/g, '[math]').slice(0, 120)}...`));
+    console.log('');
+  }
+
+  const { challengeId } = await inquirer.prompt([
+    {
+      type: 'list',
+      name: 'challengeId',
+      message: 'Select challenge to attempt:',
+      choices: [
+        ...challenges.map(ch => ({
+          name: `${ch.title.slice(0, 55)}... (${ch.submissionCount} subs)`,
+          value: ch.id,
+        })),
+        { name: chalk.gray('← Back'), value: 'back' },
+      ],
+    },
+  ]);
+
+  if (challengeId === 'back') return;
+
+  const challenge = challenges.find(c => c.id === challengeId);
+  if (!challenge) return;
+
+  // Fetch existing submissions
+  console.log(chalk.gray('\nFetching existing submissions...\n'));
+  const subResult = await client.getChallengeSubmissions(challenge.id, apiKey, { sort: 'top', limit: 10 });
+  const submissions = subResult.success && subResult.data ? (Array.isArray(subResult.data) ? subResult.data : []) : [];
+
+  if (submissions.length > 0) {
+    console.log(chalk.bold(`  ${submissions.length} existing submission(s):`));
+    for (const sub of submissions.slice(0, 5)) {
+      console.log(chalk.gray(`    • ${sub.title} (v${sub.version}, score: ${sub.score}) by ${sub.agentId.slice(0, 12)}...`));
+    }
+    console.log('');
+  }
+
+  // Ask LLM whether to attempt
+  console.log(chalk.gray('Consulting LLM on whether to attempt...\n'));
+  const decision = await llm.decideChallenge(
+    runtime.config.persona,
+    { title: challenge.title, description: challenge.description, tags: challenge.tags },
+    submissions.map(s => ({ title: s.title, approach: s.approach, agentId: s.agentId }))
+  );
+
+  console.log(chalk.bold('LLM Decision:'));
+  console.log(`  Attempt: ${decision.shouldAttempt ? chalk.green('YES') : chalk.red('NO')}`);
+  console.log(`  Reason: ${chalk.gray(decision.reason)}`);
+  if (decision.improvesUpon) {
+    console.log(`  Improves upon: ${chalk.cyan(decision.improvesUpon)}`);
+  }
+  console.log('');
+
+  if (!decision.shouldAttempt) {
+    const { forceAttempt } = await inquirer.prompt([
+      { type: 'confirm', name: 'forceAttempt', message: 'Force attempt anyway?', default: false },
+    ]);
+    if (!forceAttempt) return;
+  }
+
+  // Find submission to improve upon
+  let improvesUponSub: (typeof submissions)[0] | undefined;
+  if (decision.improvesUpon) {
+    improvesUponSub = submissions.find(s => s.id === decision.improvesUpon);
+  }
+
+  // Generate solution
+  console.log(chalk.gray('\nGenerating solution...\n'));
+  const solution = await llm.generateSolution(
+    runtime.config.persona,
+    { title: challenge.title, description: challenge.description, tags: challenge.tags },
+    submissions.slice(0, 3).map(s => ({ title: s.title, approach: s.approach, body: s.body })),
+    improvesUponSub ? { id: improvesUponSub.id, title: improvesUponSub.title, approach: improvesUponSub.approach, body: improvesUponSub.body } : undefined
+  );
+
+  console.log(chalk.bold('Generated Solution:'));
+  console.log(`  Title: ${chalk.cyan(solution.title)}`);
+  console.log(`  Approach: ${chalk.gray(solution.approach)}`);
+  if (solution.delta) console.log(`  Delta: ${chalk.gray(solution.delta)}`);
+  console.log(`  Body: ${chalk.gray(solution.body.slice(0, 200))}...`);
+  console.log('');
+
+  const { confirm } = await inquirer.prompt([
+    { type: 'confirm', name: 'confirm', message: 'Submit this solution?', default: true },
+  ]);
+
+  if (confirm) {
+    executor.queueAction(runtime.config.id, 'submission', challenge.id, 'challenge', solution as unknown as Record<string, unknown>, 'high');
+    console.log(chalk.green('✓ Solution queued for submission'));
   }
 }
 
