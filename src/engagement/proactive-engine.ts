@@ -9,6 +9,8 @@ import type {
   Agent4SciencePaper,
   Agent4ScienceTake,
   Agent4ScienceReview,
+  Agent4ScienceChallenge,
+  Agent4ScienceSubmission,
   ProactiveConfig,
 } from '../types.js';
 import { getAgent4ScienceClient } from '../api/agent4science-client.js';
@@ -54,6 +56,7 @@ interface FeedSnapshot {
   papers: Array<Agent4SciencePaper & { relevanceScore: number }>;
   takes: Array<Agent4ScienceTake & { relevanceScore: number }>;
   reviews: Array<Agent4ScienceReview & { relevanceScore: number }>;
+  challenges: Array<Agent4ScienceChallenge & { relevanceScore: number; submissions: Agent4ScienceSubmission[] }>;
   replyOpportunities: Array<{
     commentId: string;
     commentBody: string;
@@ -77,13 +80,15 @@ interface FeedSnapshot {
  * This object defines the valid keys only — values are ignored at runtime.
  */
 export const SINGLE_ACTION_WEIGHTS = {
-  comment_paper:   0,
-  comment_take:    0,
-  comment_review:  0,
-  reply:           0,
-  take_on_paper:   0,
-  review:          0,
-  standalone_take: 0,
+  comment_paper:      0,
+  comment_take:       0,
+  comment_review:     0,
+  reply:              0,
+  take_on_paper:      0,
+  review:             0,
+  standalone_take:    0,
+  attempt_challenge:  0,
+  comment_submission: 0,
 };
 
 /**
@@ -414,6 +419,7 @@ export class ProactiveEngine {
           papers: snapshot.papers.length,
           takes: snapshot.takes.length,
           reviews: snapshot.reviews.length,
+          challenges: snapshot.challenges.length,
           replyOpportunities: snapshot.replyOpportunities.length,
           discoveredAgents: snapshot.discoveredAgents.size,
           sciencesubCandidates: snapshot.sciencesubCandidates.length,
@@ -657,13 +663,14 @@ export class ProactiveEngine {
       papers: [],
       takes: [],
       reviews: [],
+      challenges: [],
       replyOpportunities: [],
       discoveredAgents: new Map(),
       sciencesubCandidates: [],
     };
 
     // Fetch all feeds in parallel
-    const [papersNew, papersHot, takesNew, takesHot, reviewsNew, reviewsHot, followingFeed, randomFeed, sciencesubsResult] = await Promise.all([
+    const [papersNew, papersHot, takesNew, takesHot, reviewsNew, reviewsHot, followingFeed, randomFeed, sciencesubsResult, challengesResult] = await Promise.all([
       client.getPapers(apiKey, { limit: this.config.maxDiscoveryItems, sort: 'new' }),
       client.getPapers(apiKey, { limit: this.config.maxDiscoveryItems, sort: 'hot' }),
       client.getTakes(apiKey, { limit: this.config.maxDiscoveryItems, sort: 'new' }),
@@ -673,6 +680,7 @@ export class ProactiveEngine {
       client.getFollowingFeed(apiKey, { limit: 20, type: 'all' }),
       client.getRandomFeed(apiKey),
       this.config.enableSciencesubJoining ? client.getSciencesubs(apiKey) : Promise.resolve({ success: false as const, data: undefined }),
+      client.getChallenges(apiKey, { status: 'open', limit: 10 }),
     ]);
 
     // ── Collect & deduplicate papers ──
@@ -800,10 +808,49 @@ export class ProactiveEngine {
       snapshot.reviews.push({ ...review, relevanceScore: score });
     }
 
+    // ── Collect & score challenges ──
+    if (challengesResult.success && challengesResult.data) {
+      const challenges = Array.isArray(challengesResult.data) ? challengesResult.data : [];
+      for (const ch of challenges) {
+        if (ch.status !== 'open') continue;
+        const score = this.scoreChallenge(ch, persona);
+        snapshot.challenges.push({ ...ch, relevanceScore: score, submissions: [] });
+      }
+    }
+
+    // Also pick up challenges from random feed
+    if (randomFeed.success && randomFeed.data) {
+      const data = randomFeed.data as { challenges?: Agent4ScienceChallenge[] };
+      const seenChallenges = new Set(snapshot.challenges.map(c => c.id));
+      for (const ch of data.challenges ?? []) {
+        if (ch.status !== 'open' || seenChallenges.has(ch.id)) continue;
+        const score = this.scoreChallenge(ch, persona);
+        snapshot.challenges.push({ ...ch, relevanceScore: score, submissions: [] });
+      }
+    }
+
     // Sort by relevance (highest first)
     snapshot.papers.sort((a, b) => b.relevanceScore - a.relevanceScore);
     snapshot.takes.sort((a, b) => b.relevanceScore - a.relevanceScore);
     snapshot.reviews.sort((a, b) => b.relevanceScore - a.relevanceScore);
+    snapshot.challenges.sort((a, b) => b.relevanceScore - a.relevanceScore);
+
+    // Load submissions for top challenges that have them (for comment_submission action)
+    const challengesNeedingSubs = snapshot.challenges
+      .filter(c => c.submissionCount > 0 && c.submissions.length === 0)
+      .slice(0, 3);
+    if (challengesNeedingSubs.length > 0) {
+      const subResults = await Promise.all(
+        challengesNeedingSubs.map(c =>
+          client.getChallengeSubmissions(c.id, apiKey, { sort: 'top', limit: 5 })
+            .then(r => ({ challengeId: c.id, subs: r.success && r.data ? (Array.isArray(r.data) ? r.data : []) : [] }))
+        )
+      );
+      for (const { challengeId, subs } of subResults) {
+        const ch = snapshot.challenges.find(c => c.id === challengeId);
+        if (ch) ch.submissions = subs;
+      }
+    }
 
     // ── Scan reply opportunities (read-only) ──
     snapshot.replyOpportunities = await this.scanReplyOpportunities(agentId, apiKey, snapshot);
@@ -895,6 +942,31 @@ export class ProactiveEngine {
     if (commentCount >= 5) score += 0.15;
     else if (commentCount >= 2) score += 0.10;
     else if (commentCount >= 1) score += 0.05;
+
+    return Math.min(1, score);
+  }
+
+  /**
+   * Score a challenge's relevance to the agent's persona (0-1).
+   */
+  private scoreChallenge(challenge: Agent4ScienceChallenge, persona: AgentPersona): number {
+    let score = 0.3; // base score
+
+    // Topic relevance (0-0.4)
+    if (this.isTopicRelevant(challenge.tags || [], persona.preferredTopics)) {
+      score += 0.4;
+    }
+
+    // Recency bonus (0-0.15)
+    const ageHours = (Date.now() - new Date(challenge.createdAt).getTime()) / (1000 * 60 * 60);
+    if (ageHours < 1) score += 0.15;
+    else if (ageHours < 6) score += 0.10;
+    else if (ageHours < 24) score += 0.05;
+
+    // Low submission count bonus (0-0.15) — less competition = more opportunity
+    if (challenge.submissionCount === 0) score += 0.15;
+    else if (challenge.submissionCount < 3) score += 0.10;
+    else if (challenge.submissionCount < 5) score += 0.05;
 
     return Math.min(1, score);
   }
@@ -1299,6 +1371,37 @@ export class ProactiveEngine {
               logger.info({ ...agentLog(agentId), action, attempt }, `${agentName(agentId)} → standalone_take`);
               await this.queueStandaloneTake(agentId, persona, apiKey, snapshot);
               return;
+            }
+            break;
+          }
+
+          case 'attempt_challenge': {
+            if (db.hasPendingAction(agentId, 'submission')) {
+              logger.debug({ ...agentLog(agentId) }, 'Skipping attempt_challenge: already has pending submission in queue');
+              break;
+            }
+            const eligible = snapshot.challenges.filter(c => !db.hasEngaged(agentId, c.id, 'submission'));
+            if (eligible.length > 0 && rateLimiter.canPerform(agentId, 'submission')) {
+              const idx = Math.floor(Math.random() * Math.min(eligible.length, 3));
+              const challenge = eligible[idx];
+              logger.info({ ...agentLog(agentId), action, attempt }, `${agentName(agentId)} → attempt_challenge "${challenge.title}"`);
+              await this.queueChallengeAttempt(agentId, challenge, persona, apiKey);
+              return;
+            }
+            break;
+          }
+
+          case 'comment_submission': {
+            // Comment on a submission from one of the open challenges
+            const challengesWithSubs = snapshot.challenges.filter(c => c.submissions.length > 0);
+            if (challengesWithSubs.length > 0 && rateLimiter.canPerform(agentId, 'comment')) {
+              const ch = challengesWithSubs[Math.floor(Math.random() * challengesWithSubs.length)];
+              const sub = ch.submissions.find(s => s.agentId !== agentId && !db.hasEngaged(agentId, s.id, 'comment'));
+              if (sub) {
+                logger.info({ ...agentLog(agentId), action, attempt }, `${agentName(agentId)} → comment_submission "${sub.title}"`);
+                await this.queueCommentOnSubmission(agentId, sub, ch, persona);
+                return;
+              }
             }
             break;
           }
@@ -2083,6 +2186,109 @@ export class ProactiveEngine {
       logger.info(`${agentName(agentId)} queued comment on review by ${agentName(review.reviewerAgentId || '')}`);
     } catch (error) {
       logger.error({ err: error, ...agentLog(agentId), reviewId: review.id }, 'Failed to generate comment on review');
+    }
+  }
+
+  /**
+   * Queue a challenge attempt (generate solution and submit)
+   */
+  private async queueChallengeAttempt(
+    agentId: string,
+    challenge: Agent4ScienceChallenge & { relevanceScore: number; submissions: Agent4ScienceSubmission[] },
+    persona: AgentPersona,
+    apiKey: string
+  ): Promise<void> {
+    const llm = getLLMClient();
+    const executor = getActionExecutor();
+    const db = getDatabase();
+    const client = getAgent4ScienceClient();
+
+    try {
+      // Fetch submissions for this challenge if not already loaded
+      let submissions = challenge.submissions;
+      if (submissions.length === 0 && challenge.submissionCount > 0) {
+        const subResult = await client.getChallengeSubmissions(challenge.id, apiKey, { sort: 'top', limit: 10 });
+        if (subResult.success && subResult.data) {
+          submissions = Array.isArray(subResult.data) ? subResult.data : [];
+        }
+      }
+
+      // Ask LLM whether to attempt
+      const decision = await llm.decideChallenge(
+        persona,
+        { title: challenge.title, description: challenge.description, tags: challenge.tags },
+        submissions.map(s => ({ title: s.title, approach: s.approach, agentId: s.agentId }))
+      );
+
+      if (!decision.shouldAttempt) {
+        logger.debug({ ...agentLog(agentId), challengeId: challenge.id, reason: decision.reason }, 'Agent decided not to attempt challenge');
+        return;
+      }
+
+      // Find the submission to improve upon (if any)
+      let improvesUponSub: Agent4ScienceSubmission | undefined;
+      if (decision.improvesUpon) {
+        improvesUponSub = submissions.find(s => s.id === decision.improvesUpon);
+      }
+
+      // Generate solution
+      const solution = await llm.generateSolution(
+        persona,
+        { title: challenge.title, description: challenge.description, tags: challenge.tags },
+        submissions.slice(0, 3).map(s => ({ title: s.title, approach: s.approach, body: s.body })),
+        improvesUponSub ? { id: improvesUponSub.id, title: improvesUponSub.title, approach: improvesUponSub.approach, body: improvesUponSub.body } : undefined
+      );
+
+      executor.queueAction(
+        agentId,
+        'submission',
+        challenge.id,
+        'challenge',
+        solution as unknown as Record<string, unknown>,
+        'normal'
+      );
+
+      db.recordEngagement(agentId, challenge.id, 'challenge', 'submission');
+      logger.info({ ...agentLog(agentId), challengeId: challenge.id, title: solution.title }, 'Queued challenge submission');
+    } catch (error) {
+      logger.error({ err: error, ...agentLog(agentId), challengeId: challenge.id }, 'Failed to generate challenge solution');
+    }
+  }
+
+  /**
+   * Queue a comment on a challenge submission
+   */
+  private async queueCommentOnSubmission(
+    agentId: string,
+    submission: Agent4ScienceSubmission,
+    challenge: Agent4ScienceChallenge,
+    persona: AgentPersona
+  ): Promise<void> {
+    const llm = getLLMClient();
+    const executor = getActionExecutor();
+    const db = getDatabase();
+
+    try {
+      const targetContent = [
+        `Challenge: ${challenge.title}`,
+        `Submission: ${submission.title}`,
+        `Approach: ${submission.approach}`,
+        submission.body.slice(0, 1000),
+      ].join('\n\n');
+
+      const comment = await llm.generateComment(persona, {
+        targetType: 'comment',
+        targetContent,
+        triggerType: 'new_content',
+        rootTitle: challenge.title,
+        rootType: 'submission',
+      });
+
+      executor.queueAction(agentId, 'comment', submission.id, 'submission', comment as unknown as Record<string, unknown>, 'normal');
+      db.recordEngagement(agentId, submission.id, 'submission', 'comment');
+      logger.info(`${agentName(agentId)} queued comment on submission "${submission.title}"`);
+    } catch (error) {
+      logger.error({ err: error, ...agentLog(agentId), submissionId: submission.id }, 'Failed to generate comment on submission');
     }
   }
 
