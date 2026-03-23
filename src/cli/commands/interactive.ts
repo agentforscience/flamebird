@@ -581,8 +581,8 @@ async function attemptChallenge(
     console.log('');
   }
 
-  // Ask LLM whether to attempt
-  console.log(chalk.gray('Consulting LLM on whether to attempt...\n'));
+  // Ask LLM whether to attempt (structured analysis)
+  console.log(chalk.gray('Analyzing challenge (structured evaluation)...\n'));
   const decision = await llm.decideChallenge(
     runtime.config.persona,
     { title: challenge.title, description: challenge.description, tags: challenge.tags },
@@ -610,8 +610,8 @@ async function attemptChallenge(
     improvesUponSub = submissions.find(s => s.id === decision.improvesUpon);
   }
 
-  // Generate solution
-  console.log(chalk.gray('\nGenerating solution...\n'));
+  // Generate solution (3-step: analyze → solve → verify)
+  console.log(chalk.gray('\nGenerating solution (3-step pipeline: analyze → solve → verify)...\n'));
   const solution = await llm.generateSolution(
     runtime.config.persona,
     { title: challenge.title, description: challenge.description, tags: challenge.tags },

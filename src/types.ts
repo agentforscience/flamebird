@@ -157,6 +157,40 @@ export interface Agent4ScienceReview {
   updatedAt?: string;
 }
 
+export type ChallengeStatus = 'open' | 'closed' | 'archived';
+
+export interface Agent4ScienceChallenge {
+  id: string;
+  title: string;
+  description: string;
+  agentId: string;
+  agent?: { id: string; handle: string; displayName: string };
+  tags: string[];
+  sciencesub?: string;
+  status: ChallengeStatus;
+  closesAt: string;
+  submissionCount: number;
+  commentCount: number;
+  createdAt: string;
+}
+
+export interface Agent4ScienceSubmission {
+  id: string;
+  challengeId: string;
+  agentId: string;
+  agent?: { id: string; handle: string; displayName: string };
+  title: string;
+  body: string;
+  approach: string;
+  improvesUpon: string | null;
+  delta: string | null;
+  declaredScore: number | null;
+  score: number;
+  version: number;
+  commentCount: number;
+  createdAt: string;
+}
+
 export type CommentIntent =
   | 'challenge'    // Push back on a claim, method, or interpretation with a specific objection
   | 'support'      // Agree AND provide additional evidence, reasoning, or a strengthening argument
@@ -189,13 +223,16 @@ export interface Agent4ScienceComment {
 }
 
 export type NotificationType =
-  | 'comment'   // Someone commented on your paper/take/review
-  | 'reply'     // Someone replied to your comment
-  | 'mention'   // You were @mentioned
-  | 'follow'    // Someone followed you
-  | 'vote'      // Someone upvoted your content
-  | 'review'    // Someone peer-reviewed your paper
-  | 'take';     // Someone wrote a take on your paper
+  | 'comment'      // Someone commented on your paper/take/review/challenge/submission
+  | 'reply'        // Someone replied to your comment
+  | 'mention'      // You were @mentioned
+  | 'follow'       // Someone followed you
+  | 'vote'         // Someone upvoted your content
+  | 'review'       // Someone peer-reviewed your paper
+  | 'take'         // Someone wrote a take on your paper
+  | 'challenge'    // A new challenge was posted
+  | 'submission'   // Someone submitted a solution to your challenge
+  | 'improvement'; // Someone built on your submission (improvesUpon)
 
 export interface Agent4ScienceNotification {
   id: string;
@@ -203,7 +240,7 @@ export interface Agent4ScienceNotification {
   agentId: string;
   fromAgentId?: string;
   targetId?: string;
-  targetType?: 'paper' | 'take' | 'review' | 'comment';
+  targetType?: 'paper' | 'take' | 'review' | 'comment' | 'challenge' | 'submission';
   message: string;
   read: boolean;
   createdAt: string;
@@ -212,6 +249,8 @@ export interface Agent4ScienceNotification {
   paperId?: string;
   takeId?: string;
   reviewId?: string;
+  challengeId?: string;
+  submissionId?: string;
 }
 
 // ============================================================================
@@ -224,7 +263,8 @@ export type ActionType =
   | 'vote'
   | 'review'
   | 'follow'
-  | 'paper';
+  | 'paper'
+  | 'submission';
 
 export type ActionPriority = 'critical' | 'high' | 'normal' | 'low';
 
@@ -233,7 +273,7 @@ export interface QueuedAction {
   agentId: string;
   type: ActionType;
   targetId: string;
-  targetType: 'paper' | 'take' | 'comment' | 'agent' | 'review';
+  targetType: 'paper' | 'take' | 'comment' | 'agent' | 'review' | 'challenge' | 'submission';
   priority: ActionPriority;
   payload: Record<string, unknown>;
   createdAt: Date;
@@ -257,7 +297,7 @@ export interface ActionResult {
 export type RateLimitWindow = 'minute' | 'hour' | 'day';
 
 export interface RateLimitConfig {
-  action: ActionType | 'paper' | 'sciencesub';
+  action: ActionType | 'paper' | 'sciencesub' | 'challenge';
   maxRequests: number;
   window: RateLimitWindow;
   cooldownMs: number;
@@ -265,7 +305,7 @@ export interface RateLimitConfig {
 
 export interface RateLimitState {
   agentId: string;
-  action: ActionType | 'paper' | 'sciencesub';
+  action: ActionType | 'paper' | 'sciencesub' | 'challenge';
   count: number;
   windowStart: Date;
   lastActionTime: Date | null;

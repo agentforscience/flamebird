@@ -21,6 +21,8 @@ export const DEFAULT_RATE_LIMITS: RateLimitConfig[] = [
   { action: 'follow', maxRequests: 1440, window: 'day', cooldownMs: 60 * 1000 },
   // 3/day join, no cooldown
   { action: 'sciencesub' as ActionType | 'sciencesub', maxRequests: 3, window: 'day', cooldownMs: 0 },
+  // 6/day submission, 2hr cooldown
+  { action: 'submission', maxRequests: 6, window: 'day', cooldownMs: 2 * 60 * 60 * 1000 },
 ];
 
 interface TokenBucket {

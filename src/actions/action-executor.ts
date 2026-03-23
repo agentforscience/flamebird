@@ -59,7 +59,7 @@ export class ActionExecutor {
     agentId: string,
     type: ActionType,
     targetId: string,
-    targetType: 'paper' | 'take' | 'comment' | 'agent' | 'review',
+    targetType: 'paper' | 'take' | 'comment' | 'agent' | 'review' | 'challenge' | 'submission',
     payload: Record<string, unknown>,
     priority: ActionPriority = 'normal'
   ): QueuedAction {
@@ -94,11 +94,11 @@ export class ActionExecutor {
   ): QueuedAction {
     // Determine action type and target from notification
     let actionType: ActionType = 'comment';
-    let targetType: 'paper' | 'take' | 'comment' | 'agent' | 'review' = 'comment';
+    let targetType: 'paper' | 'take' | 'comment' | 'agent' | 'review' | 'challenge' | 'submission' = 'comment';
     let targetId = notification.targetId;
 
     // For reply/comment/mention notifications with a commentId, thread the response
-    // as a reply to that comment. Route to the root content (paper/take/review)
+    // as a reply to that comment. Route to the root content (paper/take/review/challenge/submission)
     // because comment API endpoints live under those resources.
     if ((notification.type === 'reply' || notification.type === 'comment' || notification.type === 'mention')
         && notification.commentId) {
@@ -109,7 +109,13 @@ export class ActionExecutor {
       } as Record<string, unknown>;
 
       // Route to the root content type
-      if (notification.paperId) {
+      if (notification.submissionId) {
+        targetType = 'submission';
+        targetId = notification.submissionId;
+      } else if (notification.challengeId) {
+        targetType = 'challenge';
+        targetId = notification.challengeId;
+      } else if (notification.paperId) {
         targetType = 'paper';
         targetId = notification.paperId;
       } else if (notification.takeId) {
@@ -127,6 +133,12 @@ export class ActionExecutor {
       } else if (notification.targetType === 'review' && notification.targetId) {
         targetType = 'review';
         targetId = notification.targetId;
+      } else if (notification.targetType === 'challenge' && notification.targetId) {
+        targetType = 'challenge';
+        targetId = notification.targetId;
+      } else if (notification.targetType === 'submission' && notification.targetId) {
+        targetType = 'submission';
+        targetId = notification.targetId;
       } else {
         targetType = (notification.targetType as typeof targetType) ?? 'paper';
       }
@@ -136,6 +148,10 @@ export class ActionExecutor {
       targetType = 'take';
     } else if (notification.targetType === 'review') {
       targetType = 'review';
+    } else if (notification.targetType === 'challenge') {
+      targetType = 'challenge';
+    } else if (notification.targetType === 'submission') {
+      targetType = 'submission';
     }
 
     // Priority based on notification type
@@ -246,6 +262,9 @@ export class ActionExecutor {
         case 'paper':
           result = await this.executePaper(action, apiKey, client);
           break;
+        case 'submission':
+          result = await this.executeSubmission(action, apiKey, client);
+          break;
         default:
           result = {
             success: false,
@@ -348,6 +367,18 @@ export class ActionExecutor {
         { intent, body, evidenceAnchor, confidence, parentId },
         apiKey
       );
+    } else if (action.targetType === 'challenge') {
+      result = await client.commentOnChallenge(
+        action.targetId,
+        { intent, body, evidenceAnchor, confidence, parentId },
+        apiKey
+      );
+    } else if (action.targetType === 'submission') {
+      result = await client.commentOnSubmission(
+        action.targetId,
+        { intent, body, evidenceAnchor, confidence, parentId },
+        apiKey
+      );
     } else {
       return {
         success: false,
@@ -381,7 +412,7 @@ export class ActionExecutor {
   ): Promise<ActionResult> {
     const { direction } = action.payload as { direction: 'up' | 'down' };
 
-    if (action.targetType !== 'paper' && action.targetType !== 'take' && action.targetType !== 'review') {
+    if (action.targetType !== 'paper' && action.targetType !== 'take' && action.targetType !== 'review' && action.targetType !== 'submission') {
       return {
         success: false,
         actionId: action.id,
@@ -394,6 +425,8 @@ export class ActionExecutor {
       result = await client.votePaper(action.targetId, { direction }, apiKey);
     } else if (action.targetType === 'take') {
       result = await client.voteTake(action.targetId, { direction }, apiKey);
+    } else if (action.targetType === 'submission') {
+      result = await client.voteSubmission(action.targetId, { direction }, apiKey);
     } else {
       result = await client.voteReview(action.targetId, { direction }, apiKey);
     }
@@ -608,6 +641,43 @@ export class ActionExecutor {
     }
 
     logger.info(`Created paper: ${result.data?.id} - ${paperData.title}`);
+
+    return {
+      success: true,
+      actionId: action.id,
+      responseId: result.data?.id,
+    };
+  }
+
+  /**
+   * Execute a submission action (challenge solution)
+   */
+  private async executeSubmission(
+    action: QueuedAction,
+    apiKey: string,
+    client: ReturnType<typeof getAgent4ScienceClient>
+  ): Promise<ActionResult> {
+    const submissionData = action.payload as {
+      title: string;
+      body: string;
+      approach: string;
+      improvesUpon?: string;
+      delta?: string;
+      declaredScore?: number;
+    };
+
+    // targetId is the challengeId
+    const result = await client.createSubmission(
+      action.targetId,
+      submissionData,
+      apiKey
+    );
+
+    if (!result.success) {
+      return { success: false, actionId: action.id, error: result.error };
+    }
+
+    logger.info(`Created submission: ${result.data?.id} for challenge ${action.targetId}`);
 
     return {
       success: true,

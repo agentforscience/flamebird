@@ -53,6 +53,21 @@ export interface GeneratedTake {
   tags: string[];
 }
 
+export interface GeneratedSolution {
+  title: string;
+  body: string;
+  approach: string;
+  improvesUpon?: string;
+  delta?: string;
+  declaredScore?: number;
+}
+
+export interface ChallengeDecision {
+  shouldAttempt: boolean;
+  reason: string;
+  improvesUpon?: string;
+}
+
 export interface GeneratedPaper {
   title: string;
   abstract: string;
@@ -1088,6 +1103,328 @@ Generate your response in JSON format:
       tags: persona.preferredTopics.slice(0, 3).map(t => t.toLowerCase().replace(/\s+/g, '-')) || ['research'],
       claims: ['Presents novel methodology', 'Demonstrates empirical improvements'],
       limitations: ['Requires further validation', 'Limited to specific domains'],
+    };
+  }
+
+  /**
+   * Decide whether the agent should attempt a challenge.
+   * Performs structured analysis of the problem, existing approaches, and the
+   * agent's domain fit before making a decision.
+   */
+  async decideChallenge(
+    persona: AgentPersona,
+    challenge: {
+      title: string;
+      description: string;
+      tags: string[];
+    },
+    existingSubmissions: Array<{ title: string; approach: string; agentId: string }>
+  ): Promise<ChallengeDecision> {
+    const submissionsContext = existingSubmissions.length > 0
+      ? `\n\nExisting submissions (${existingSubmissions.length}):\n${existingSubmissions.slice(0, 5).map((s, i) =>
+          `${i + 1}. [${s.agentId}] "${s.title}" — ${s.approach}`).join('\n')}`
+      : '\n\nNo existing submissions yet — you would be the first to attempt this.';
+
+    const systemPrompt = `You are a mathematician and researcher evaluating whether to attempt a challenge.
+Your expertise: ${persona.preferredTopics.join(', ') || 'general mathematics'}.
+Your style: ${persona.voice} voice, ${persona.epistemics} epistemic approach, boldness ${persona.spiceLevel}/10.
+
+BEFORE deciding, you must analyze:
+1. PROBLEM STRUCTURE — What mathematical domain does this fall in? What are the key objects and relationships?
+2. DIFFICULTY ASSESSMENT — Is this a known open problem, a competition-style problem, or a research question? What tools are likely needed?
+3. DOMAIN FIT — How well does this match your expertise? Can you bring a novel perspective?
+4. COMPETITIVE LANDSCAPE — What approaches have been tried? Where are the gaps?
+5. STRATEGIC VALUE — Is it better to attempt fresh, build on an existing submission, or pass?
+
+Respond in JSON:
+{
+  "analysis": "Your structured analysis of the above 5 points (2-4 sentences each)",
+  "shouldAttempt": true/false,
+  "reason": "One-sentence decision rationale",
+  "improvesUpon": "submission_id or null",
+  "suggestedApproach": "Brief sketch of how you would approach it, if attempting"
+}`;
+
+    const userPrompt = `Evaluate this challenge:
+
+Title: ${challenge.title}
+Description: ${challenge.description}
+Tags: ${challenge.tags.join(', ')}${submissionsContext}`;
+
+    const response = await this.complete([
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: userPrompt },
+    ], 4096);
+
+    try {
+      const costTracker = getCostTracker();
+      costTracker.recordCall('comment', response.usage.promptTokens, response.usage.completionTokens);
+    } catch {
+      // Cost tracker not initialized
+    }
+
+    try {
+      const jsonMatch = response.content.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        const parsed = JSON.parse(jsonMatch[0]);
+        return {
+          shouldAttempt: !!parsed.shouldAttempt,
+          reason: String(parsed.reason || ''),
+          improvesUpon: parsed.improvesUpon || undefined,
+        };
+      }
+    } catch {
+      logger.warn('Failed to parse challenge decision');
+    }
+
+    return { shouldAttempt: false, reason: 'Could not determine' };
+  }
+
+  /**
+   * Generate a solution for a challenge using a multi-step pipeline:
+   *
+   *   Step 1: ANALYZE — Decompose the problem, identify key structures, plan approach
+   *   Step 2: SOLVE   — Generate the full solution with the analysis as scaffolding
+   *   Step 3: VERIFY  — Self-critique for logical gaps, then refine
+   *
+   * Inspired by EinsteinArena's approach: research first, iterate, verify locally.
+   */
+  async generateSolution(
+    persona: AgentPersona,
+    challenge: {
+      title: string;
+      description: string;
+      tags: string[];
+    },
+    topSubmissions: Array<{ title: string; approach: string; body: string }>,
+    improvesUpon?: { id: string; title: string; approach: string; body: string }
+  ): Promise<GeneratedSolution> {
+    // ── Step 1: ANALYZE — decompose the problem and plan approach ──
+
+    const existingSummary = topSubmissions.length > 0
+      ? `\n\nExisting submissions to study (do NOT duplicate these — find gaps or improvements):\n${topSubmissions.slice(0, 3).map((s, i) =>
+          `${i + 1}. "${s.title}"\n   Approach: ${s.approach}\n   Key content: ${smartTruncate(s.body, 800)}`).join('\n\n')}`
+      : '';
+
+    const improvesUponContext = improvesUpon
+      ? `\n\nYou are BUILDING ON this prior submission:
+Title: "${improvesUpon.title}"
+Approach: ${improvesUpon.approach}
+Full solution: ${smartTruncate(improvesUpon.body, 2000)}
+
+Your goal: identify specific weaknesses, gaps, or missed cases in this submission and address them.`
+      : '';
+
+    const analysisPrompt = `You are a mathematician analyzing a challenge before attempting a solution.
+
+CHALLENGE:
+Title: ${challenge.title}
+Description: ${challenge.description}
+Tags: ${challenge.tags.join(', ')}${existingSummary}${improvesUponContext}
+
+Perform a structured analysis. Think step by step:
+
+1. PROBLEM DECOMPOSITION
+   - What is being asked? State the precise mathematical question.
+   - What are the key objects, spaces, or structures involved?
+   - What are the given conditions and what must be shown/constructed/computed?
+
+2. RELEVANT TOOLS & TECHNIQUES
+   - What mathematical tools are most relevant? (e.g., spectral theory, convexity arguments, algebraic manipulations, probabilistic methods, topological invariants)
+   - Are there known results in the literature that directly apply or can be adapted?
+   - What are the main technical obstacles?
+
+3. APPROACH STRATEGY
+   - Outline 2-3 possible proof strategies or construction methods, ranked by promise.
+   - For each, note: key insight needed, main difficulty, likelihood of success.
+   - If building on a prior submission: what specifically was wrong or incomplete, and how will you fix it?
+
+4. SOLUTION SKETCH
+   - Draft the high-level structure of your chosen approach.
+   - Identify the critical lemma or step that makes everything else work.
+
+Be specific and mathematical. Reference actual theorems, techniques, and structures by name.`;
+
+    logger.info('Challenge solver: Step 1/3 — Analyzing problem structure');
+    const analysis = await this.complete([
+      { role: 'system', content: `You are a rigorous mathematician. Think deeply before solving. Your expertise: ${persona.preferredTopics.join(', ')}.` },
+      { role: 'user', content: analysisPrompt },
+    ], 4096);
+
+    // ── Step 2: SOLVE — generate the full solution using the analysis ──
+
+    const solveSystemPrompt = this.buildPersonaPrompt(persona) + `
+
+You are writing a formal solution to a mathematical challenge on Agent4Science.
+You have already analyzed the problem — use your analysis as scaffolding.
+
+QUALITY STANDARDS:
+- Every claim must be justified. No hand-waving.
+- Define notation before using it. State assumptions explicitly.
+- Structure the solution clearly: Setup → Key Lemma(s) → Main Argument → Conclusion.
+- Use LaTeX notation ($...$ for inline, $$...$$ for display) for all mathematical expressions.
+- If the problem asks for a construction, provide it explicitly. If it asks for a proof, give complete logical steps.
+- If building on prior work, clearly mark what is new vs. inherited.
+
+Respond in JSON:
+{
+  "title": "Concise title for your submission (10-200 chars)",
+  "body": "Full solution in markdown with LaTeX math. Structured with ## headings. Min 500 chars for non-trivial problems.",
+  "approach": "20-500 char summary of your method"${improvesUpon ? ',\n  "delta": "What you changed from the prior submission (max 1000 chars)"' : ''},
+  "declaredScore": null,
+  "confidence": "low/medium/high — your honest assessment of solution correctness"
+}
+
+CRITICAL: Complete every field fully. Do NOT leave sentences unfinished. The body should be a publishable-quality solution.`;
+
+    const solveUserPrompt = `Here is the challenge and your analysis. Now write the full solution.
+
+CHALLENGE:
+Title: ${challenge.title}
+Description: ${challenge.description}
+
+YOUR ANALYSIS:
+${analysis.content}
+
+Now produce the complete, rigorous solution.`;
+
+    logger.info('Challenge solver: Step 2/3 — Generating solution');
+    const draft = await this.complete([
+      { role: 'system', content: solveSystemPrompt },
+      { role: 'user', content: solveUserPrompt },
+    ], 16384);
+
+    // ── Step 3: VERIFY & REFINE — self-critique and fix issues ──
+
+    // Parse the draft first
+    let draftParsed: Record<string, unknown> | null = null;
+    try {
+      let jsonMatch = draft.content.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) {
+        const braceStart = draft.content.indexOf('{');
+        if (braceStart >= 0) {
+          const repaired = repairJSON(draft.content.slice(braceStart));
+          if (repaired) jsonMatch = [repaired];
+        }
+      }
+      if (jsonMatch) {
+        try {
+          draftParsed = JSON.parse(jsonMatch[0]);
+        } catch {
+          const repaired = repairJSON(jsonMatch[0]);
+          if (repaired) draftParsed = JSON.parse(repaired);
+        }
+      }
+    } catch {
+      // Will use fallback below
+    }
+
+    const draftBody = (draftParsed?.body as string) || draft.content;
+    const draftApproach = (draftParsed?.approach as string) || '';
+    const draftConfidence = (draftParsed?.confidence as string) || 'medium';
+
+    // Only run verification for non-trivial solutions (skip if draft is very short or low quality)
+    if (draftBody.length > 200 && draftConfidence !== 'high') {
+      logger.info('Challenge solver: Step 3/3 — Verifying and refining');
+
+      const verifyPrompt = `You are a rigorous mathematical referee. Review this solution for correctness.
+
+CHALLENGE:
+${challenge.title}
+${smartTruncate(challenge.description, 1500)}
+
+SUBMITTED SOLUTION:
+${smartTruncate(draftBody, 6000)}
+
+APPROACH: ${draftApproach}
+
+Check for:
+1. LOGICAL GAPS — Are there steps where the reasoning is incomplete or a claim is unjustified?
+2. EDGE CASES — Does the solution handle degenerate or boundary cases?
+3. NOTATION — Is everything well-defined before use?
+4. CORRECTNESS — Does the argument actually prove what was asked? Is any step wrong?
+5. COMPLETENESS — Does it fully answer the challenge, or only part of it?
+
+If you find issues, provide the CORRECTED version of the affected sections.
+If the solution is correct, say so and suggest minor improvements if any.
+
+Respond in JSON:
+{
+  "verdict": "correct" | "minor_issues" | "major_issues",
+  "issues": ["list of specific issues found"],
+  "corrections": "Corrected sections in markdown (only the parts that changed), or empty string if correct",
+  "improved_body": "The full corrected solution body if there were major issues, or empty string if mostly correct"
+}`;
+
+      const verification = await this.complete([
+        { role: 'system', content: 'You are a mathematical referee known for thoroughness. Find every logical gap.' },
+        { role: 'user', content: verifyPrompt },
+      ], 8192);
+
+      // Apply corrections if needed
+      try {
+        const verifyMatch = verification.content.match(/\{[\s\S]*\}/);
+        if (verifyMatch) {
+          let verifyParsed;
+          try {
+            verifyParsed = JSON.parse(verifyMatch[0]);
+          } catch {
+            const repaired = repairJSON(verifyMatch[0]);
+            if (repaired) verifyParsed = JSON.parse(repaired);
+          }
+
+          if (verifyParsed?.verdict === 'major_issues' && verifyParsed.improved_body) {
+            logger.info('Challenge solver: Applied major corrections from verification step');
+            if (draftParsed) {
+              draftParsed.body = verifyParsed.improved_body;
+            }
+          } else if (verifyParsed?.issues?.length > 0) {
+            logger.info({ issues: verifyParsed.issues.length }, 'Challenge solver: Verification found minor issues');
+          } else {
+            logger.info('Challenge solver: Verification passed — solution looks correct');
+          }
+        }
+      } catch {
+        logger.warn('Failed to parse verification response, using draft as-is');
+      }
+
+      try {
+        const costTracker = getCostTracker();
+        costTracker.recordCall('submission', verification.usage.promptTokens, verification.usage.completionTokens);
+      } catch {
+        // Cost tracker not initialized
+      }
+    } else {
+      logger.info('Challenge solver: Skipping verification (high confidence or short solution)');
+    }
+
+    // Track costs for analysis + solve steps
+    try {
+      const costTracker = getCostTracker();
+      costTracker.recordCall('submission', analysis.usage.promptTokens, analysis.usage.completionTokens);
+      costTracker.recordCall('submission', draft.usage.promptTokens, draft.usage.completionTokens);
+    } catch {
+      // Cost tracker not initialized
+    }
+
+    // Build final result
+    if (draftParsed) {
+      return {
+        title: smartTruncate((draftParsed.title as string) || `Solution: ${challenge.title}`, 200),
+        body: (draftParsed.body as string) || draft.content,
+        approach: smartTruncate((draftParsed.approach as string) || 'Novel approach to the problem', 500),
+        ...(improvesUpon ? { improvesUpon: improvesUpon.id } : {}),
+        ...(draftParsed.delta ? { delta: smartTruncate(String(draftParsed.delta), 1000) } : {}),
+        ...(draftParsed.declaredScore != null ? { declaredScore: Number(draftParsed.declaredScore) } : {}),
+      };
+    }
+
+    // Fallback
+    return {
+      title: `Solution: ${challenge.title}`,
+      body: draft.content,
+      approach: 'Analytical approach to the problem',
+      ...(improvesUpon ? { improvesUpon: improvesUpon.id } : {}),
     };
   }
 }

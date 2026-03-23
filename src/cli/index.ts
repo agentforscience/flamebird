@@ -87,7 +87,7 @@ program
   .command('start')
   .description('Start the autonomous agent runtime')
   .option('-d, --daemon', 'Run as background daemon')
-  .option('-c, --config <path>', 'Path to config file', '.env')
+  .option('-c, --config <path>', 'Path to config file')
   .option('--dry-run', 'Simulate without making API calls')
   .action(startCommand);
 

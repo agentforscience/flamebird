@@ -25,7 +25,7 @@ import {
   type NeuricoResult,
 } from '../../tools/paper-tools.js';
 import { config as loadEnv } from 'dotenv';
-import type { RateLimitConfig, ProactiveConfig } from '../../types.js';
+import type { RateLimitConfig, ProactiveConfig, Agent4ScienceChallenge } from '../../types.js';
 
 // =====================================================
 // SETUP WIZARD - First-time user experience
@@ -739,27 +739,12 @@ async function browseChallengesMenu(): Promise<void> {
 
   try {
     const config = loadConfig();
-    createAgent4ScienceClient({ baseUrl: config.api.apiUrl });
-    const client = getAgent4ScienceClient();
+    const apiUrl = config.api.apiUrl.replace(/\/$/, '');
 
-    // Use first available agent's key to fetch challenges
-    const { getAgentManager } = await import('../../agents/agent-manager.js');
-    const manager = getAgentManager();
-    const agentIds = manager.getAgentIds();
-    let apiKey = '';
-    for (const id of agentIds) {
-      const key = manager.getApiKey(id);
-      if (key) { apiKey = key; break; }
-    }
-
-    if (!apiKey) {
-      console.log(chalk.red('    No agent API keys available'));
-      await inquirer.prompt([{ type: 'input', name: 'ok', message: 'Press Enter to go back...' }]);
-      await playCommand();
-      return;
-    }
-
-    const result = await client.getChallenges(apiKey, { status: 'open', limit: 20 });
+    // Fetch challenges directly — public endpoint, no auth needed
+    const res = await fetch(`${apiUrl}/api/v1/challenges?status=open&limit=20`);
+    const raw = await res.json() as { challenges?: Agent4ScienceChallenge[] };
+    const result = { success: res.ok, data: raw.challenges || [] };
     if (!result.success || !result.data?.length) {
       console.log(chalk.yellow('    No open challenges found\n'));
       await inquirer.prompt([{ type: 'input', name: 'ok', message: 'Press Enter to go back...' }]);
@@ -769,31 +754,257 @@ async function browseChallengesMenu(): Promise<void> {
 
     const challenges = result.data;
 
-    for (const ch of challenges) {
-      const daysLeft = Math.max(0, Math.floor((new Date(ch.closesAt).getTime() - Date.now()) / 86400000));
-      const preview = ch.description
-        .replace(/\*\*Source:\*\*[^\n]*/g, '')
-        .replace(/\*\*(.*?)\*\*/g, '$1')
-        .replace(/\$\$[^$]*\$\$/g, '[equation]')
-        .replace(/\$[^$]+\$/g, '[math]')
-        .replace(/\n+/g, ' ')
-        .trim()
-        .slice(0, 100);
-      console.log(chalk.bold(`    🏆 ${ch.title}`));
-      console.log(chalk.gray(`       ${ch.submissionCount} solutions · ${daysLeft}d left · ${ch.tags.slice(0, 3).join(', ')}`));
-      console.log(chalk.gray(`       ${preview}...`));
-      console.log('');
+    // Let user pick a challenge or go back
+    const { selectedId } = await inquirer.prompt([{
+      type: 'list',
+      name: 'selectedId',
+      message: chalk.white('Select a challenge:'),
+      prefix: '    ',
+      choices: [
+        ...challenges.map(ch => {
+          const daysLeft = Math.max(0, Math.floor((new Date(ch.closesAt).getTime() - Date.now()) / 86400000));
+          return {
+            name: `🏆 ${ch.title.slice(0, 50)}${ch.title.length > 50 ? '...' : ''}  ${chalk.gray(`${ch.submissionCount} sols · ${daysLeft}d · ${ch.tags.slice(0, 2).join(', ')}`)}`,
+            value: ch.id,
+          };
+        }),
+        { name: chalk.gray('← Back'), value: 'back' },
+      ],
+      pageSize: 15,
+    }]);
+
+    if (selectedId === 'back') {
+      await playCommand();
+      return;
     }
 
-    console.log(chalk.gray(`    ${challenges.length} open challenge(s)\n`));
-    console.log(chalk.gray('    To attempt a challenge, use Interactive Mode → Attempt a challenge\n'));
+    // Show challenge detail
+    const challenge = challenges.find(c => c.id === selectedId)!;
+    await challengeDetailMenu(challenge, config);
 
   } catch (error) {
     console.log(chalk.red(`    Error: ${error instanceof Error ? error.message : error}`));
+    await inquirer.prompt([{ type: 'input', name: 'ok', message: 'Press Enter to go back...' }]);
+    await playCommand();
+  }
+}
+
+async function challengeDetailMenu(challenge: Agent4ScienceChallenge, config: ReturnType<typeof loadConfig>): Promise<void> {
+  console.clear();
+  const daysLeft = Math.max(0, Math.floor((new Date(challenge.closesAt).getTime() - Date.now()) / 86400000));
+
+  console.log(chalk.bold.yellow(`\n    🏆 ${challenge.title}\n`));
+  console.log(chalk.gray(`    ${challenge.tags.join(', ')}  ·  ${challenge.submissionCount} submissions  ·  ${daysLeft} days left\n`));
+
+  // Show description (strip markdown for terminal)
+  const desc = challenge.description
+    .replace(/\*\*Source:\*\*[^\n]*/g, '')
+    .replace(/\*\*(.*?)\*\*/g, '$1')
+    .replace(/\$\$([^$]*)\$\$/g, '[$1]')
+    .replace(/\$([^$]+)\$/g, '[$1]')
+    .replace(/#+\s*/g, '')
+    .trim();
+  // Word-wrap at ~80 chars with indent
+  const lines = desc.split('\n');
+  for (const line of lines) {
+    const words = line.split(' ');
+    let current = '    ';
+    for (const word of words) {
+      if (current.length + word.length > 85) {
+        console.log(current);
+        current = '    ' + word;
+      } else {
+        current += (current.length > 4 ? ' ' : '') + word;
+      }
+    }
+    if (current.trim()) console.log(current);
+  }
+  console.log('');
+
+  const { action } = await inquirer.prompt([{
+    type: 'list',
+    name: 'action',
+    message: chalk.white('What do you want to do?'),
+    prefix: '    ',
+    choices: [
+      { name: '🧪 Attempt this challenge', value: 'attempt' },
+      { name: '💬 View submissions', value: 'submissions' },
+      { name: chalk.gray('← Back to challenges'), value: 'back' },
+    ],
+  }]);
+
+  if (action === 'back') {
+    await browseChallengesMenu();
+    return;
+  }
+
+  if (action === 'submissions') {
+    await viewSubmissionsMenu(challenge, config);
+    return;
+  }
+
+  if (action === 'attempt') {
+    await attemptChallengeFromMenu(challenge, config);
+    return;
+  }
+}
+
+async function viewSubmissionsMenu(challenge: Agent4ScienceChallenge, config: ReturnType<typeof loadConfig>): Promise<void> {
+  const apiUrl = config.api.apiUrl.replace(/\/$/, '');
+
+  console.log(chalk.gray('\n    Fetching submissions...\n'));
+  const res = await fetch(`${apiUrl}/api/v1/challenges/${challenge.id}/submissions?sort=top&limit=10`);
+  const raw = await res.json() as { submissions?: Array<{ id: string; title: string; approach: string; score: number; version: number; agentId: string }> };
+  const subs = raw.submissions || [];
+
+  if (subs.length === 0) {
+    console.log(chalk.yellow('    No submissions yet — be the first!\n'));
+  } else {
+    for (const sub of subs) {
+      console.log(chalk.bold(`    📝 ${sub.title}`));
+      console.log(chalk.gray(`       v${sub.version} · score: ${sub.score} · by ${sub.agentId}`));
+      console.log(chalk.gray(`       ${sub.approach.slice(0, 100)}${sub.approach.length > 100 ? '...' : ''}`));
+      console.log('');
+    }
   }
 
   await inquirer.prompt([{ type: 'input', name: 'ok', message: 'Press Enter to go back...' }]);
-  await playCommand();
+  await challengeDetailMenu(challenge, config);
+}
+
+async function attemptChallengeFromMenu(challenge: Agent4ScienceChallenge, config: ReturnType<typeof loadConfig>): Promise<void> {
+  try {
+    // Need agent manager, LLM, and executor
+    const { validateSecrets } = await import('../../config/config.js');
+    validateSecrets();
+
+    let db = tryGetDatabase();
+    if (!db) db = createDatabase(config.database.path);
+
+    createAgent4ScienceClient({ baseUrl: config.api.apiUrl });
+    const client = getAgent4ScienceClient();
+
+    const { createLLMClient, getLLMClient } = await import('../../llm/llm-client.js');
+    try { getLLMClient(); } catch { createLLMClient(config.llm); }
+    const llm = getLLMClient();
+
+    const { createActionExecutor, getActionExecutor } = await import('../../actions/action-executor.js');
+    try { getActionExecutor(); } catch { createActionExecutor(); }
+    const executor = getActionExecutor();
+
+    const { createRateLimiter } = await import('../../rate-limit/rate-limiter.js');
+    createRateLimiter(config.rateLimits);
+
+    const { createAgentManager, getAgentManager } = await import('../../agents/agent-manager.js');
+    let manager: Awaited<ReturnType<typeof createAgentManager>>;
+    try {
+      manager = getAgentManager();
+    } catch {
+      manager = createAgentManager(config.security.encryptionKey);
+      await manager.loadAgents();
+    }
+
+    const agentIds = manager.getAgentIds();
+    if (agentIds.length === 0) {
+      console.log(chalk.red('\n    No agents with valid API keys available.'));
+      console.log(chalk.gray('    Run the setup wizard to register agents.\n'));
+      await inquirer.prompt([{ type: 'input', name: 'ok', message: 'Press Enter to go back...' }]);
+      await challengeDetailMenu(challenge, config);
+      return;
+    }
+
+    // Pick agent
+    const agentChoices = agentIds.map(id => {
+      const agent = manager.getAgent(id);
+      return { name: `@${agent?.config.handle} (${agent?.config.displayName})`, value: id };
+    });
+    const { agentId } = await inquirer.prompt([{
+      type: 'list',
+      name: 'agentId',
+      message: chalk.white('Attempt as which agent?'),
+      prefix: '    ',
+      choices: agentChoices,
+    }]);
+
+    const runtime = manager.getAgent(agentId)!;
+    const apiKey = manager.getApiKey(agentId)!;
+
+    // Fetch existing submissions
+    console.log(chalk.gray('\n    Fetching existing submissions...\n'));
+    const subResult = await client.getChallengeSubmissions(challenge.id, apiKey, { sort: 'top', limit: 10 });
+    const submissions = subResult.success && subResult.data ? (Array.isArray(subResult.data) ? subResult.data : []) : [];
+
+    if (submissions.length > 0) {
+      console.log(chalk.bold(`    ${submissions.length} existing submission(s):`));
+      for (const sub of submissions.slice(0, 5)) {
+        console.log(chalk.gray(`      • ${sub.title} (v${sub.version}, score: ${sub.score}) by ${sub.agentId.slice(0, 12)}...`));
+      }
+      console.log('');
+    }
+
+    // Ask LLM whether to attempt (structured analysis)
+    console.log(chalk.gray('    Analyzing challenge...\n'));
+    const decision = await llm.decideChallenge(
+      runtime.config.persona,
+      { title: challenge.title, description: challenge.description, tags: challenge.tags },
+      submissions.map(s => ({ title: s.title, approach: s.approach, agentId: s.agentId }))
+    );
+
+    console.log(chalk.bold('    LLM Decision:'));
+    console.log(`      Attempt: ${decision.shouldAttempt ? chalk.green('YES') : chalk.red('NO')}`);
+    console.log(`      Reason: ${chalk.gray(decision.reason)}`);
+    if (decision.improvesUpon) {
+      console.log(`      Improves upon: ${chalk.cyan(decision.improvesUpon)}`);
+    }
+    console.log('');
+
+    if (!decision.shouldAttempt) {
+      const { forceAttempt } = await inquirer.prompt([
+        { type: 'confirm', name: 'forceAttempt', message: 'Force attempt anyway?', default: false, prefix: '    ' },
+      ]);
+      if (!forceAttempt) {
+        await challengeDetailMenu(challenge, config);
+        return;
+      }
+    }
+
+    // Find submission to improve upon
+    let improvesUponSub: (typeof submissions)[0] | undefined;
+    if (decision.improvesUpon) {
+      improvesUponSub = submissions.find(s => s.id === decision.improvesUpon);
+    }
+
+    // Generate solution
+    console.log(chalk.gray('    Generating solution (analyze → solve → verify)...\n'));
+    const solution = await llm.generateSolution(
+      runtime.config.persona,
+      { title: challenge.title, description: challenge.description, tags: challenge.tags },
+      submissions.slice(0, 3).map(s => ({ title: s.title, approach: s.approach, body: s.body })),
+      improvesUponSub ? { id: improvesUponSub.id, title: improvesUponSub.title, approach: improvesUponSub.approach, body: improvesUponSub.body } : undefined
+    );
+
+    console.log(chalk.bold('    Generated Solution:'));
+    console.log(`      Title: ${chalk.cyan(solution.title)}`);
+    console.log(`      Approach: ${chalk.gray(solution.approach)}`);
+    if (solution.delta) console.log(`      Delta: ${chalk.gray(solution.delta)}`);
+    console.log(`      Body: ${chalk.gray(solution.body.slice(0, 200))}...`);
+    console.log('');
+
+    const { confirm } = await inquirer.prompt([
+      { type: 'confirm', name: 'confirm', message: 'Submit this solution?', default: true, prefix: '    ' },
+    ]);
+
+    if (confirm) {
+      executor.queueAction(runtime.config.id, 'submission', challenge.id, 'challenge', solution as unknown as Record<string, unknown>, 'high');
+      console.log(chalk.green('\n    ✓ Solution queued for submission\n'));
+    }
+
+  } catch (error) {
+    console.log(chalk.red(`\n    Error: ${error instanceof Error ? error.message : error}\n`));
+  }
+
+  await inquirer.prompt([{ type: 'input', name: 'ok', message: 'Press Enter to go back...' }]);
+  await challengeDetailMenu(challenge, config);
 }
 
 // =====================================================
