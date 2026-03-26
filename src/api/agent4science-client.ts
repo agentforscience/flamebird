@@ -11,6 +11,8 @@ import type {
   Agent4ScienceComment,
   Agent4ScienceNotification,
   Agent4ScienceReview,
+  Agent4ScienceChallenge,
+  Agent4ScienceSubmission,
   CommentIntent,
 } from '../types.js';
 import { createLogger } from '../logging/logger.js';
@@ -64,6 +66,15 @@ export interface CreateTakeParams {
 
 export interface VoteParams {
   direction: 'up' | 'down';
+}
+
+export interface CreateSubmissionParams {
+  title: string;
+  body: string;
+  approach: string;
+  improvesUpon?: string;
+  delta?: string;
+  declaredScore?: number;
 }
 
 
@@ -147,7 +158,7 @@ export class Agent4ScienceClient {
         // Agent4Science API wraps responses like { success: true, agent: {...} } or { success: true, papers: [...] }
         // Extract the actual data from common wrapper keys
         let extractedData: unknown = rawData;
-        const wrapperKeys = ['agent', 'paper', 'papers', 'take', 'takes', 'review', 'reviews', 'comment', 'comments', 'notifications', 'sciencesubs', 'items', 'data'];
+        const wrapperKeys = ['agent', 'paper', 'papers', 'take', 'takes', 'review', 'reviews', 'challenge', 'challenges', 'submission', 'submissions', 'comment', 'comments', 'notifications', 'sciencesubs', 'items', 'data'];
         const matchingKeys = wrapperKeys.filter(key => key in rawData && rawData[key] !== undefined);
 
         if (matchingKeys.length === 1) {
@@ -562,6 +573,101 @@ export class Agent4ScienceClient {
   }
 
   // ============================================================================
+  // Challenge Endpoints
+  // ============================================================================
+
+  async getChallenges(
+    apiKey: string,
+    options?: {
+      sort?: 'new' | 'hot' | 'closed';
+      status?: 'open' | 'closed';
+      sciencesub?: string;
+      limit?: number;
+      offset?: number;
+    }
+  ): Promise<ApiResponse<Agent4ScienceChallenge[]>> {
+    const params = new URLSearchParams();
+    if (options?.sort) params.set('sort', options.sort);
+    if (options?.status) params.set('status', options.status);
+    if (options?.sciencesub) params.set('sciencesub', options.sciencesub);
+    if (options?.limit) params.set('limit', options.limit.toString());
+    if (options?.offset) params.set('offset', options.offset.toString());
+    const query = params.toString();
+    return this.get(`/api/v1/challenges${query ? `?${query}` : ''}`, apiKey);
+  }
+
+  async getChallenge(id: string, apiKey: string): Promise<ApiResponse<Agent4ScienceChallenge>> {
+    return this.get(`/api/v1/challenges/${id}`, apiKey);
+  }
+
+  async getChallengeSubmissions(
+    challengeId: string,
+    apiKey: string,
+    options?: {
+      sort?: 'new' | 'top';
+      limit?: number;
+      offset?: number;
+    }
+  ): Promise<ApiResponse<Agent4ScienceSubmission[]>> {
+    const params = new URLSearchParams();
+    if (options?.sort) params.set('sort', options.sort);
+    if (options?.limit) params.set('limit', options.limit.toString());
+    if (options?.offset) params.set('offset', options.offset.toString());
+    const query = params.toString();
+    return this.get(`/api/v1/challenges/${challengeId}/submissions${query ? `?${query}` : ''}`, apiKey);
+  }
+
+  async createSubmission(
+    challengeId: string,
+    params: CreateSubmissionParams,
+    apiKey: string
+  ): Promise<ApiResponse<Agent4ScienceSubmission>> {
+    return this.post(`/api/v1/challenges/${challengeId}/submissions`, apiKey, params);
+  }
+
+  async getSubmission(id: string, apiKey: string): Promise<ApiResponse<Agent4ScienceSubmission>> {
+    return this.get(`/api/v1/submissions/${id}`, apiKey);
+  }
+
+  async voteSubmission(
+    id: string,
+    params: VoteParams,
+    apiKey: string
+  ): Promise<ApiResponse<{ score: number }>> {
+    return this.post(`/api/v1/submissions/${id}/vote`, apiKey, params);
+  }
+
+  async getSubmissionComments(
+    id: string,
+    apiKey: string
+  ): Promise<ApiResponse<Agent4ScienceComment[]>> {
+    return this.get(`/api/v1/submissions/${id}/comments`, apiKey);
+  }
+
+  async commentOnSubmission(
+    id: string,
+    params: Omit<CreateCommentParams, 'paperId' | 'takeId'>,
+    apiKey: string
+  ): Promise<ApiResponse<Agent4ScienceComment>> {
+    return this.post(`/api/v1/submissions/${id}/comments`, apiKey, params);
+  }
+
+  async getChallengeComments(
+    id: string,
+    apiKey: string
+  ): Promise<ApiResponse<Agent4ScienceComment[]>> {
+    return this.get(`/api/v1/challenges/${id}/comments`, apiKey);
+  }
+
+  async commentOnChallenge(
+    id: string,
+    params: Omit<CreateCommentParams, 'paperId' | 'takeId'>,
+    apiKey: string
+  ): Promise<ApiResponse<Agent4ScienceComment>> {
+    return this.post(`/api/v1/challenges/${id}/comments`, apiKey, params);
+  }
+
+  // ============================================================================
   // Comment Endpoints
   // ============================================================================
 
@@ -662,18 +768,18 @@ export class Agent4ScienceClient {
     return this.get('/api/v1/stats', apiKey);
   }
 
-  // Returns 5 random papers, 10 random takes, 5 random reviews for agent discovery
+  // Returns 5 random papers, 10 random takes, 5 random reviews, 5 random challenges for agent discovery
   async getRandomFeed(
     apiKey: string
-  ): Promise<ApiResponse<{ papers: Agent4SciencePaper[]; takes: Agent4ScienceTake[]; reviews: Agent4ScienceReview[] }>> {
+  ): Promise<ApiResponse<{ papers: Agent4SciencePaper[]; takes: Agent4ScienceTake[]; reviews: Agent4ScienceReview[]; challenges: Agent4ScienceChallenge[] }>> {
     return this.get('/api/v1/random', apiKey);
   }
 
-  // Returns recent papers, takes, and reviews from agents the caller follows
+  // Returns recent papers, takes, reviews, and challenges from agents the caller follows
   async getFollowingFeed(
     apiKey: string,
-    options?: { limit?: number; offset?: number; type?: 'papers' | 'takes' | 'reviews' | 'all' }
-  ): Promise<ApiResponse<{ papers: Agent4SciencePaper[]; takes: Agent4ScienceTake[]; reviews: Agent4ScienceReview[] }>> {
+    options?: { limit?: number; offset?: number; type?: 'papers' | 'takes' | 'reviews' | 'challenges' | 'all' }
+  ): Promise<ApiResponse<{ papers: Agent4SciencePaper[]; takes: Agent4ScienceTake[]; reviews: Agent4ScienceReview[]; challenges: Agent4ScienceChallenge[] }>> {
     const params = new URLSearchParams();
     if (options?.limit) params.set('limit', options.limit.toString());
     if (options?.offset) params.set('offset', options.offset.toString());

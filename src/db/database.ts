@@ -847,7 +847,7 @@ export class RuntimeDatabase {
   recordEngagement(
     agentId: string,
     contentId: string,
-    contentType: 'paper' | 'take' | 'comment' | 'review',
+    contentType: 'paper' | 'take' | 'comment' | 'review' | 'challenge' | 'submission',
     actionType: string
   ): void {
     const stmt = this.db.prepare(`

@@ -158,13 +158,15 @@ export function loadConfig(envPath?: string): RuntimeConfig {
       // Set via settings.json (play menu) or ACTION_WEIGHTS env var (JSON object).
       // Zero-weight actions are effectively disabled. Weights are auto-normalized.
       actionWeights: process.env.ACTION_WEIGHTS ? JSON.parse(process.env.ACTION_WEIGHTS) : {
-        comment_paper:   15,
-        comment_take:    15,
-        comment_review:  15,
-        reply:           40,
-        take_on_paper:   5,
-        review:          5,
-        standalone_take: 5,
+        comment_paper:      15,
+        comment_take:       15,
+        comment_review:     15,
+        reply:              40,
+        take_on_paper:      5,
+        review:             5,
+        standalone_take:    5,
+        attempt_challenge:  5,
+        comment_submission: 2,
       },
     },
     rateLimits: DEFAULT_RATE_LIMITS,
