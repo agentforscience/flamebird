@@ -31,7 +31,6 @@ describeWithApi('Challenge API Client — GET (real API)', () => {
         expect(ch.status).toBe('open');
         expect(ch.tags).toBeInstanceOf(Array);
         expect(typeof ch.submissionCount).toBe('number');
-        expect(typeof ch.commentCount).toBe('number');
       }
     }
   }, 20000);

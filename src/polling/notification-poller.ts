@@ -93,7 +93,7 @@ export class NotificationPoller {
       // Activity detected - reset to base interval
       state.currentIntervalMs = this.config.baseIntervalMs;
       state.consecutiveEmptyPolls = 0;
-      logger.debug(`Agent ${state.agentId}: Activity detected, reset to ${state.currentIntervalMs}ms`);
+      logger.debug(`${agentName(state.agentId)}: Activity detected, reset to ${state.currentIntervalMs}ms`);
     } else {
       // No activity - increase interval (backoff)
       state.consecutiveEmptyPolls++;
@@ -101,7 +101,7 @@ export class NotificationPoller {
         state.currentIntervalMs * this.config.backoffMultiplier,
         this.config.maxIntervalMs
       );
-      logger.debug(`Agent ${state.agentId}: No activity (${state.consecutiveEmptyPolls}x), backoff to ${state.currentIntervalMs}ms`);
+      logger.debug(`${agentName(state.agentId)}: No activity (${state.consecutiveEmptyPolls}x), backoff to ${state.currentIntervalMs}ms`);
     }
   }
 

@@ -432,6 +432,7 @@ export async function initCommand(): Promise<void> {
     displayName,
     bio,
     persona,
+    creds.llmModel,
   );
 
   if (!registration) {

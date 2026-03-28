@@ -14,6 +14,8 @@ import type {
   Agent4ScienceChallenge,
   Agent4ScienceSubmission,
   CommentIntent,
+  T1Result,
+  T2Scores,
 } from '../types.js';
 import { createLogger } from '../logging/logger.js';
 
@@ -86,6 +88,10 @@ export class Agent4ScienceClient {
   private sciencesubCache = new Map<string, { data: { slug: string; name: string; description: string }[]; expiresAt: number }>();
   private static SCIENCESUB_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 
+  // skill.md cache: fetched once per session, 30-minute TTL
+  private skillMdCache: { content: string; expiresAt: number } | null = null;
+  private static SKILL_MD_CACHE_TTL = 30 * 60 * 1000; // 30 minutes
+
   constructor(config: Agent4ScienceClientConfig) {
     this.baseUrl = config.baseUrl.replace(/\/$/, '');
     this.timeout = config.timeout ?? 30000;
@@ -120,7 +126,17 @@ export class Agent4ScienceClient {
 
         clearTimeout(timeoutId);
 
-        const rawData = await response.json() as Record<string, unknown>;
+        // Handle empty responses (e.g., 204 No Content from DELETE)
+        const contentType = response.headers.get('content-type') || '';
+        const hasBody = contentType.includes('application/json') && response.status !== 204;
+        let rawData: Record<string, unknown>;
+        if (hasBody) {
+          rawData = await response.json() as Record<string, unknown>;
+        } else {
+          // Try to parse, but fall back to empty object for empty bodies
+          const text = await response.text();
+          rawData = text ? JSON.parse(text) as Record<string, unknown> : { success: response.ok };
+        }
 
         if (!response.ok) {
           const errorMsg = normalizeApiError(rawData.error);
@@ -652,20 +668,39 @@ export class Agent4ScienceClient {
     return this.post(`/api/v1/submissions/${id}/comments`, apiKey, params);
   }
 
-  async getChallengeComments(
+  /** Trigger server-side evaluation (T1 gates + T2 PoLL) on a submission */
+  async evaluateSubmission(
     id: string,
     apiKey: string
-  ): Promise<ApiResponse<Agent4ScienceComment[]>> {
-    return this.get(`/api/v1/challenges/${id}/comments`, apiKey);
+  ): Promise<ApiResponse<{
+    submission: {
+      id: string;
+      evaluationStatus: string;
+      t1Result?: T1Result;
+      t2Scores?: T2Scores;
+      verifierScore?: number | null;
+      evaluatedScore?: number | null;
+    };
+    message: string;
+  }>> {
+    return this.post(`/api/v1/submissions/${id}/evaluate`, apiKey, {});
   }
 
-  async commentOnChallenge(
+  /** Get evaluation status for a submission */
+  async getEvaluationStatus(
     id: string,
-    params: Omit<CreateCommentParams, 'paperId' | 'takeId'>,
     apiKey: string
-  ): Promise<ApiResponse<Agent4ScienceComment>> {
-    return this.post(`/api/v1/challenges/${id}/comments`, apiKey, params);
+  ): Promise<ApiResponse<{
+    submissionId: string;
+    evaluationStatus: string;
+    t1Result?: T1Result;
+    t2Scores?: T2Scores;
+    verifierScore?: number | null;
+    evaluatedScore?: number | null;
+  }>> {
+    return this.get(`/api/v1/submissions/${id}/evaluate`, apiKey);
   }
+
 
   // ============================================================================
   // Comment Endpoints
@@ -836,6 +871,44 @@ export class Agent4ScienceClient {
     apiKey: string
   ): Promise<ApiResponse<{ slug: string; name: string; description: string; memberCount?: number; postCount?: number }>> {
     return this.get(`/api/v1/sciencesubs/${slug}`, apiKey);
+  }
+
+  // ============================================================================
+  // skill.md — Platform quality guidelines for agent submissions & discussions
+  // ============================================================================
+
+  /**
+   * Fetch the platform's skill.md (quality guidelines for agent submissions).
+   * Cached for 30 minutes to avoid repeated fetches per session.
+   * Falls back gracefully — returns empty string if unreachable.
+   */
+  async fetchSkillMd(): Promise<string> {
+    // Return cached if still valid
+    if (this.skillMdCache && Date.now() < this.skillMdCache.expiresAt) {
+      return this.skillMdCache.content;
+    }
+
+    try {
+      const response = await fetch(`${this.baseUrl}/skill.md`, {
+        signal: AbortSignal.timeout(10000),
+      });
+
+      if (!response.ok) {
+        logger.debug({ status: response.status }, 'skill.md not available');
+        return this.skillMdCache?.content ?? '';
+      }
+
+      const content = await response.text();
+      this.skillMdCache = {
+        content,
+        expiresAt: Date.now() + Agent4ScienceClient.SKILL_MD_CACHE_TTL,
+      };
+      logger.info({ length: content.length }, 'Fetched platform skill.md');
+      return content;
+    } catch (error) {
+      logger.debug({ err: error }, 'Failed to fetch skill.md, using cache or empty');
+      return this.skillMdCache?.content ?? '';
+    }
   }
 }
 

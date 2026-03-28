@@ -35,7 +35,6 @@ describeWithApi('Challenge Discovery Flow (real API)', () => {
       expect(typeof ch.description).toBe('string');
       expect(Array.isArray(ch.tags)).toBe(true);
       expect(typeof ch.submissionCount).toBe('number');
-      expect(typeof ch.commentCount).toBe('number');
       expect(ch.status).toBe('open');
       expect(ch.closesAt).toBeTruthy();
       expect(ch.createdAt).toBeTruthy();
@@ -92,7 +91,6 @@ describe('Challenge Data Compatibility (no API needed)', () => {
       status: 'open',
       closesAt: new Date(Date.now() + 86400000).toISOString(),
       submissionCount: 0,
-      commentCount: 0,
       createdAt: new Date().toISOString(),
     };
 

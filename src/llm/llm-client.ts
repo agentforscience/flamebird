@@ -1181,13 +1181,16 @@ Tags: ${challenge.tags.join(', ')}${submissionsContext}`;
   }
 
   /**
-   * Generate a solution for a challenge using a multi-step pipeline:
+   * Generate a solution for a challenge using a multi-step pipeline with
+   * quality gate, cross-model verification, retry loop, and skill.md context.
    *
    *   Step 1: ANALYZE — Decompose the problem, identify key structures, plan approach
    *   Step 2: SOLVE   — Generate the full solution with the analysis as scaffolding
-   *   Step 3: VERIFY  — Self-critique for logical gaps, then refine
+   *   Step 3: VERIFY  — Cross-model (or self) critique for logical gaps
+   *   Step 4: RETRY   — If major issues found, re-solve with feedback (up to MAX_RETRIES)
+   *   GATE:  Return null if solution cannot pass verification after retries
    *
-   * Inspired by EinsteinArena's approach: research first, iterate, verify locally.
+   * Returns null when the quality gate blocks submission (caller should skip).
    */
   async generateSolution(
     persona: AgentPersona,
@@ -1197,8 +1200,16 @@ Tags: ${challenge.tags.join(', ')}${submissionsContext}`;
       tags: string[];
     },
     topSubmissions: Array<{ title: string; approach: string; body: string }>,
-    improvesUpon?: { id: string; title: string; approach: string; body: string }
-  ): Promise<GeneratedSolution> {
+    improvesUpon?: { id: string; title: string; approach: string; body: string },
+    skillMdContext?: string
+  ): Promise<GeneratedSolution | null> {
+    const MAX_RETRIES = 2;
+
+    // ── Platform skill.md context (if available) ──
+    const skillGuidance = skillMdContext
+      ? `\n\nPLATFORM GUIDELINES (from Agent4Science skill.md):\n${smartTruncate(skillMdContext, 3000)}\n`
+      : '';
+
     // ── Step 1: ANALYZE — decompose the problem and plan approach ──
 
     const existingSummary = topSubmissions.length > 0
@@ -1216,7 +1227,7 @@ Your goal: identify specific weaknesses, gaps, or missed cases in this submissio
       : '';
 
     const analysisPrompt = `You are a mathematician analyzing a challenge before attempting a solution.
-
+${skillGuidance}
 CHALLENGE:
 Title: ${challenge.title}
 Description: ${challenge.description}
@@ -1245,87 +1256,96 @@ Perform a structured analysis. Think step by step:
 
 Be specific and mathematical. Reference actual theorems, techniques, and structures by name.`;
 
-    logger.info('Challenge solver: Step 1/3 — Analyzing problem structure');
+    logger.info('Challenge solver: Step 1 — Analyzing problem structure');
     const analysis = await this.complete([
       { role: 'system', content: `You are a rigorous mathematician. Think deeply before solving. Your expertise: ${persona.preferredTopics.join(', ')}.` },
       { role: 'user', content: analysisPrompt },
     ], 4096);
 
-    // ── Step 2: SOLVE — generate the full solution using the analysis ──
+    this.trackCost('submission', analysis.usage);
 
-    const solveSystemPrompt = this.buildPersonaPrompt(persona) + `
+    // ── Retry loop: SOLVE → VERIFY → (retry if major issues) ──
+
+    let lastVerificationFeedback = '';
+
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+      const isRetry = attempt > 0;
+      const stepLabel = isRetry ? `Step 2 (retry ${attempt}/${MAX_RETRIES})` : 'Step 2';
+
+      // ── SOLVE — generate (or re-generate) the full solution ──
+
+      const retryContext = isRetry
+        ? `\n\nIMPORTANT — Your previous attempt was rejected by a reviewer. Here is their feedback:
+${lastVerificationFeedback}
+
+You MUST address ALL of the above issues in this attempt. Do not repeat the same mistakes.`
+        : '';
+
+      const solveSystemPrompt = this.buildPersonaPrompt(persona) + `
 
 You are writing a formal solution to a mathematical challenge on Agent4Science.
 You have already analyzed the problem — use your analysis as scaffolding.
-
+${skillGuidance}
 QUALITY STANDARDS:
 - Every claim must be justified. No hand-waving.
 - Define notation before using it. State assumptions explicitly.
 - Structure the solution clearly: Setup → Key Lemma(s) → Main Argument → Conclusion.
-- Use LaTeX notation ($...$ for inline, $$...$$ for display) for all mathematical expressions.
+- Use LaTeX math notation throughout: $x^2$ for inline, $$\\sum_{i=1}^n x_i$$ for display blocks.
+  IMPORTANT: Inside the JSON string, escape backslashes as \\\\. For example: $\\\\alpha$, $\\\\mathbb{R}$, $$\\\\sum_{i=1}^n$$.
+  Do NOT use plain Unicode like α, β, ∈, ℝ. Always use LaTeX: $\\\\alpha$, $\\\\beta$, $\\\\in$, $\\\\mathbb{R}$.
+- Use markdown ## headings to structure sections.
 - If the problem asks for a construction, provide it explicitly. If it asks for a proof, give complete logical steps.
 - If building on prior work, clearly mark what is new vs. inherited.
 
 Respond in JSON:
 {
   "title": "Concise title for your submission (10-200 chars)",
-  "body": "Full solution in markdown with LaTeX math. Structured with ## headings. Min 500 chars for non-trivial problems.",
+  "body": "Full solution in markdown with LaTeX math. Use ## headings. All math must use $...$ or $$...$$. Min 500 chars.",
   "approach": "20-500 char summary of your method"${improvesUpon ? ',\n  "delta": "What you changed from the prior submission (max 1000 chars)"' : ''},
   "declaredScore": null,
   "confidence": "low/medium/high — your honest assessment of solution correctness"
 }
 
-CRITICAL: Complete every field fully. Do NOT leave sentences unfinished. The body should be a publishable-quality solution.`;
+CRITICAL: Complete every field fully. Do NOT leave sentences unfinished. The body should be a publishable-quality solution. ALL math must be in LaTeX, never plain text.`;
 
-    const solveUserPrompt = `Here is the challenge and your analysis. Now write the full solution.
+      const solveUserPrompt = `Here is the challenge and your analysis. Now write the full solution.
 
 CHALLENGE:
 Title: ${challenge.title}
 Description: ${challenge.description}
 
 YOUR ANALYSIS:
-${analysis.content}
+${analysis.content}${retryContext}
 
 Now produce the complete, rigorous solution.`;
 
-    logger.info('Challenge solver: Step 2/3 — Generating solution');
-    const draft = await this.complete([
-      { role: 'system', content: solveSystemPrompt },
-      { role: 'user', content: solveUserPrompt },
-    ], 16384);
+      logger.info(`Challenge solver: ${stepLabel} — Generating solution`);
+      const draft = await this.complete([
+        { role: 'system', content: solveSystemPrompt },
+        { role: 'user', content: solveUserPrompt },
+      ], 16384);
 
-    // ── Step 3: VERIFY & REFINE — self-critique and fix issues ──
+      this.trackCost('submission', draft.usage);
 
-    // Parse the draft first
-    let draftParsed: Record<string, unknown> | null = null;
-    try {
-      let jsonMatch = draft.content.match(/\{[\s\S]*\}/);
-      if (!jsonMatch) {
-        const braceStart = draft.content.indexOf('{');
-        if (braceStart >= 0) {
-          const repaired = repairJSON(draft.content.slice(braceStart));
-          if (repaired) jsonMatch = [repaired];
+      // Parse the draft
+      const draftParsed = this.extractJSON(draft.content);
+      const draftBody = (draftParsed?.body as string) || draft.content;
+      const draftApproach = (draftParsed?.approach as string) || '';
+
+      // ── VERIFY — use cross-model verifier if available ──
+
+      if (draftBody.length <= 200) {
+        logger.warn('Challenge solver: Solution too short, skipping verification');
+        // Quality gate: don't submit trivially short solutions
+        if (attempt === MAX_RETRIES) {
+          logger.warn('Challenge solver: QUALITY GATE — solution too short after all retries, blocking submission');
+          return null;
         }
+        lastVerificationFeedback = 'Solution was too short (under 200 chars). Provide a complete, detailed solution.';
+        continue;
       }
-      if (jsonMatch) {
-        try {
-          draftParsed = JSON.parse(jsonMatch[0]);
-        } catch {
-          const repaired = repairJSON(jsonMatch[0]);
-          if (repaired) draftParsed = JSON.parse(repaired);
-        }
-      }
-    } catch {
-      // Will use fallback below
-    }
 
-    const draftBody = (draftParsed?.body as string) || draft.content;
-    const draftApproach = (draftParsed?.approach as string) || '';
-    const draftConfidence = (draftParsed?.confidence as string) || 'medium';
-
-    // Only run verification for non-trivial solutions (skip if draft is very short or low quality)
-    if (draftBody.length > 200 && draftConfidence !== 'high') {
-      logger.info('Challenge solver: Step 3/3 — Verifying and refining');
+      logger.info(`Challenge solver: Step 3 — Verifying (${verifierInstance ? 'cross-model' : 'self'}-verification)`);
 
       const verifyPrompt = `You are a rigorous mathematical referee. Review this solution for correctness.
 
@@ -1356,85 +1376,301 @@ Respond in JSON:
   "improved_body": "The full corrected solution body if there were major issues, or empty string if mostly correct"
 }`;
 
-      const verification = await this.complete([
-        { role: 'system', content: 'You are a mathematical referee known for thoroughness. Find every logical gap.' },
+      // Use verifier client (cross-model) if available, otherwise self-verify
+      const verifier = getVerifierClient();
+      const verification = await verifier.complete([
+        { role: 'system', content: 'You are a mathematical referee known for thoroughness. Find every logical gap. Be adversarial — assume the solution is wrong until convinced otherwise.' },
         { role: 'user', content: verifyPrompt },
       ], 8192);
 
-      // Apply corrections if needed
-      try {
-        const verifyMatch = verification.content.match(/\{[\s\S]*\}/);
-        if (verifyMatch) {
-          let verifyParsed;
-          try {
-            verifyParsed = JSON.parse(verifyMatch[0]);
-          } catch {
-            const repaired = repairJSON(verifyMatch[0]);
-            if (repaired) verifyParsed = JSON.parse(repaired);
-          }
+      this.trackCost('submission', verification.usage);
 
-          if (verifyParsed?.verdict === 'major_issues' && verifyParsed.improved_body) {
-            logger.info('Challenge solver: Applied major corrections from verification step');
-            if (draftParsed) {
-              draftParsed.body = verifyParsed.improved_body;
-            }
-          } else if (verifyParsed?.issues?.length > 0) {
-            logger.info({ issues: verifyParsed.issues.length }, 'Challenge solver: Verification found minor issues');
-          } else {
-            logger.info('Challenge solver: Verification passed — solution looks correct');
-          }
+      // Parse verification result
+      const verifyParsed = this.extractJSON(verification.content);
+      const verdict = (verifyParsed?.verdict as string) || 'unknown';
+      const issues = (verifyParsed?.issues as string[]) || [];
+      const improvedBody = (verifyParsed?.improved_body as string) || '';
+
+      logger.info({ verdict, issueCount: issues.length, attempt }, 'Challenge solver: Verification result');
+
+      // ── Quality gate decisions ──
+
+      if (verdict === 'correct' || verdict === 'minor_issues') {
+        // Solution passes — apply minor corrections if available and return
+        const finalBody = (verdict === 'minor_issues' && improvedBody)
+          ? improvedBody
+          : draftBody;
+
+        logger.info({ attempt }, 'Challenge solver: Solution passed verification');
+        return {
+          title: smartTruncate((draftParsed?.title as string) || `Solution: ${challenge.title}`, 200),
+          body: finalBody,
+          approach: smartTruncate((draftParsed?.approach as string) || 'Novel approach to the problem', 500),
+          ...(improvesUpon ? { improvesUpon: improvesUpon.id } : {}),
+          ...(draftParsed?.delta ? { delta: smartTruncate(String(draftParsed.delta), 1000) } : {}),
+          ...(draftParsed?.declaredScore != null ? { declaredScore: Number(draftParsed.declaredScore) } : {}),
+        };
+      }
+
+      if (verdict === 'major_issues') {
+        if (attempt < MAX_RETRIES) {
+          // Feed verification issues back into next attempt
+          lastVerificationFeedback = issues.length > 0
+            ? `ISSUES FOUND:\n${issues.map((iss, i) => `${i + 1}. ${iss}`).join('\n')}`
+            : verification.content;
+          logger.info({ attempt, issues: issues.length }, 'Challenge solver: Major issues found, retrying');
+          continue;
         }
-      } catch {
-        logger.warn('Failed to parse verification response, using draft as-is');
+
+        // Last attempt — if verifier provided an improved body, use it
+        if (improvedBody && improvedBody.length > 200) {
+          logger.info('Challenge solver: Using verifier-corrected solution on final attempt');
+          return {
+            title: smartTruncate((draftParsed?.title as string) || `Solution: ${challenge.title}`, 200),
+            body: improvedBody,
+            approach: smartTruncate((draftParsed?.approach as string) || 'Novel approach to the problem', 500),
+            ...(improvesUpon ? { improvesUpon: improvesUpon.id } : {}),
+            ...(draftParsed?.delta ? { delta: smartTruncate(String(draftParsed.delta), 1000) } : {}),
+          };
+        }
+
+        // Quality gate: block submission
+        logger.warn({ issues }, 'Challenge solver: QUALITY GATE — solution failed verification after all retries, blocking submission');
+        return null;
       }
 
-      try {
-        const costTracker = getCostTracker();
-        costTracker.recordCall('submission', verification.usage.promptTokens, verification.usage.completionTokens);
-      } catch {
-        // Cost tracker not initialized
+      // Unknown verdict — treat as pass on last attempt, retry otherwise
+      if (attempt < MAX_RETRIES) {
+        lastVerificationFeedback = 'Verification was inconclusive. Strengthen your argument and make every step explicit.';
+        continue;
       }
-    } else {
-      logger.info('Challenge solver: Skipping verification (high confidence or short solution)');
-    }
 
-    // Track costs for analysis + solve steps
-    try {
-      const costTracker = getCostTracker();
-      costTracker.recordCall('submission', analysis.usage.promptTokens, analysis.usage.completionTokens);
-      costTracker.recordCall('submission', draft.usage.promptTokens, draft.usage.completionTokens);
-    } catch {
-      // Cost tracker not initialized
-    }
-
-    // Build final result
-    if (draftParsed) {
+      // Final attempt with unknown verdict — submit with what we have
+      logger.info('Challenge solver: Inconclusive verification on final attempt, submitting best effort');
       return {
-        title: smartTruncate((draftParsed.title as string) || `Solution: ${challenge.title}`, 200),
-        body: (draftParsed.body as string) || draft.content,
-        approach: smartTruncate((draftParsed.approach as string) || 'Novel approach to the problem', 500),
+        title: smartTruncate((draftParsed?.title as string) || `Solution: ${challenge.title}`, 200),
+        body: draftBody,
+        approach: smartTruncate((draftParsed?.approach as string) || 'Novel approach to the problem', 500),
         ...(improvesUpon ? { improvesUpon: improvesUpon.id } : {}),
-        ...(draftParsed.delta ? { delta: smartTruncate(String(draftParsed.delta), 1000) } : {}),
-        ...(draftParsed.declaredScore != null ? { declaredScore: Number(draftParsed.declaredScore) } : {}),
+        ...(draftParsed?.delta ? { delta: smartTruncate(String(draftParsed.delta), 1000) } : {}),
       };
     }
 
-    // Fallback
-    return {
-      title: `Solution: ${challenge.title}`,
-      body: draft.content,
-      approach: 'Analytical approach to the problem',
-      ...(improvesUpon ? { improvesUpon: improvesUpon.id } : {}),
-    };
+    // Should not reach here, but safety fallback
+    logger.warn('Challenge solver: QUALITY GATE — exhausted all retries');
+    return null;
+  }
+
+  /**
+   * Generate a comparative peer critique of a sibling submission.
+   * The agent has its own submission to the same challenge and critiques another agent's work.
+   */
+  async generateSubmissionCritique(
+    persona: AgentPersona,
+    challenge: { title: string; description: string; tags: string[] },
+    ownSubmission: { title: string; approach: string; body: string },
+    siblingSubmission: { title: string; approach: string; body: string },
+    existingComments?: string[]
+  ): Promise<GeneratedComment> {
+    const hasExisting = existingComments && existingComments.length > 0;
+    const systemPrompt = this.buildPersonaPrompt(persona) + `
+
+You are performing PEER CRITIQUE on a fellow contestant's submission to a mathematical challenge.
+You have already submitted your own solution, so you have deep context on the problem.
+${hasExisting ? `\nOTHER RESEARCHERS HAVE ALREADY COMMENTED on this submission (see below). You MUST:
+- Read their critiques carefully before writing yours
+- DO NOT repeat points they already made — find something NEW
+- You may build on their points (cite them by handle) but must add original analysis
+- If they missed something important, focus on that
+- If you disagree with another critic's assessment, say so and explain why\n` : ''}
+YOUR TASK:
+- Compare the sibling submission against your own approach
+- Identify specific strengths and weaknesses relative to your solution
+- Point out logical gaps, missing edge cases, or unjustified steps
+- Acknowledge where their approach is stronger or offers a genuinely different angle
+- Be substantive — no generic praise ("interesting approach!") or empty criticism
+
+TONE:
+- Collegial but rigorous. You are a peer, not a judge.
+- Ground every claim in specific parts of their submission.
+- If their approach is strictly better on some dimension, say so honestly.
+
+Respond in JSON:
+{
+  "intent": "challenge" | "support" | "clarify" | "connect" | "probe" | "extend",
+  "body": "your critique (markdown, may include $LaTeX$, 200-800 chars)",
+  "confidence": 0.0-1.0,
+  "evidenceAnchor": "the specific claim or step you are responding to"
+}`;
+
+    let userPrompt = `CHALLENGE: ${challenge.title}
+Tags: ${challenge.tags.join(', ')}
+Description (excerpt): ${smartTruncate(challenge.description, 800)}
+
+YOUR SUBMISSION:
+Title: ${ownSubmission.title}
+Approach: ${ownSubmission.approach}
+Body (excerpt): ${smartTruncate(ownSubmission.body, 1200)}
+
+SIBLING SUBMISSION TO CRITIQUE:
+Title: ${siblingSubmission.title}
+Approach: ${siblingSubmission.approach}
+Body (excerpt): ${smartTruncate(siblingSubmission.body, 1200)}`;
+
+    if (hasExisting) {
+      userPrompt += `\n\nEXISTING COMMENTS ON THIS SUBMISSION (${existingComments.length} already posted — DO NOT REPEAT these points):\n`;
+      for (const c of existingComments) {
+        userPrompt += `---\n${smartTruncate(c, 400)}\n`;
+      }
+    }
+
+    userPrompt += `\nWrite a comparative peer critique of the sibling submission. Reference specific differences between your approach and theirs.${hasExisting ? ' Make sure your critique adds NEW insight not covered above.' : ''}`;
+
+    const response = await this.complete([
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: userPrompt },
+    ]);
+
+    this.trackCost('submission_critique', response.usage);
+
+    return this.parseCommentResponse(response.content);
+  }
+
+  /**
+   * Generate a rebuttal to a critique on the agent's own submission.
+   * The agent defends specific steps, concedes valid points, and advances the mathematical discussion.
+   * Also used for cross-submitter discussion where another submitter joins a thread.
+   */
+  async generateSubmissionRebuttal(
+    persona: AgentPersona,
+    challenge: { title: string; description: string; tags: string[] },
+    ownSubmission: { title: string; approach: string; body: string },
+    critique: { body: string; authorHandle?: string; intent?: string },
+    threadContext?: string
+  ): Promise<GeneratedComment> {
+    const isAuthor = !threadContext?.includes('YOU ARE JOINING'); // Default: author rebuttal
+    const role = isAuthor
+      ? `You are the AUTHOR of a submission to a mathematical challenge. Someone has critiqued your proof and you must respond.`
+      : `You are a fellow contestant in a mathematical challenge. You are joining a discussion thread on another submission where your own solution gives you relevant insight.`;
+
+    const systemPrompt = this.buildPersonaPrompt(persona) + `
+
+${role}
+
+YOUR TASK:
+- Engage the SPECIFIC mathematical claim or gap they identified
+- If they found a real gap: concede it explicitly, explain what it would take to fix, and whether it invalidates the overall approach or just one step
+- If they misunderstood your proof: correct with precision — quote the relevant step and explain why their objection doesn't apply
+- If they raised a subtle point: explore it — does it generalize? Does it affect other approaches too?
+- Reference specific equations, lemmas, or steps by name
+- If relevant, draw on your own solution's approach to illuminate the discussion
+
+CRITICAL RULES:
+- NO generic responses ("thank you for the feedback", "interesting point")
+- Every sentence must contain mathematical content or a specific logical argument
+- You are in a real mathematical debate — treat it like a conference Q&A
+- End with a question or open problem that advances the discussion
+
+Respond in JSON:
+{
+  "intent": "challenge" | "support" | "clarify" | "extend" | "probe" | "synthesize",
+  "body": "your rebuttal (markdown with $LaTeX$, 200-1000 chars, substantive mathematical argument)",
+  "confidence": 0.0-1.0,
+  "evidenceAnchor": "the specific claim from their critique you are responding to"
+}`;
+
+    let userPrompt = `CHALLENGE: ${challenge.title}
+Tags: ${challenge.tags.join(', ')}
+Description (excerpt): ${smartTruncate(challenge.description, 600)}
+
+YOUR SUBMISSION:
+Title: ${ownSubmission.title}
+Approach: ${ownSubmission.approach}
+Body (excerpt): ${smartTruncate(ownSubmission.body, 1000)}
+
+CRITIQUE TO RESPOND TO${critique.authorHandle ? ` (from @${critique.authorHandle})` : ''}${critique.intent ? ` [intent: ${critique.intent}]` : ''}:
+"${smartTruncate(critique.body, 800)}"`;
+
+    if (threadContext) {
+      userPrompt += `
+
+THREAD CONTEXT:
+${threadContext}`;
+    }
+
+    userPrompt += `
+
+Write a substantive mathematical response. Defend valid steps, concede real gaps, advance the discussion.`;
+
+    const response = await this.complete([
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: userPrompt },
+    ]);
+
+    this.trackCost('submission_rebuttal', response.usage);
+
+    return this.parseCommentResponse(response.content);
+  }
+
+  // ── Helper: extract JSON from LLM response ──
+  private extractJSON(content: string): Record<string, unknown> | null {
+    try {
+      let jsonMatch = content.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) {
+        const braceStart = content.indexOf('{');
+        if (braceStart >= 0) {
+          const repaired = repairJSON(content.slice(braceStart));
+          if (repaired) jsonMatch = [repaired];
+        }
+      }
+      if (jsonMatch) {
+        try {
+          return JSON.parse(jsonMatch[0]);
+        } catch {
+          const repaired = repairJSON(jsonMatch[0]);
+          if (repaired) return JSON.parse(repaired);
+        }
+      }
+    } catch {
+      // Parsing failed
+    }
+    return null;
+  }
+
+  // ── Helper: track LLM cost ──
+  private trackCost(action: string, usage: { promptTokens: number; completionTokens: number }): void {
+    try {
+      const costTracker = getCostTracker();
+      costTracker.recordCall(action, usage.promptTokens, usage.completionTokens);
+    } catch {
+      // Cost tracker not initialized
+    }
   }
 }
 
 // Singleton
 let instance: LLMClient | null = null;
+let verifierInstance: LLMClient | null = null;
 
 export function createLLMClient(config: LLMConfig): LLMClient {
   instance = new LLMClient(config);
   return instance;
+}
+
+/**
+ * Create a separate LLM client for cross-model verification.
+ * When set, challenge submission verification uses this model instead of the primary.
+ */
+export function createVerifierClient(config: LLMConfig): LLMClient {
+  verifierInstance = new LLMClient(config);
+  return verifierInstance;
+}
+
+/**
+ * Get the verifier client, falling back to the primary LLM client.
+ */
+export function getVerifierClient(): LLMClient {
+  return verifierInstance ?? getLLMClient();
 }
 
 export function getLLMClient(): LLMClient {

@@ -137,6 +137,14 @@ export function loadConfig(envPath?: string): RuntimeConfig {
       apiKey: process.env.LLM_API_KEY || process.env.OPENROUTER_API_KEY || '',
       model: process.env.LLM_MODEL || 'anthropic/claude-sonnet-4.5',
     },
+    // Optional verifier model for cross-model challenge submission verification
+    ...(process.env.VERIFIER_MODEL ? {
+      verifier: {
+        provider: (process.env.VERIFIER_PROVIDER as 'openrouter' | 'anthropic' | 'openai') || 'anthropic',
+        apiKey: process.env.VERIFIER_API_KEY || process.env.LLM_API_KEY || process.env.OPENROUTER_API_KEY || '',
+        model: process.env.VERIFIER_MODEL,
+      },
+    } : {}),
     polling: {
       baseIntervalMs: parseInt(process.env.POLL_BASE_INTERVAL_MS || '30000', 10),
       maxIntervalMs: parseInt(process.env.POLL_MAX_INTERVAL_MS || '300000', 10),
@@ -158,15 +166,15 @@ export function loadConfig(envPath?: string): RuntimeConfig {
       // Set via settings.json (play menu) or ACTION_WEIGHTS env var (JSON object).
       // Zero-weight actions are effectively disabled. Weights are auto-normalized.
       actionWeights: process.env.ACTION_WEIGHTS ? JSON.parse(process.env.ACTION_WEIGHTS) : {
-        comment_paper:      15,
-        comment_take:       15,
-        comment_review:     15,
-        reply:              40,
+        comment_paper:      10,
+        comment_take:       10,
+        comment_review:     10,
+        reply:              25,
         take_on_paper:      5,
         review:             5,
         standalone_take:    5,
-        attempt_challenge:  5,
-        comment_submission: 2,
+        attempt_challenge:  25,
+        comment_submission: 15,
       },
     },
     rateLimits: DEFAULT_RATE_LIMITS,

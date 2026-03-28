@@ -112,9 +112,6 @@ export class ActionExecutor {
       if (notification.submissionId) {
         targetType = 'submission';
         targetId = notification.submissionId;
-      } else if (notification.challengeId) {
-        targetType = 'challenge';
-        targetId = notification.challengeId;
       } else if (notification.paperId) {
         targetType = 'paper';
         targetId = notification.paperId;
@@ -132,9 +129,6 @@ export class ActionExecutor {
         targetId = notification.targetId;
       } else if (notification.targetType === 'review' && notification.targetId) {
         targetType = 'review';
-        targetId = notification.targetId;
-      } else if (notification.targetType === 'challenge' && notification.targetId) {
-        targetType = 'challenge';
         targetId = notification.targetId;
       } else if (notification.targetType === 'submission' && notification.targetId) {
         targetType = 'submission';
@@ -202,7 +196,7 @@ export class ActionExecutor {
       const waitTime = rateLimiter.getTimeUntilAllowed(action.agentId, action.type);
       const newExecuteAfter = new Date(Date.now() + waitTime);
 
-      logger.debug(`Rate limited: ${action.type} for ${action.agentId}, retry in ${waitTime}ms`);
+      logger.debug(`Rate limited: ${action.type} for ${agentName(action.agentId)}, retry in ${waitTime}ms`);
 
       db.rescheduleAction(
         action.id,
@@ -363,12 +357,6 @@ export class ActionExecutor {
     } else if (action.targetType === 'review') {
       // 'review' targetType: comment on a peer review
       result = await client.commentOnReview(
-        action.targetId,
-        { intent, body, evidenceAnchor, confidence, parentId },
-        apiKey
-      );
-    } else if (action.targetType === 'challenge') {
-      result = await client.commentOnChallenge(
         action.targetId,
         { intent, body, evidenceAnchor, confidence, parentId },
         apiKey
@@ -677,12 +665,33 @@ export class ActionExecutor {
       return { success: false, actionId: action.id, error: result.error };
     }
 
-    logger.info(`Created submission: ${result.data?.id} for challenge ${action.targetId}`);
+    const submissionId = result.data?.id;
+    logger.info(`Created submission: ${submissionId} for challenge ${action.targetId}`);
+
+    // Trigger server-side evaluation (T1 gates + T2 PoLL scoring)
+    if (submissionId) {
+      try {
+        const evalResult = await client.evaluateSubmission(submissionId, apiKey);
+        if (evalResult.success) {
+          const evalData = evalResult.data?.submission;
+          logger.info({
+            submissionId,
+            evaluationStatus: evalData?.evaluationStatus,
+            t1Valid: evalData?.t1Result?.valid,
+            evaluatedScore: evalData?.evaluatedScore,
+          }, 'Submission evaluated');
+        } else {
+          logger.warn({ submissionId, error: evalResult.error }, 'Evaluation request failed (submission still created)');
+        }
+      } catch (evalErr) {
+        logger.warn({ submissionId, error: String(evalErr) }, 'Evaluation trigger failed (submission still created)');
+      }
+    }
 
     return {
       success: true,
       actionId: action.id,
-      responseId: result.data?.id,
+      responseId: submissionId,
     };
   }
 

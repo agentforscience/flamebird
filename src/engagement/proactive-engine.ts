@@ -26,10 +26,14 @@ const logger = createLogger('proactive');
 
 /** Resolve agent ID to @handle for readable logs. Falls back to last 8 chars of ID. */
 function agentName(agentId: string): string {
-  const runtime = getAgentManager().getRuntime(agentId);
-  if (!runtime) return agentId.slice(-12);
-  const dn = runtime.config.displayName;
-  return dn && dn !== runtime.config.handle ? `@${runtime.config.handle} (${dn})` : `@${runtime.config.handle}`;
+  try {
+    const runtime = getAgentManager().getRuntime(agentId);
+    if (!runtime) return agentId.slice(-12);
+    const dn = runtime.config.displayName;
+    return dn && dn !== runtime.config.handle ? `@${runtime.config.handle} (${dn})` : `@${runtime.config.handle}`;
+  } catch {
+    return agentId.slice(-12);
+  }
 }
 
 function agentLog(agentId: string) {
@@ -62,7 +66,7 @@ interface FeedSnapshot {
     commentBody: string;
     commentAuthorId: string;
     rootId: string;
-    rootType: 'paper' | 'take' | 'review';
+    rootType: 'paper' | 'take' | 'review' | 'submission';
     rootTitle?: string;
     reciprocityMultiplier: number;
     threadParticipantCount: number;  // How many unique agents are in this thread
@@ -414,8 +418,7 @@ export class ProactiveEngine {
       const snapshot = await this.browseFeed(agentId, agent.config.persona, apiKey);
       logger.info(
         {
-          agent: agentName(agentId),
-          agentId,
+          ...agentLog(agentId),
           papers: snapshot.papers.length,
           takes: snapshot.takes.length,
           reviews: snapshot.reviews.length,
@@ -440,6 +443,8 @@ export class ProactiveEngine {
       // ── Phase 3: AUTHOR ──────────────────────────────────────────────
       // Reply to comments on own content (separate social contract)
       await this.discoverAuthorReplyOpportunities(agentId, agent.config.persona, apiKey);
+      // Reply to critiques on challenge submissions (author rebuttals + cross-submitter discussion)
+      await this.discoverSubmissionReplyOpportunities(agentId, agent.config.persona, apiKey, snapshot);
 
       // ── Phase 4: DECIDE ONE ──────────────────────────────────────────
       // Pick ONE creative action and execute it
@@ -680,7 +685,7 @@ export class ProactiveEngine {
       client.getFollowingFeed(apiKey, { limit: 20, type: 'all' }),
       client.getRandomFeed(apiKey),
       this.config.enableSciencesubJoining ? client.getSciencesubs(apiKey) : Promise.resolve({ success: false as const, data: undefined }),
-      client.getChallenges(apiKey, { status: 'open', limit: 10 }),
+      client.getChallenges(apiKey, { status: 'open', limit: 25 }),
     ]);
 
     // ── Collect & deduplicate papers ──
@@ -950,11 +955,11 @@ export class ProactiveEngine {
    * Score a challenge's relevance to the agent's persona (0-1).
    */
   private scoreChallenge(challenge: Agent4ScienceChallenge, persona: AgentPersona): number {
-    let score = 0.3; // base score
+    let score = 0.4; // base score — all open challenges are worth considering
 
-    // Topic relevance (0-0.4)
+    // Topic relevance (0-0.3)
     if (this.isTopicRelevant(challenge.tags || [], persona.preferredTopics)) {
-      score += 0.4;
+      score += 0.3;
     }
 
     // Recency bonus (0-0.15)
@@ -963,8 +968,8 @@ export class ProactiveEngine {
     else if (ageHours < 6) score += 0.10;
     else if (ageHours < 24) score += 0.05;
 
-    // Low submission count bonus (0-0.15) — less competition = more opportunity
-    if (challenge.submissionCount === 0) score += 0.15;
+    // Low submission count bonus (0-0.2) — unsolved challenges are high priority
+    if (challenge.submissionCount === 0) score += 0.20;
     else if (challenge.submissionCount < 3) score += 0.10;
     else if (challenge.submissionCount < 5) score += 0.05;
 
@@ -992,7 +997,7 @@ export class ProactiveEngine {
       .filter(t => (t.commentCount || 0) > 0)
       .sort((a, b) => (b.commentCount || 0) - (a.commentCount || 0));
 
-    const roots: { id: string; type: 'paper' | 'take' | 'review'; title?: string }[] = [];
+    const roots: { id: string; type: 'paper' | 'take' | 'review' | 'submission'; title?: string }[] = [];
     for (const p of papersWithComments.slice(0, 10)) {
       roots.push({ id: p.id, type: 'paper', title: p.title });
     }
@@ -1004,6 +1009,15 @@ export class ProactiveEngine {
       .sort((a, b) => (b.commentCount || 0) - (a.commentCount || 0));
     for (const r of reviewsWithComments.slice(0, 5)) {
       roots.push({ id: r.id, type: 'review', title: r.summary?.slice(0, 60) });
+    }
+
+    // Submissions with comments from browsed challenges
+    for (const ch of snapshot.challenges) {
+      for (const sub of ch.submissions) {
+        if ((sub.commentCount || 0) > 0) {
+          roots.push({ id: sub.id, type: 'submission', title: sub.title });
+        }
+      }
     }
 
     // Fallback: if no content has comments yet, scan top papers/takes/reviews by relevance
@@ -1023,8 +1037,7 @@ export class ProactiveEngine {
     roots.sort(() => Math.random() - 0.5);
 
     logger.info({
-      agent: agentName(agentId),
-      agentId,
+      ...agentLog(agentId),
       papersWithComments: papersWithComments.length,
       takesWithComments: takesWithComments.length,
       reviewsWithComments: reviewsWithComments.length,
@@ -1045,12 +1058,14 @@ export class ProactiveEngine {
           const data = threadResult.data;
           comments = Array.isArray(data) ? data : (data as { comments?: ReplyableComment[] }).comments ?? [];
         } else {
-          // Fallback: fetch comments directly from paper/take/review comments endpoint
+          // Fallback: fetch comments directly from paper/take/review/submission comments endpoint
           const fallbackResult = rootType === 'paper'
             ? await client.getPaperComments(rootId, apiKey)
             : rootType === 'review'
               ? await client.getReviewComments(rootId, apiKey)
-              : await client.getTakeComments(rootId, apiKey);
+              : rootType === 'submission'
+                ? await client.getSubmissionComments(rootId, apiKey)
+                : await client.getTakeComments(rootId, apiKey);
           if (fallbackResult.success && fallbackResult.data) {
             const fbData = fallbackResult.data;
             comments = Array.isArray(fbData) ? fbData : (fbData as { comments?: ReplyableComment[] }).comments ?? [];
@@ -1062,8 +1077,7 @@ export class ProactiveEngine {
         }
 
         logger.info({
-          agent: agentName(agentId),
-          agentId,
+          ...agentLog(agentId),
           rootId: rootId.slice(-8),
           rootType,
           totalComments: comments.length,
@@ -1166,8 +1180,8 @@ export class ProactiveEngine {
     let votesQueued = 0;
     const maxVotes = 3;
 
-    // Mix papers, takes, and reviews for voting
-    const voteTargets: Array<{ id: string; type: 'paper' | 'take' | 'review'; direction: 'up' | 'down' }> = [];
+    // Mix papers, takes, reviews, and submissions for voting
+    const voteTargets: Array<{ id: string; type: 'paper' | 'take' | 'review' | 'submission'; direction: 'up' | 'down' }> = [];
 
     for (const paper of snapshot.papers) {
       if (!db.hasEngaged(agentId, paper.id)) {
@@ -1183,6 +1197,15 @@ export class ProactiveEngine {
     for (const review of snapshot.reviews) {
       if (!db.hasEngaged(agentId, review.id)) {
         voteTargets.push({ id: review.id, type: 'review', direction: 'up' });
+      }
+    }
+    // Vote on challenge submissions — upvote relevant ones, downvote if stance conflicts
+    for (const challenge of snapshot.challenges) {
+      for (const sub of challenge.submissions) {
+        if (sub.agentId === agentId) continue; // don't vote on own submission
+        if (!db.hasEngaged(agentId, sub.id, 'vote')) {
+          voteTargets.push({ id: sub.id, type: 'submission', direction: 'up' });
+        }
       }
     }
 
@@ -1233,11 +1256,16 @@ export class ProactiveEngine {
       }
     }
 
-    // ── Auto-join sciencesubs from browsed takes ──
+    // ── Auto-join sciencesubs from browsed takes and challenges ──
     const autoJoinSlugs = new Set<string>();
     for (const take of snapshot.takes) {
       if (take.sciencesub && !db.hasJoinedSciencesub(agentId, take.sciencesub)) {
         autoJoinSlugs.add(take.sciencesub);
+      }
+    }
+    for (const challenge of snapshot.challenges) {
+      if (challenge.sciencesub && !db.hasJoinedSciencesub(agentId, challenge.sciencesub)) {
+        autoJoinSlugs.add(challenge.sciencesub);
       }
     }
     for (const slug of autoJoinSlugs) {
@@ -1382,7 +1410,7 @@ export class ProactiveEngine {
             }
             const eligible = snapshot.challenges.filter(c => !db.hasEngaged(agentId, c.id, 'submission'));
             if (eligible.length > 0 && rateLimiter.canPerform(agentId, 'submission')) {
-              const idx = Math.floor(Math.random() * Math.min(eligible.length, 3));
+              const idx = Math.floor(Math.random() * Math.min(eligible.length, 5));
               const challenge = eligible[idx];
               logger.info({ ...agentLog(agentId), action, attempt }, `${agentName(agentId)} → attempt_challenge "${challenge.title}"`);
               await this.queueChallengeAttempt(agentId, challenge, persona, apiKey);
@@ -1392,14 +1420,30 @@ export class ProactiveEngine {
           }
 
           case 'comment_submission': {
-            // Comment on a submission from one of the open challenges
+            // Comment on a submission from one of the open challenges.
+            // Prefer challenges where the agent already submitted (for comparative peer critique).
             const challengesWithSubs = snapshot.challenges.filter(c => c.submissions.length > 0);
             if (challengesWithSubs.length > 0 && rateLimiter.canPerform(agentId, 'comment')) {
-              const ch = challengesWithSubs[Math.floor(Math.random() * challengesWithSubs.length)];
-              const sub = ch.submissions.find(s => s.agentId !== agentId && !db.hasEngaged(agentId, s.id, 'comment'));
+              // Prioritize challenges where this agent has their own submission
+              const withOwnSub = challengesWithSubs.filter(c => db.hasEngaged(agentId, c.id, 'submission'));
+              const pool = withOwnSub.length > 0 ? withOwnSub : challengesWithSubs;
+              const ch = pool[Math.floor(Math.random() * pool.length)];
+              // Pick the submission with fewest comments (distribute critiques evenly)
+              const eligible = ch.submissions
+                .filter(s => s.agentId !== agentId && !db.hasEngaged(agentId, s.id, 'comment'))
+                .sort((a, b) => (a.commentCount || 0) - (b.commentCount || 0));
+              const sub = eligible[0];
               if (sub) {
-                logger.info({ ...agentLog(agentId), action, attempt }, `${agentName(agentId)} → comment_submission "${sub.title}"`);
-                await this.queueCommentOnSubmission(agentId, sub, ch, persona);
+                // If agent has own submission to this challenge, find it for comparative critique
+                let ownSub: { title: string; approach: string; body: string } | undefined;
+                if (db.hasEngaged(agentId, ch.id, 'submission')) {
+                  const agentSub = ch.submissions.find(s => s.agentId === agentId);
+                  if (agentSub) {
+                    ownSub = { title: agentSub.title, approach: agentSub.approach, body: agentSub.body };
+                  }
+                }
+                logger.info({ ...agentLog(agentId), action, attempt, comparative: !!ownSub }, `${agentName(agentId)} → comment_submission "${sub.title}"`);
+                await this.queueCommentOnSubmission(agentId, sub, ch, persona, ownSub);
                 return;
               }
             }
@@ -1472,19 +1516,69 @@ export class ProactiveEngine {
         if (review) {
           rootContent = [review.summary, review.strengths?.join('; '), review.weaknesses?.join('; '), review.suggestions].filter(Boolean).join('\n\n');
         }
+      } else if (target.rootType === 'submission') {
+        // Find the submission and its challenge from the snapshot
+        for (const ch of snapshot.challenges) {
+          const sub = ch.submissions.find(s => s.id === target.rootId);
+          if (sub) {
+            rootContent = `Challenge: ${ch.title}\nSubmission: ${sub.title}\nApproach: ${sub.approach}\n\n${sub.body.slice(0, 800)}`;
+            break;
+          }
+        }
       }
     } catch {
       // Non-critical — we still have thread context
     }
 
-    const generated = await llm.generateComment(persona, {
-      targetType: 'comment',
-      targetContent: target.commentBody,
-      parentContent: rootContent,
-      threadContext: threadContext || undefined,
-      triggerType: 'reply',
-      fromAgent: target.commentAuthorId,
-    });
+    // For submission threads, use specialized rebuttal generation instead of generic comments
+    let generated;
+    if (target.rootType === 'submission') {
+      // Find the challenge + agent's own submission for rebuttal context
+      let challengeCtx: { title: string; description: string; tags: string[] } | undefined;
+      let ownSubCtx: { title: string; approach: string; body: string } | undefined;
+      for (const ch of snapshot.challenges) {
+        const targetSub = ch.submissions.find(s => s.id === target.rootId);
+        if (targetSub) {
+          challengeCtx = { title: ch.title, description: ch.description, tags: ch.tags };
+          // If agent is the author, use the target submission; otherwise use their own
+          if (targetSub.agentId === agentId) {
+            ownSubCtx = { title: targetSub.title, approach: targetSub.approach, body: targetSub.body };
+          } else {
+            const own = ch.submissions.find(s => s.agentId === agentId);
+            if (own) ownSubCtx = { title: own.title, approach: own.approach, body: own.body };
+          }
+          break;
+        }
+      }
+      if (challengeCtx && ownSubCtx) {
+        generated = await llm.generateSubmissionRebuttal(
+          persona,
+          challengeCtx,
+          ownSubCtx,
+          { body: target.commentBody, authorHandle: target.commentAuthorId },
+          threadContext || undefined
+        );
+      } else {
+        // Fallback to generic comment if we can't find context
+        generated = await llm.generateComment(persona, {
+          targetType: 'comment',
+          targetContent: target.commentBody,
+          parentContent: rootContent,
+          threadContext: threadContext || undefined,
+          triggerType: 'reply',
+          fromAgent: target.commentAuthorId,
+        });
+      }
+    } else {
+      generated = await llm.generateComment(persona, {
+        targetType: 'comment',
+        targetContent: target.commentBody,
+        parentContent: rootContent,
+        threadContext: threadContext || undefined,
+        triggerType: 'reply',
+        fromAgent: target.commentAuthorId,
+      });
+    }
 
     // Check similarity to recent comments
     if (isTooSimilarToRecent(agentId, generated.body, db, 0.7, 10)) {
@@ -1684,6 +1778,107 @@ export class ProactiveEngine {
         logger.info(`${agentName(agentId)} (author) queued reply to comment ${target.id} on their ${rootType}`);
       } catch (error) {
         logger.debug({ err: error, ...agentLog(agentId), rootId }, 'Author reply discovery skip');
+      }
+    }
+  }
+
+  /**
+   * Discover reply opportunities on challenge submissions.
+   * Two modes:
+   *   1. AUTHOR REBUTTAL — agent's own submission was critiqued → defend/concede with math
+   *   2. CROSS-SUBMITTER — agent submitted to same challenge → join discussion on sibling submissions
+   */
+  private async discoverSubmissionReplyOpportunities(
+    agentId: string,
+    persona: AgentPersona,
+    apiKey: string,
+    snapshot: FeedSnapshot
+  ): Promise<void> {
+    const client = getAgent4ScienceClient();
+    const executor = getActionExecutor();
+    const rateLimiter = getRateLimiter();
+    const llm = getLLMClient();
+    const db = getDatabase();
+
+    if (!rateLimiter.canPerform(agentId, 'comment')) return;
+
+    let repliesQueued = 0;
+    const maxRepliesPerCycle = 2;
+
+    type ReplyableComment = { id: string; body: string; agentId?: string; parentId?: string | null; depth?: number; intent?: string; agent?: { handle?: string } };
+
+    for (const challenge of snapshot.challenges) {
+      if (repliesQueued >= maxRepliesPerCycle) break;
+      if (challenge.submissions.length === 0) continue;
+
+      // Find agent's own submission to this challenge
+      const ownSub = challenge.submissions.find(s => s.agentId === agentId);
+
+      for (const sub of challenge.submissions) {
+        if (repliesQueued >= maxRepliesPerCycle) break;
+        if ((sub.commentCount || 0) === 0) continue;
+
+        try {
+          // Fetch comments on this submission
+          const commentsResult = await client.getSubmissionComments(sub.id, apiKey);
+          if (!commentsResult.success || !commentsResult.data) continue;
+          const comments = Array.isArray(commentsResult.data)
+            ? commentsResult.data as ReplyableComment[]
+            : ((commentsResult.data as { comments?: ReplyableComment[] }).comments ?? []);
+
+          if (comments.length === 0) continue;
+
+          // Find unreplied critiques (from other agents, not already responded to)
+          const unreplied = comments.filter(
+            (c) => c.agentId && c.agentId !== agentId && c.id && c.body && !db.hasEngaged(agentId, c.id)
+          );
+          if (unreplied.length === 0) continue;
+
+          const target = unreplied[0]; // oldest first
+
+          // Build thread context from other comments
+          const threadContext = comments
+            .filter(c => c.id !== target.id && c.body)
+            .map(c => `@${c.agent?.handle || c.agentId?.slice(-8) || 'unknown'} [${(c as { intent?: string }).intent || '?'}]: "${(c.body || '').slice(0, 200)}"`)
+            .join('\n');
+
+          const isAuthor = sub.agentId === agentId;
+          // Use the agent's own submission for context (theirs if author, or their own if cross-submitter)
+          const contextSub = isAuthor
+            ? { title: sub.title, approach: sub.approach, body: sub.body }
+            : ownSub
+              ? { title: ownSub.title, approach: ownSub.approach, body: ownSub.body }
+              : null;
+
+          if (!contextSub) continue; // Agent has no submission to this challenge — skip
+
+          const generated = await llm.generateSubmissionRebuttal(
+            persona,
+            { title: challenge.title, description: challenge.description, tags: challenge.tags },
+            contextSub,
+            { body: target.body, authorHandle: target.agent?.handle || target.agentId?.slice(-8), intent: (target as { intent?: string }).intent },
+            threadContext ? (isAuthor ? '' : 'YOU ARE JOINING a discussion on a sibling submission.\n') + threadContext : undefined
+          );
+
+          if (!generated.body) continue;
+
+          const payload = {
+            intent: generated.intent ?? 'clarify',
+            body: generated.body,
+            confidence: generated.confidence ?? 0.8,
+            parentId: target.id,
+          };
+
+          executor.queueAction(agentId, 'comment', sub.id, 'submission', payload, 'high');
+          db.recordEngagement(agentId, target.id, 'comment', 'comment');
+          if (target.agentId) db.recordInteraction(agentId, target.agentId, 'reply');
+
+          repliesQueued++;
+          const mode = isAuthor ? 'author rebuttal' : 'cross-submitter';
+          logger.info(`${agentName(agentId)} queued ${mode} reply on submission "${sub.title.slice(0, 40)}"`);
+        } catch (error) {
+          logger.debug({ err: error, ...agentLog(agentId), subId: sub.id }, 'Submission reply discovery skip');
+        }
       }
     }
   }
@@ -2001,7 +2196,7 @@ export class ProactiveEngine {
    */
   private async getThreadContext(
     rootId: string,
-    _rootType: 'paper' | 'take' | 'review',
+    _rootType: 'paper' | 'take' | 'review' | 'submission',
     commentId: string,
     apiKey: string,
     maxDepth: number = 5
@@ -2213,6 +2408,27 @@ export class ProactiveEngine {
         }
       }
 
+      // Check if this agent already submitted to this challenge (platform truth).
+      // Only allow re-submission if explicitly improving on a prior submission.
+      const ownSubmissions = submissions.filter(s => s.agentId === agentId);
+      if (ownSubmissions.length > 0) {
+        logger.info(
+          { ...agentLog(agentId), challengeId: challenge.id, existing: ownSubmissions.length },
+          'Skipping challenge — agent already submitted'
+        );
+        // Ensure local DB is in sync so we don't keep re-checking
+        if (!db.hasEngaged(agentId, challenge.id, 'submission')) {
+          db.recordEngagement(agentId, challenge.id, 'challenge', 'submission');
+        }
+        return;
+      }
+
+      // Also check pending action queue to prevent double-queuing within same cycle
+      if (db.hasPendingAction(agentId, 'submission')) {
+        logger.debug({ ...agentLog(agentId), challengeId: challenge.id }, 'Skipping — submission already pending in action queue');
+        return;
+      }
+
       // Ask LLM whether to attempt
       const decision = await llm.decideChallenge(
         persona,
@@ -2231,13 +2447,22 @@ export class ProactiveEngine {
         improvesUponSub = submissions.find(s => s.id === decision.improvesUpon);
       }
 
-      // Generate solution
+      // Fetch platform skill.md for quality guidance
+      const skillMdContext = await client.fetchSkillMd();
+
+      // Generate solution (returns null if quality gate blocks submission)
       const solution = await llm.generateSolution(
         persona,
         { title: challenge.title, description: challenge.description, tags: challenge.tags },
         submissions.slice(0, 3).map(s => ({ title: s.title, approach: s.approach, body: s.body })),
-        improvesUponSub ? { id: improvesUponSub.id, title: improvesUponSub.title, approach: improvesUponSub.approach, body: improvesUponSub.body } : undefined
+        improvesUponSub ? { id: improvesUponSub.id, title: improvesUponSub.title, approach: improvesUponSub.approach, body: improvesUponSub.body } : undefined,
+        skillMdContext || undefined
       );
+
+      if (!solution) {
+        logger.info({ ...agentLog(agentId), challengeId: challenge.id }, 'Quality gate blocked submission — solution did not pass verification');
+        return;
+      }
 
       executor.queueAction(
         agentId,
@@ -2250,43 +2475,113 @@ export class ProactiveEngine {
 
       db.recordEngagement(agentId, challenge.id, 'challenge', 'submission');
       logger.info({ ...agentLog(agentId), challengeId: challenge.id, title: solution.title }, 'Queued challenge submission');
+
+      // Auto-queue peer critiques on sibling submissions (up to 2)
+      // Sort by fewest comments first so critiques are distributed evenly across submissions
+      const siblings = submissions
+        .filter(s => s.agentId !== agentId && !db.hasEngaged(agentId, s.id, 'comment'))
+        .sort((a, b) => (a.commentCount || 0) - (b.commentCount || 0));
+      for (const sibling of siblings.slice(0, 2)) {
+        try {
+          // Fetch existing comments so the agent doesn't repeat what others already said
+          let existingComments: string[] = [];
+          try {
+            const commentsResult = await client.getSubmissionComments(sibling.id, apiKey);
+            if (commentsResult.success && commentsResult.data) {
+              const comments = Array.isArray(commentsResult.data)
+                ? commentsResult.data
+                : (commentsResult.data as { comments?: { body?: string; agent?: { handle?: string }; intent?: string }[] }).comments ?? [];
+              existingComments = comments
+                .filter((c: any) => c.body)
+                .map((c: any) => `@${c.agent?.handle || 'unknown'} [${c.intent || '?'}]: ${c.body}`);
+            }
+          } catch {
+            // Non-critical — proceed without existing comments
+          }
+
+          const critique = await llm.generateSubmissionCritique(
+            persona,
+            { title: challenge.title, description: challenge.description, tags: challenge.tags },
+            { title: solution.title, approach: solution.approach, body: solution.body },
+            { title: sibling.title, approach: sibling.approach, body: sibling.body },
+            existingComments.length > 0 ? existingComments : undefined
+          );
+          executor.queueAction(agentId, 'comment', sibling.id, 'submission', critique as unknown as Record<string, unknown>, 'normal');
+          db.recordEngagement(agentId, sibling.id, 'submission', 'comment');
+          logger.info({ ...agentLog(agentId), siblingId: sibling.id }, `${agentName(agentId)} auto-queued peer critique on "${sibling.title}"`);
+        } catch (critiqueErr) {
+          logger.error({ err: critiqueErr, ...agentLog(agentId), siblingId: sibling.id }, 'Failed to generate peer critique');
+        }
+      }
     } catch (error) {
       logger.error({ err: error, ...agentLog(agentId), challengeId: challenge.id }, 'Failed to generate challenge solution');
     }
   }
 
   /**
-   * Queue a comment on a challenge submission
+   * Queue a comment on a challenge submission.
+   * When ownSubmission is provided, generates a comparative peer critique instead of a generic comment.
    */
   private async queueCommentOnSubmission(
     agentId: string,
     submission: Agent4ScienceSubmission,
     challenge: Agent4ScienceChallenge,
-    persona: AgentPersona
+    persona: AgentPersona,
+    ownSubmission?: { title: string; approach: string; body: string }
   ): Promise<void> {
     const llm = getLLMClient();
     const executor = getActionExecutor();
     const db = getDatabase();
+    const client = getAgent4ScienceClient();
 
     try {
-      const targetContent = [
-        `Challenge: ${challenge.title}`,
-        `Submission: ${submission.title}`,
-        `Approach: ${submission.approach}`,
-        submission.body.slice(0, 1000),
-      ].join('\n\n');
+      let comment;
+      if (ownSubmission) {
+        // Fetch existing comments so the agent doesn't repeat what others already said
+        let existingComments: string[] = [];
+        try {
+          const commentsResult = await client.getSubmissionComments(submission.id, '');
+          if (commentsResult.success && commentsResult.data) {
+            const comments = Array.isArray(commentsResult.data)
+              ? commentsResult.data
+              : (commentsResult.data as { comments?: { body?: string; agent?: { handle?: string }; intent?: string }[] }).comments ?? [];
+            existingComments = comments
+              .filter((c: any) => c.body && c.agentId !== agentId)
+              .map((c: any) => `@${c.agent?.handle || 'unknown'} [${c.intent || '?'}]: ${c.body}`);
+          }
+        } catch {
+          // Non-critical — proceed without existing comments
+        }
 
-      const comment = await llm.generateComment(persona, {
-        targetType: 'comment',
-        targetContent,
-        triggerType: 'new_content',
-        rootTitle: challenge.title,
-        rootType: 'submission',
-      });
+        // Comparative peer critique — agent has their own submission to this challenge
+        comment = await llm.generateSubmissionCritique(
+          persona,
+          { title: challenge.title, description: challenge.description, tags: challenge.tags },
+          ownSubmission,
+          { title: submission.title, approach: submission.approach, body: submission.body },
+          existingComments.length > 0 ? existingComments : undefined
+        );
+      } else {
+        // Generic comment — agent hasn't submitted to this challenge
+        const targetContent = [
+          `Challenge: ${challenge.title}`,
+          `Submission: ${submission.title}`,
+          `Approach: ${submission.approach}`,
+          submission.body.slice(0, 1000),
+        ].join('\n\n');
+
+        comment = await llm.generateComment(persona, {
+          targetType: 'comment',
+          targetContent,
+          triggerType: 'new_content',
+          rootTitle: challenge.title,
+          rootType: 'submission',
+        });
+      }
 
       executor.queueAction(agentId, 'comment', submission.id, 'submission', comment as unknown as Record<string, unknown>, 'normal');
       db.recordEngagement(agentId, submission.id, 'submission', 'comment');
-      logger.info(`${agentName(agentId)} queued comment on submission "${submission.title}"`);
+      logger.info(`${agentName(agentId)} queued ${ownSubmission ? 'peer critique' : 'comment'} on submission "${submission.title}"`);
     } catch (error) {
       logger.error({ err: error, ...agentLog(agentId), submissionId: submission.id }, 'Failed to generate comment on submission');
     }
