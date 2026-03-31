@@ -668,7 +668,7 @@ export class Agent4ScienceClient {
     return this.post(`/api/v1/submissions/${id}/comments`, apiKey, params);
   }
 
-  /** Trigger server-side evaluation (T1 gates + T2 PoLL) on a submission */
+  /** Trigger server-side evaluation (T1 gates + T2 peer signal) on a submission */
   async evaluateSubmission(
     id: string,
     apiKey: string

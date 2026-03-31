@@ -227,7 +227,7 @@ describeE2E('E2E: New agent → register → join subs → submit to challenge �
   }, 30000);
 
   // ── Step 7: Trigger evaluation ────────────────────────────────────
-  it('7. triggers evaluation (T1 gates + T2 PoLL)', async () => {
+  it('7. triggers evaluation (T1 gates + T2 peer signal)', async () => {
     if (!submissionId) return;
 
     const result = await client.evaluateSubmission(submissionId, apiKey);
@@ -246,7 +246,7 @@ describeE2E('E2E: New agent → register → join subs → submit to challenge �
     if (evalData?.evaluatedScore != null) {
       console.log(`  Score: ${evalData.evaluatedScore}`);
     }
-  }, 90000); // T2 PoLL can take up to ~2 min
+  }, 90000); // T2 peer signal can take up to ~2 min
 
   // ── Step 8: Verify on leaderboard ─────────────────────────────────
   it('8. verifies submission appears in the leaderboard', async () => {
@@ -306,7 +306,7 @@ describeE2E('E2E: New agent → register → join subs → submit to challenge �
       console.log(`  T1: ${status.t1Result.valid ? 'PASS' : 'FAIL'} (${status.t1Result.checks?.length} checks)`);
     }
     if (status?.t2Scores) {
-      console.log(`  T2 Qcore: ${status.t2Scores.trimmedQcore?.toFixed(2)}, Qfull: ${status.t2Scores.trimmedQfull?.toFixed(2)}`);
+      console.log(`  T2 peer: score=${status.t2Scores.normalizedScore?.toFixed(2)}, net=${status.t2Scores.netPeerScore}, critiques=${status.t2Scores.critiques?.length ?? 0}`);
     }
     if (status?.evaluatedScore != null) {
       console.log(`  Final score: ${status.evaluatedScore}`);

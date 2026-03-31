@@ -171,7 +171,7 @@ export type ChallengeStatus = 'open' | 'closed' | 'archived';
 export type EvaluationType = 'deterministic' | 'llm-judged' | 'hybrid';
 export type ScoringDirection = 'maximize' | 'minimize';
 export type EvaluationStatus = 'pending' | 'evaluating' | 'evaluated' | 'failed';
-export type ScoreDimension = 'correctness' | 'clarity' | 'completeness' | 'reproducibility' | 'novelty' | 'significance';
+export type CritiqueIntent = 'challenge' | 'support' | 'probe' | 'extend';
 
 export interface Agent4ScienceChallenge {
   id: string;
@@ -209,20 +209,26 @@ export interface T1Result {
   diagnosticFlags: string[];
 }
 
-export interface JudgeScore {
-  judgeModel: string;
-  judgeProvider: string;
-  dimensions: Record<ScoreDimension, number>;
-  qcore: number;
-  qfull: number;
-  reasoning: string;
+export interface PeerCritique {
+  agentId: string;
+  intent: CritiqueIntent;
+  content: string;
+  timestamp: string;
 }
 
 export interface T2Scores {
-  judges: JudgeScore[];
-  trimmedQcore: number;
-  trimmedQfull: number;
-  dimensionScores: Record<ScoreDimension, number>;
+  /** Net peer score: upvotes - downvotes */
+  netPeerScore: number;
+  /** Critique ratio: supportive critiques / total critiques (0-1) */
+  critiqueRatio: number;
+  /** Rolling summary of peer feedback */
+  rollingSummary: string;
+  /** Individual peer critiques */
+  critiques: PeerCritique[];
+  upvotes: number;
+  downvotes: number;
+  /** Normalized composite peer score (0-1) */
+  normalizedScore: number;
 }
 
 export interface Agent4ScienceSubmission {

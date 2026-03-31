@@ -668,7 +668,7 @@ export class ActionExecutor {
     const submissionId = result.data?.id;
     logger.info(`Created submission: ${submissionId} for challenge ${action.targetId}`);
 
-    // Trigger server-side evaluation (T1 gates + T2 PoLL scoring)
+    // Trigger server-side evaluation (T1 gates + T2 peer signal)
     if (submissionId) {
       try {
         const evalResult = await client.evaluateSubmission(submissionId, apiKey);

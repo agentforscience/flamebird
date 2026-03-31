@@ -16,7 +16,7 @@ import type {
 import { getAgent4ScienceClient } from '../api/agent4science-client.js';
 import { getAgentManager } from '../agents/agent-manager.js';
 import { getActionExecutor } from '../actions/action-executor.js';
-import { getLLMClient } from '../llm/llm-client.js';
+import { getLLMClient, getOrCreateLLMClient } from '../llm/llm-client.js';
 import { getDatabase } from '../db/database.js';
 import { getRateLimiter } from '../rate-limit/rate-limiter.js';
 import { createLogger } from '../logging/logger.js';
@@ -341,6 +341,16 @@ export class ProactiveEngine {
     this.config = config;
   }
 
+  /** Resolve the LLM client for a given agent, using per-agent model override if configured. */
+  private llmFor(agentId: string) {
+    try {
+      const agent = getAgentManager().getRuntime(agentId);
+      return getOrCreateLLMClient(agent?.config.llmOverride);
+    } catch {
+      return getLLMClient();
+    }
+  }
+
   /**
    * Pick ONE creative action type using action weights from config.
    * Weights are set via settings.json / play menu — no hardcoded fallback.
@@ -561,7 +571,7 @@ export class ProactiveEngine {
       return;
     }
 
-    const llm = getLLMClient();
+    const llm = this.llmFor(agentId);
     const client = getAgent4ScienceClient();
     const executor = getActionExecutor();
 
@@ -1471,7 +1481,7 @@ export class ProactiveEngine {
     apiKey: string,
     snapshot: FeedSnapshot
   ): Promise<boolean> {
-    const llm = getLLMClient();
+    const llm = this.llmFor(agentId);
     const executor = getActionExecutor();
     const db = getDatabase();
 
@@ -1614,7 +1624,7 @@ export class ProactiveEngine {
     apiKey: string,
     snapshot: FeedSnapshot
   ): Promise<void> {
-    const llm = getLLMClient();
+    const llm = this.llmFor(agentId);
     const client = getAgent4ScienceClient();
     const executor = getActionExecutor();
 
@@ -1689,7 +1699,7 @@ export class ProactiveEngine {
     const client = getAgent4ScienceClient();
     const executor = getActionExecutor();
     const rateLimiter = getRateLimiter();
-    const llm = getLLMClient();
+    const llm = this.llmFor(agentId);
     const db = getDatabase();
 
     if (!rateLimiter.canPerform(agentId, 'comment')) return;
@@ -1797,7 +1807,7 @@ export class ProactiveEngine {
     const client = getAgent4ScienceClient();
     const executor = getActionExecutor();
     const rateLimiter = getRateLimiter();
-    const llm = getLLMClient();
+    const llm = this.llmFor(agentId);
     const db = getDatabase();
 
     if (!rateLimiter.canPerform(agentId, 'comment')) return;
@@ -2063,7 +2073,7 @@ export class ProactiveEngine {
     persona: AgentPersona,
     existingTakes: string[] = []
   ): Promise<void> {
-    const llm = getLLMClient();
+    const llm = this.llmFor(agentId);
     const client = getAgent4ScienceClient();
     const executor = getActionExecutor();
     const db = getDatabase();
@@ -2125,7 +2135,7 @@ export class ProactiveEngine {
     paper: Agent4SciencePaper,
     persona: AgentPersona
   ): Promise<void> {
-    const llm = getLLMClient();
+    const llm = this.llmFor(agentId);
     const client = getAgent4ScienceClient();
     const executor = getActionExecutor();
     const db = getDatabase();
@@ -2304,7 +2314,7 @@ export class ProactiveEngine {
     paper: Agent4SciencePaper,
     persona: AgentPersona
   ): Promise<void> {
-    const llm = getLLMClient();
+    const llm = this.llmFor(agentId);
     const executor = getActionExecutor();
     const db = getDatabase();
 
@@ -2331,7 +2341,7 @@ export class ProactiveEngine {
     take: Agent4ScienceTake,
     persona: AgentPersona
   ): Promise<void> {
-    const llm = getLLMClient();
+    const llm = this.llmFor(agentId);
     const executor = getActionExecutor();
     const db = getDatabase();
 
@@ -2358,7 +2368,7 @@ export class ProactiveEngine {
     review: Agent4ScienceReview & { relevanceScore: number },
     persona: AgentPersona
   ): Promise<void> {
-    const llm = getLLMClient();
+    const llm = this.llmFor(agentId);
     const executor = getActionExecutor();
     const db = getDatabase();
 
@@ -2393,7 +2403,7 @@ export class ProactiveEngine {
     persona: AgentPersona,
     apiKey: string
   ): Promise<void> {
-    const llm = getLLMClient();
+    const llm = this.llmFor(agentId);
     const executor = getActionExecutor();
     const db = getDatabase();
     const client = getAgent4ScienceClient();
@@ -2529,7 +2539,7 @@ export class ProactiveEngine {
     persona: AgentPersona,
     ownSubmission?: { title: string; approach: string; body: string }
   ): Promise<void> {
-    const llm = getLLMClient();
+    const llm = this.llmFor(agentId);
     const executor = getActionExecutor();
     const db = getDatabase();
     const client = getAgent4ScienceClient();

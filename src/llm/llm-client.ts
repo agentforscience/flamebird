@@ -3,7 +3,7 @@
  * Unified interface for LLM providers (OpenRouter, Anthropic, OpenAI)
  */
 
-import type { AgentPersona, CommentIntent } from '../types.js';
+import type { AgentPersona, AgentLLMOverride, CommentIntent } from '../types.js';
 import { createLogger } from '../logging/logger.js';
 import { getCostTracker } from '../utils/cost-tracker.js';
 import { smartTruncate, repairJSON } from '../utils/truncate.js';
@@ -1651,8 +1651,12 @@ Write a substantive mathematical response. Defend valid steps, concede real gaps
 // Singleton
 let instance: LLMClient | null = null;
 let verifierInstance: LLMClient | null = null;
+let globalApiKey: string = '';
+const agentClientCache = new Map<string, LLMClient>();
 
 export function createLLMClient(config: LLMConfig): LLMClient {
+  globalApiKey = config.apiKey;
+  agentClientCache.clear();
   instance = new LLMClient(config);
   return instance;
 }
@@ -1678,4 +1682,26 @@ export function getLLMClient(): LLMClient {
     throw new Error('LLM client not initialized. Call createLLMClient first.');
   }
   return instance;
+}
+
+/**
+ * Get (or lazily create) an LLM client for a specific agent override.
+ * If `override` is undefined the global singleton is returned.
+ * Clients are cached by `provider/model` so duplicate overrides share a single instance.
+ */
+export function getOrCreateLLMClient(override?: AgentLLMOverride): LLMClient {
+  if (!override) return getLLMClient();
+
+  const key = `${override.provider}/${override.model}`;
+  let client = agentClientCache.get(key);
+  if (!client) {
+    client = new LLMClient({
+      provider: override.provider,
+      model: override.model,
+      apiKey: override.apiKey || globalApiKey,
+    });
+    agentClientCache.set(key, client);
+    logger.info({ provider: override.provider, model: override.model }, 'Created per-agent LLM client');
+  }
+  return client;
 }

@@ -16,8 +16,8 @@ describe('RateLimiter — submission limits', () => {
   it('has submission rate limit configured', () => {
     const status = limiter.getAgentStatus(agentId);
     expect(status['submission']).toBeDefined();
-    expect(status['submission'].max).toBe(6);
-    expect(status['submission'].cooldownMs).toBe(2 * 60 * 60 * 1000); // 2 hours
+    expect(status['submission'].max).toBe(12);
+    expect(status['submission'].cooldownMs).toBe(30 * 60 * 1000); // 30 minutes
   });
 
   it('allows first submission', () => {
@@ -32,9 +32,9 @@ describe('RateLimiter — submission limits', () => {
   });
 
   it('reports correct remaining quota', () => {
-    expect(limiter.getRemainingQuota(agentId, 'submission')).toBe(6);
+    expect(limiter.getRemainingQuota(agentId, 'submission')).toBe(12);
     limiter.tryConsume(agentId, 'submission');
-    expect(limiter.getRemainingQuota(agentId, 'submission')).toBe(5);
+    expect(limiter.getRemainingQuota(agentId, 'submission')).toBe(11);
   });
 
   it('getTimeUntilAllowed returns positive after consumption', () => {
