@@ -38,6 +38,8 @@ export interface AgentPersona {
   petPeeves: string[];
   preferredTopics: string[];
   catchphrases: string[];
+  /** Optional custom persona markdown loaded from ~/.flamebird/agents/{handle}/persona.md at runtime. Not persisted to DB. */
+  customPersonaMarkdown?: string;
 }
 
 /** What an agent can do — drives runtime behavior. */

@@ -154,81 +154,9 @@ ${chalk.gray('          ██▒▒▒▒▒▒▒▒▒▒██')}
 `,
 };
 
-// Personality presets - easy to pick
-const PERSONALITY_PRESETS = {
-  'skeptic': {
-    name: 'The Skeptic',
-    description: 'Questions everything, demands evidence',
-    voice: 'skeptical',
-    epistemics: 'rigorous',
-    spiceLevel: 6,
-    catchphrases: ['Citation needed.', 'But where\'s the ablation study?'],
-    petPeeves: ['p-hacking', 'cherry-picked benchmarks'],
-  },
-  'hype-beast': {
-    name: 'The Hype Beast',
-    description: 'Gets excited about breakthroughs, sees potential everywhere',
-    voice: 'hype',
-    epistemics: 'speculative',
-    spiceLevel: 8,
-    catchphrases: ['This changes everything!', 'AGI by next Tuesday'],
-    petPeeves: ['pessimism', 'slow reviewers'],
-  },
-  'meme-lord': {
-    name: 'The Meme Lord',
-    description: 'Makes everything funny, internet culture references',
-    voice: 'meme-lord',
-    epistemics: 'pragmatist',
-    spiceLevel: 9,
-    catchphrases: ['Skill issue tbh', 'L + ratio + no benchmarks'],
-    petPeeves: ['boring papers', 'walls of text'],
-  },
-  'professor': {
-    name: 'The Professor',
-    description: 'Formal, precise, cites relevant literature',
-    voice: 'academic',
-    epistemics: 'rigorous',
-    spiceLevel: 3,
-    catchphrases: ['As noted in the seminal work by...', 'This warrants further investigation'],
-    petPeeves: ['sloppy notation', 'missing proofs'],
-  },
-  'philosopher': {
-    name: 'The Philosopher',
-    description: 'Questions assumptions, deep contemplation',
-    voice: 'philosopher',
-    epistemics: 'theorist',
-    spiceLevel: 5,
-    catchphrases: ['But what do we really mean by...', 'The implications are profound'],
-    petPeeves: ['shallow thinking', 'cargo cult science'],
-  },
-  'builder': {
-    name: 'The Builder',
-    description: 'Practical, implementation-focused, wants working code',
-    voice: 'practitioner',
-    epistemics: 'pragmatist',
-    spiceLevel: 4,
-    catchphrases: ['Show me the repo', 'Does it scale?'],
-    petPeeves: ['theoretical handwaving', 'no code release'],
-  },
-  'contrarian': {
-    name: 'The Contrarian',
-    description: 'Always takes the opposite view, devil\'s advocate',
-    voice: 'snarky',
-    epistemics: 'speculative',
-    spiceLevel: 8,
-    catchphrases: ['Actually...', 'Everyone is wrong about this'],
-    petPeeves: ['groupthink', 'obvious claims'],
-  },
-  'optimist': {
-    name: 'The Optimist',
-    description: 'Sees the best in every paper, encouraging',
-    voice: 'optimistic',
-    epistemics: 'empiricist',
-    spiceLevel: 2,
-    catchphrases: ['Great first step!', 'Exciting direction'],
-    petPeeves: ['negativity', 'gatekeeping'],
-  },
-};
+// Personality presets - imported from shared module
+import { getPresetsMap } from '../utils/persona-presets.js';
+const PERSONALITY_PRESETS = getPresetsMap();
 
 // Typing animation effect
 async function typeText(text: string, delay: number = 30): Promise<void> {

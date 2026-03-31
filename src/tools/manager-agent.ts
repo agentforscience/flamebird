@@ -16,6 +16,7 @@ import { getAgent4ScienceClient } from '../api/agent4science-client.js';
 import { smartTruncate, repairJSON } from '../utils/truncate.js';
 import { ensureFirstTagIsSciencesub } from '../engagement/proactive-engine.js';
 import { runNeurico, resolveNeuricoPath, type NeuricoResult } from './paper-tools.js';
+import { generateIdea } from './idea-generator.js';
 import { getDatabase } from '../db/database.js';
 import type { AgentCapability, Agent4SciencePaper } from '../types.js';
 
@@ -46,6 +47,8 @@ export interface ManagerAgentConfig {
   neuricoPath?: string;
   /** AI provider for NeuriCo (default: claude) */
   neuricoProvider?: 'claude' | 'codex' | 'gemini';
+  /** Agent's preferred research topics (from persona) */
+  preferredTopics?: string[];
 }
 
 export interface PaperGenerationResult {
@@ -391,10 +394,34 @@ export async function runNeuricoFlow(config: ManagerAgentConfig): Promise<PaperG
     };
   }
 
-  // Step 1: Discover topic from Agent4Science
-  logger.info({ agentId: config.agentId }, 'Discovering research topic for NeuriCo');
-  const topic = await discoverTopic(config.apiKey, config.llmApiKey, config.llmModel, config.researchDomain);
-  logger.info({ topic }, 'Topic selected');
+  // Step 1: Generate research idea via HypogenicAI backend (with fallback to LLM)
+  logger.info({ agentId: config.agentId }, 'Generating research idea for NeuriCo');
+
+  let topic: string;
+  try {
+    // Fetch feed context for the idea generator
+    const client = getAgent4ScienceClient();
+    const [papersResult, takesResult] = await Promise.all([
+      client.getPapers(config.apiKey, { limit: 10, sort: 'hot' }),
+      client.getTakes(config.apiKey, { limit: 10, sort: 'hot' }),
+    ]);
+    const papers: Agent4SciencePaper[] = Array.isArray(papersResult.data) ? papersResult.data : [];
+    const takes: Array<{ title: string; hotTake: string }> = Array.isArray(takesResult.data) ? takesResult.data : [];
+
+    const idea = await generateIdea({
+      recentPapers: papers.slice(0, 5).map(p => ({ title: p.title, tags: p.tags })),
+      recentTakes: takes.slice(0, 5).map(t => ({ title: t.title, hotTake: t.hotTake })),
+      preferredTopics: config.preferredTopics || [],
+      domain: config.researchDomain,
+    });
+    // Combine title and description as rich context for YAML generation
+    topic = `${idea.title}\n\n${idea.description}`;
+    logger.info({ title: idea.title }, 'Idea generated via HypogenicAI backend');
+  } catch (err) {
+    logger.warn({ error: err instanceof Error ? err.message : String(err) }, 'HypogenicAI backend failed, falling back to LLM-based topic discovery');
+    topic = await discoverTopic(config.apiKey, config.llmApiKey, config.llmModel, config.researchDomain);
+  }
+  logger.info({ topic: topic.slice(0, 200) }, 'Topic selected');
 
   // Step 2: Generate a structured idea YAML
   logger.info('Generating structured idea YAML');
@@ -541,7 +568,7 @@ export async function runNeuricoFlow(config: ManagerAgentConfig): Promise<PaperG
 
   // API: tags at least 1
   if (postTags.length === 0) {
-    postTags = [config.researchDomain || 'research'];
+    postTags = [config.preferredTopics?.[0] || config.researchDomain || 'research'];
   }
 
   // Ensure required URLs are present
