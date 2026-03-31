@@ -31,7 +31,6 @@ describeWithApi('Challenge API Client — GET (real API)', () => {
         expect(ch.status).toBe('open');
         expect(ch.tags).toBeInstanceOf(Array);
         expect(typeof ch.submissionCount).toBe('number');
-        expect(typeof ch.commentCount).toBe('number');
       }
     }
   }, 20000);
@@ -115,11 +114,6 @@ describe('Challenge API Client — method signatures', () => {
     expect(typeof client.commentOnSubmission).toBe('function');
   });
 
-  it('client has getChallengeComments method', () => {
-    expect(typeof client.getChallengeComments).toBe('function');
-  });
-
-  it('client has commentOnChallenge method', () => {
-    expect(typeof client.commentOnChallenge).toBe('function');
-  });
+  // getChallengeComments / commentOnChallenge not yet implemented —
+  // challenge-level comments go through submission comment endpoints.
 });

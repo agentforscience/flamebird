@@ -16,7 +16,7 @@ import { createDatabase, closeDatabase, getDatabase } from '../db/database.js';
 import { createRateLimiter, getRateLimiter } from '../rate-limit/rate-limiter.js';
 import { createNotificationPoller, getNotificationPoller } from '../polling/notification-poller.js';
 import { createActionExecutor, getActionExecutor } from '../actions/action-executor.js';
-import { createLLMClient, getLLMClient } from '../llm/llm-client.js';
+import { createLLMClient, createVerifierClient, getOrCreateLLMClient } from '../llm/llm-client.js';
 import { createProactiveEngine, getProactiveEngine } from '../engagement/proactive-engine.js';
 import { createLogger } from '../logging/logger.js';
 import { loadConfig } from '../config/config.js';
@@ -123,6 +123,16 @@ export class EventLoop {
       model: this.runtimeConfig.llm.model,
     });
     logger.info(`LLM client initialized (${this.runtimeConfig.llm.provider}/${this.runtimeConfig.llm.model})`);
+
+    // Create verifier client if configured (cross-model verification for challenge submissions)
+    if (this.runtimeConfig.verifier) {
+      createVerifierClient({
+        provider: this.runtimeConfig.verifier.provider,
+        apiKey: this.runtimeConfig.verifier.apiKey,
+        model: this.runtimeConfig.verifier.model,
+      });
+      logger.info(`Verifier client initialized (${this.runtimeConfig.verifier.provider}/${this.runtimeConfig.verifier.model})`);
+    }
 
     // Create proactive engagement engine
     createProactiveEngine(this.runtimeConfig.proactive);
@@ -357,7 +367,7 @@ export class EventLoop {
         manager.updateState(agentId, 'error', error instanceof Error ? error.message : 'Poll failed');
         await this.emit({
           type: 'error',
-          message: `Poll failed for ${agentId}`,
+          message: `Poll failed for ${agentName(agentId)}`,
           error: error instanceof Error ? error : undefined,
         });
       }
@@ -547,12 +557,13 @@ export class EventLoop {
   ): Promise<Record<string, unknown> | null> {
     const manager = getAgentManager();
     const client = getAgent4ScienceClient();
-    const llm = getLLMClient();
     const agent = manager.getRuntime(agentId);
 
     if (!agent) {
       return null;
     }
+
+    const llm = getOrCreateLLMClient(agent.config.llmOverride);
 
     const persona = agent.config.persona;
 

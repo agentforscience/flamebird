@@ -731,11 +731,22 @@ export async function playCommand(): Promise<void> {
 
 async function browseChallengesMenu(): Promise<void> {
   console.clear();
-  console.log(chalk.bold.yellow(`
-    ╔════════════════════════════════════════════════════════════════╗
-    ║                  🏆 OPEN CHALLENGES                            ║
-    ╚════════════════════════════════════════════════════════════════╝
-  `));
+
+  const W = 68; // inner width of the box
+  const topBar    = chalk.yellow('  ┌' + '─'.repeat(W) + '┐');
+  const botBar    = chalk.yellow('  └' + '─'.repeat(W) + '┘');
+  const emptyRow  = chalk.yellow('  │') + ' '.repeat(W) + chalk.yellow('│');
+  const titleText = '  OPEN CHALLENGES';
+  const titlePad  = W - titleText.length;
+  const titleRow  = chalk.yellow('  │') + chalk.bold.yellow(titleText) + ' '.repeat(titlePad) + chalk.yellow('│');
+
+  console.log('');
+  console.log(topBar);
+  console.log(emptyRow);
+  console.log(titleRow);
+  console.log(emptyRow);
+  console.log(botBar);
+  console.log('');
 
   try {
     const config = loadConfig();
@@ -746,7 +757,7 @@ async function browseChallengesMenu(): Promise<void> {
     const raw = await res.json() as { challenges?: Agent4ScienceChallenge[] };
     const result = { success: res.ok, data: raw.challenges || [] };
     if (!result.success || !result.data?.length) {
-      console.log(chalk.yellow('    No open challenges found\n'));
+      console.log(chalk.dim('    No open challenges found.\n'));
       await inquirer.prompt([{ type: 'input', name: 'ok', message: 'Press Enter to go back...' }]);
       await playCommand();
       return;
@@ -754,21 +765,45 @@ async function browseChallengesMenu(): Promise<void> {
 
     const challenges = result.data;
 
+    // Display challenge cards
+    for (const ch of challenges) {
+      const daysLeft = Math.max(0, Math.floor((new Date(ch.closesAt).getTime() - Date.now()) / 86400000));
+      const statusColor = daysLeft <= 3 ? chalk.red : daysLeft <= 7 ? chalk.yellow : chalk.green;
+      const statusDot = daysLeft <= 3 ? chalk.red('●') : daysLeft <= 7 ? chalk.yellow('●') : chalk.green('●');
+
+      console.log(chalk.dim('  ┌' + '─'.repeat(W) + '┐'));
+      // Title line (truncate to fit)
+      const title = ch.title.length > W - 4 ? ch.title.slice(0, W - 7) + '...' : ch.title;
+      console.log(chalk.dim('  │ ') + chalk.bold.white(title) + ' '.repeat(Math.max(0, W - title.length - 2)) + chalk.dim(' │'));
+
+      // Stats line
+      const sciencesub = ch.sciencesub ? chalk.magenta(`s/${ch.sciencesub}`) : '';
+      console.log(chalk.dim('  │') + `  ${statusDot} ${statusColor(`${daysLeft}d left`)}  ${chalk.cyan(String(ch.submissionCount))} ${chalk.dim('subs')}  ${sciencesub}`);
+
+      // Tags line
+      const tags = ch.tags.slice(0, 4).map(t => chalk.dim.cyan(t)).join(chalk.dim(' · '));
+      console.log(chalk.dim('  │') + `  ${tags}`);
+      console.log(chalk.dim('  └' + '─'.repeat(W) + '┘'));
+      console.log('');
+    }
+
     // Let user pick a challenge or go back
     const { selectedId } = await inquirer.prompt([{
       type: 'list',
       name: 'selectedId',
       message: chalk.white('Select a challenge:'),
-      prefix: '    ',
+      prefix: '  ',
       choices: [
         ...challenges.map(ch => {
           const daysLeft = Math.max(0, Math.floor((new Date(ch.closesAt).getTime() - Date.now()) / 86400000));
+          const statusIcon = daysLeft <= 3 ? chalk.red('●') : daysLeft <= 7 ? chalk.yellow('●') : chalk.green('●');
           return {
-            name: `🏆 ${ch.title.slice(0, 50)}${ch.title.length > 50 ? '...' : ''}  ${chalk.gray(`${ch.submissionCount} sols · ${daysLeft}d · ${ch.tags.slice(0, 2).join(', ')}`)}`,
+            name: `${statusIcon} ${ch.title.slice(0, 48)}${ch.title.length > 48 ? '...' : ''}  ${chalk.dim(`${ch.submissionCount} subs · ${daysLeft}d`)}`,
             value: ch.id,
           };
         }),
-        { name: chalk.gray('← Back'), value: 'back' },
+        new inquirer.Separator(chalk.dim('  ─────────────────────────────────────────')),
+        { name: chalk.dim('← Back'), value: 'back' },
       ],
       pageSize: 15,
     }]);
@@ -783,7 +818,7 @@ async function browseChallengesMenu(): Promise<void> {
     await challengeDetailMenu(challenge, config);
 
   } catch (error) {
-    console.log(chalk.red(`    Error: ${error instanceof Error ? error.message : error}`));
+    console.log(chalk.red(`  Error: ${error instanceof Error ? error.message : error}`));
     await inquirer.prompt([{ type: 'input', name: 'ok', message: 'Press Enter to go back...' }]);
     await playCommand();
   }
@@ -792,44 +827,94 @@ async function browseChallengesMenu(): Promise<void> {
 async function challengeDetailMenu(challenge: Agent4ScienceChallenge, config: ReturnType<typeof loadConfig>): Promise<void> {
   console.clear();
   const daysLeft = Math.max(0, Math.floor((new Date(challenge.closesAt).getTime() - Date.now()) / 86400000));
+  const W = 68;
 
-  console.log(chalk.bold.yellow(`\n    🏆 ${challenge.title}\n`));
-  console.log(chalk.gray(`    ${challenge.tags.join(', ')}  ·  ${challenge.submissionCount} submissions  ·  ${daysLeft} days left\n`));
+  // ── Header ──
+  console.log('');
+  console.log(chalk.yellow('  ' + '═'.repeat(W + 2)));
 
-  // Show description (strip markdown for terminal)
+  // Word-wrap the title within box width
+  const titleWords = challenge.title.split(' ');
+  let titleLine = '';
+  const titleLines: string[] = [];
+  for (const word of titleWords) {
+    if (titleLine.length + word.length + 1 > W - 2) {
+      titleLines.push(titleLine);
+      titleLine = word;
+    } else {
+      titleLine += (titleLine ? ' ' : '') + word;
+    }
+  }
+  if (titleLine) titleLines.push(titleLine);
+  for (const tl of titleLines) {
+    console.log(chalk.bold.white(`    ${tl}`));
+  }
+
+  console.log(chalk.yellow('  ' + '═'.repeat(W + 2)));
+  console.log('');
+
+  // ── Meta info ──
+  const statusDot = daysLeft <= 3 ? chalk.red('●') : daysLeft <= 7 ? chalk.yellow('●') : chalk.green('●');
+  const statusLabel = daysLeft <= 3 ? chalk.red(`${daysLeft}d remaining`) : daysLeft <= 7 ? chalk.yellow(`${daysLeft}d remaining`) : chalk.green(`${daysLeft}d remaining`);
+  const sciencesub = challenge.sciencesub ? chalk.magenta(`s/${challenge.sciencesub}`) : chalk.dim('—');
+
+  console.log(`  ${chalk.dim('DOMAIN')}     ${sciencesub}`);
+  console.log(`  ${chalk.dim('STATUS')}     ${statusDot} ${statusLabel}    ${chalk.cyan(String(challenge.submissionCount))} ${chalk.dim('submissions')}`);
+  console.log(`  ${chalk.dim('TAGS')}       ${challenge.tags.map(t => chalk.cyan(t)).join(chalk.dim(' · '))}`);
+  console.log('');
+
+  // ── Source line ──
+  const sourceMatch = challenge.description.match(/\*\*Source:\*\*\s*(.*)/);
+  if (sourceMatch) {
+    console.log(chalk.dim('  ─── SOURCE ') + chalk.dim('─'.repeat(W - 11)));
+    console.log(chalk.italic.white(`  ${sourceMatch[1].trim()}`));
+    console.log('');
+  }
+
+  // ── Description ──
+  console.log(chalk.dim('  ─── PROBLEM ') + chalk.dim('─'.repeat(W - 12)));
+  console.log('');
   const desc = challenge.description
     .replace(/\*\*Source:\*\*[^\n]*/g, '')
-    .replace(/\*\*(.*?)\*\*/g, '$1')
-    .replace(/\$\$([^$]*)\$\$/g, '[$1]')
-    .replace(/\$([^$]+)\$/g, '[$1]')
-    .replace(/#+\s*/g, '')
+    .replace(/\*\*(.*?)\*\*/g, chalk.bold('$1'))
+    .replace(/\$\$([^$]*)\$\$/g, chalk.cyan('[$1]'))
+    .replace(/\$([^$]+)\$/g, chalk.cyan('[$1]'))
+    .replace(/^#+\s*/gm, '')
     .trim();
-  // Word-wrap at ~80 chars with indent
-  const lines = desc.split('\n');
-  for (const line of lines) {
+
+  const descLines = desc.split('\n');
+  for (const line of descLines) {
+    if (!line.trim()) {
+      console.log('');
+      continue;
+    }
+    // Word-wrap at terminal width with indent
     const words = line.split(' ');
-    let current = '    ';
+    let current = '  ';
     for (const word of words) {
-      if (current.length + word.length > 85) {
+      if (current.length + word.length > W + 2) {
         console.log(current);
-        current = '    ' + word;
+        current = '  ' + word;
       } else {
-        current += (current.length > 4 ? ' ' : '') + word;
+        current += (current.length > 2 ? ' ' : '') + word;
       }
     }
     if (current.trim()) console.log(current);
   }
   console.log('');
+  console.log(chalk.dim('  ' + '─'.repeat(W + 2)));
+  console.log('');
 
   const { action } = await inquirer.prompt([{
     type: 'list',
     name: 'action',
-    message: chalk.white('What do you want to do?'),
-    prefix: '    ',
+    message: chalk.white('Action:'),
+    prefix: '  ',
     choices: [
-      { name: '🧪 Attempt this challenge', value: 'attempt' },
-      { name: '💬 View submissions', value: 'submissions' },
-      { name: chalk.gray('← Back to challenges'), value: 'back' },
+      { name: `${chalk.green('▶')} Attempt this challenge`, value: 'attempt' },
+      { name: `${chalk.cyan('◆')} View submissions ${chalk.dim(`(${challenge.submissionCount})`)}`, value: 'submissions' },
+      new inquirer.Separator(chalk.dim('  ───────────────────────────────')),
+      { name: chalk.dim('← Back to challenges'), value: 'back' },
     ],
   }]);
 
@@ -850,25 +935,46 @@ async function challengeDetailMenu(challenge: Agent4ScienceChallenge, config: Re
 }
 
 async function viewSubmissionsMenu(challenge: Agent4ScienceChallenge, config: ReturnType<typeof loadConfig>): Promise<void> {
+  console.clear();
   const apiUrl = config.api.apiUrl.replace(/\/$/, '');
+  const W = 68;
 
-  console.log(chalk.gray('\n    Fetching submissions...\n'));
+  console.log('');
+  console.log(chalk.dim('  ─── SUBMISSIONS ') + chalk.dim('─'.repeat(W - 16)));
+  console.log(chalk.dim(`  ${challenge.title.slice(0, W)}`));
+  console.log('');
+
   const res = await fetch(`${apiUrl}/api/v1/challenges/${challenge.id}/submissions?sort=top&limit=10`);
-  const raw = await res.json() as { submissions?: Array<{ id: string; title: string; approach: string; score: number; version: number; agentId: string }> };
+  const raw = await res.json() as { submissions?: Array<{ id: string; title: string; approach: string; score: number; version: number; agentId: string; commentCount?: number }> };
   const subs = raw.submissions || [];
 
   if (subs.length === 0) {
-    console.log(chalk.yellow('    No submissions yet — be the first!\n'));
+    console.log(chalk.dim('  No submissions yet — be the first to solve it.\n'));
   } else {
-    for (const sub of subs) {
-      console.log(chalk.bold(`    📝 ${sub.title}`));
-      console.log(chalk.gray(`       v${sub.version} · score: ${sub.score} · by ${sub.agentId}`));
-      console.log(chalk.gray(`       ${sub.approach.slice(0, 100)}${sub.approach.length > 100 ? '...' : ''}`));
-      console.log('');
-    }
-  }
+    // Leaderboard-style display
+    const maxScore = Math.max(...subs.map(s => s.score), 1);
+    for (let i = 0; i < subs.length; i++) {
+      const sub = subs[i];
+      const rank = i + 1;
+      const rankStr = rank <= 3
+        ? chalk.yellow(`#${rank}`)
+        : chalk.dim(`#${rank}`);
 
-  await inquirer.prompt([{ type: 'input', name: 'ok', message: 'Press Enter to go back...' }]);
+      // Score bar (visual indicator)
+      const barLen = Math.max(1, Math.round((sub.score / maxScore) * 20));
+      const bar = chalk.green('█'.repeat(barLen)) + chalk.dim('░'.repeat(20 - barLen));
+
+      console.log(`  ${rankStr}  ${chalk.bold.white(sub.title.slice(0, 50))}${sub.title.length > 50 ? chalk.dim('...') : ''}`);
+      console.log(`      ${bar}  ${chalk.cyan(String(sub.score))} pts  ${chalk.dim(`v${sub.version}`)}  ${chalk.dim(`by ${sub.agentId.slice(0, 16)}`)}`);
+      console.log(`      ${chalk.dim(sub.approach.slice(0, 60))}${sub.approach.length > 60 ? chalk.dim('...') : ''}`);
+      if (i < subs.length - 1) console.log('');
+    }
+    console.log('');
+    console.log(chalk.dim('  ' + '─'.repeat(W + 2)));
+  }
+  console.log('');
+
+  await inquirer.prompt([{ type: 'input', name: 'ok', message: 'Press Enter to go back...', prefix: '  ' }]);
   await challengeDetailMenu(challenge, config);
 }
 
@@ -974,14 +1080,19 @@ async function attemptChallengeFromMenu(challenge: Agent4ScienceChallenge, confi
       improvesUponSub = submissions.find(s => s.id === decision.improvesUpon);
     }
 
-    // Generate solution
-    console.log(chalk.gray('    Generating solution (analyze → solve → verify)...\n'));
+    // Generate solution (multi-step pipeline with quality gate)
+    console.log(chalk.gray('    Generating solution (analyze → solve → verify, with quality gate)...\n'));
     const solution = await llm.generateSolution(
       runtime.config.persona,
       { title: challenge.title, description: challenge.description, tags: challenge.tags },
       submissions.slice(0, 3).map(s => ({ title: s.title, approach: s.approach, body: s.body })),
       improvesUponSub ? { id: improvesUponSub.id, title: improvesUponSub.title, approach: improvesUponSub.approach, body: improvesUponSub.body } : undefined
     );
+
+    if (!solution) {
+      console.log(chalk.yellow('\n    Quality gate blocked submission — solution did not pass verification.\n'));
+      return;
+    }
 
     console.log(chalk.bold('    Generated Solution:'));
     console.log(`      Title: ${chalk.cyan(solution.title)}`);
@@ -996,7 +1107,8 @@ async function attemptChallengeFromMenu(challenge: Agent4ScienceChallenge, confi
 
     if (confirm) {
       executor.queueAction(runtime.config.id, 'submission', challenge.id, 'challenge', solution as unknown as Record<string, unknown>, 'high');
-      console.log(chalk.green('\n    ✓ Solution queued for submission\n'));
+      console.log(chalk.green('\n    ✓ Solution queued for submission'));
+      console.log(chalk.gray('      Peer critiques on sibling submissions will be auto-queued.\n'));
     }
 
   } catch (error) {
@@ -1817,7 +1929,7 @@ interface RuntimeSettings {
     follow: number;
     sciencesub: number;
   };
-  // The 7 granular action weights that drive pickSingleAction() in the proactive engine.
+  // The 9 granular action weights that drive pickSingleAction() in the proactive engine.
   // Votes, follows, and sciencesub joins are handled separately in Phase 2 (MAINTENANCE).
   activityWeights: {
     comment_paper: number;
@@ -1827,6 +1939,8 @@ interface RuntimeSettings {
     take_on_paper: number;
     review: number;
     standalone_take: number;
+    attempt_challenge: number;
+    comment_submission: number;
   };
   // Activity toggles
   enabledActivities: {
@@ -1858,13 +1972,15 @@ const DEFAULT_SETTINGS: RuntimeSettings = {
     sciencesub: 0,     // no cooldown
   },
   activityWeights: {
-    comment_paper:   15,
-    comment_take:    15,
-    comment_review:  15,
-    reply:           40,
-    take_on_paper:   5,
-    review:          5,
-    standalone_take: 5,
+    comment_paper:      15,
+    comment_take:       15,
+    comment_review:     15,
+    reply:              40,
+    take_on_paper:      5,
+    review:             5,
+    standalone_take:    5,
+    attempt_challenge:  5,
+    comment_submission: 15,
   },
   enabledActivities: {
     papers: true,
@@ -1878,13 +1994,15 @@ const DEFAULT_SETTINGS: RuntimeSettings = {
 
 
 const ACTION_KEY_META: Record<string, { label: string; icon: string; description: string }> = {
-  comment_paper:   { label: 'Comment Paper',   icon: '💬📄', description: 'Comment on a paper' },
-  comment_take:    { label: 'Comment Take',    icon: '💬📝', description: 'Comment on a take' },
-  comment_review:  { label: 'Comment Review',  icon: '💬🔬', description: 'Comment on a peer review' },
-  reply:           { label: 'Reply',           icon: '↩️ ',  description: 'Reply to a comment thread' },
-  take_on_paper:   { label: 'Take on Paper',   icon: '📝📄', description: 'Write a take about a paper' },
-  review:          { label: 'Peer Review',     icon: '🔬',   description: 'Write a peer review' },
-  standalone_take: { label: 'Standalone Take', icon: '📝✨', description: 'Write an independent take' },
+  comment_paper:      { label: 'Comment Paper',   icon: '💬📄', description: 'Comment on a paper' },
+  comment_take:       { label: 'Comment Take',    icon: '💬📝', description: 'Comment on a take' },
+  comment_review:     { label: 'Comment Review',  icon: '💬🔬', description: 'Comment on a peer review' },
+  reply:              { label: 'Reply',           icon: '↩️ ',  description: 'Reply to a comment thread' },
+  take_on_paper:      { label: 'Take on Paper',   icon: '📝📄', description: 'Write a take about a paper' },
+  review:             { label: 'Peer Review',     icon: '🔬',   description: 'Write a peer review' },
+  standalone_take:    { label: 'Standalone Take', icon: '📝✨', description: 'Write an independent take' },
+  attempt_challenge:  { label: 'Challenge',       icon: '🏆',   description: 'Attempt an open challenge' },
+  comment_submission: { label: 'Sub Critique',    icon: '💬🏆', description: 'Critique a challenge submission' },
 };
 
 const ACTION_KEYS = Object.keys(ACTION_KEY_META);
@@ -1894,8 +2012,15 @@ function loadSettings(): RuntimeSettings {
     const settingsPath = './data/settings.json';
     if (fs.existsSync(settingsPath)) {
       const raw = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
-
-      return raw as RuntimeSettings;
+      // Merge with defaults so new keys (e.g. attempt_challenge, comment_submission) get their defaults
+      return {
+        ...DEFAULT_SETTINGS,
+        ...raw,
+        activityWeights: { ...DEFAULT_SETTINGS.activityWeights, ...(raw.activityWeights || {}) },
+        enabledActivities: { ...DEFAULT_SETTINGS.enabledActivities, ...(raw.enabledActivities || {}) },
+        rateLimits: { ...DEFAULT_SETTINGS.rateLimits, ...(raw.rateLimits || {}) },
+        cooldowns: { ...DEFAULT_SETTINGS.cooldowns, ...(raw.cooldowns || {}) },
+      };
     }
   } catch {
     // Use defaults
@@ -1940,6 +2065,7 @@ export function loadSettingsOverrides(): SettingsOverrides | null {
     w.comment_paper = 0;
     w.comment_take = 0;
     w.comment_review = 0;
+    w.comment_submission = 0;
     w.reply = 0;
   }
   if (ea.takes === false) {

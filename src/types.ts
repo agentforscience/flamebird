@@ -43,6 +43,14 @@ export interface AgentPersona {
 /** What an agent can do — drives runtime behavior. */
 export type AgentCapability = 'base' | 'neurico';
 
+/** Per-agent LLM override. When set, this agent uses its own model instead of the global default. */
+export interface AgentLLMOverride {
+  provider: 'openrouter' | 'anthropic' | 'openai';
+  model: string;
+  /** Optional separate API key; falls back to global key when omitted. */
+  apiKey?: string;
+}
+
 export interface AgentConfig {
   id: string;
   handle: string;
@@ -51,6 +59,8 @@ export interface AgentConfig {
   capability: AgentCapability;
   /** Research domain for NeuriCo agents (e.g. 'mathematics', 'artificial_intelligence'). */
   researchDomain?: string;
+  /** Per-agent backbone override for benchmark experiments (B4–B7 protocols). */
+  llmOverride?: AgentLLMOverride;
   enabled: boolean;
   createdAt: Date;
 }
@@ -158,6 +168,10 @@ export interface Agent4ScienceReview {
 }
 
 export type ChallengeStatus = 'open' | 'closed' | 'archived';
+export type EvaluationType = 'deterministic' | 'llm-judged' | 'hybrid';
+export type ScoringDirection = 'maximize' | 'minimize';
+export type EvaluationStatus = 'pending' | 'evaluating' | 'evaluated' | 'failed';
+export type CritiqueIntent = 'challenge' | 'support' | 'probe' | 'extend';
 
 export interface Agent4ScienceChallenge {
   id: string;
@@ -169,9 +183,52 @@ export interface Agent4ScienceChallenge {
   sciencesub?: string;
   status: ChallengeStatus;
   closesAt: string;
+  // Evaluation configuration
+  evaluationType: EvaluationType;
+  scoringDirection?: ScoringDirection;
+  verifier?: string;
+  solutionSchema?: Record<string, unknown>;
+  minImprovement?: number;
+  requiredFields?: Array<{ name: string; description: string; minLength?: number }>;
+  constraints?: Array<{ id: string; description: string; automatable: boolean }>;
   submissionCount: number;
-  commentCount: number;
   createdAt: string;
+}
+
+export interface T1Check {
+  name: string;
+  passed: boolean;
+  severity: 'schema' | 'diagnostic';
+  message: string;
+}
+
+export interface T1Result {
+  valid: boolean;
+  checks: T1Check[];
+  schemaFailures: string[];
+  diagnosticFlags: string[];
+}
+
+export interface PeerCritique {
+  agentId: string;
+  intent: CritiqueIntent;
+  content: string;
+  timestamp: string;
+}
+
+export interface T2Scores {
+  /** Net peer score: upvotes - downvotes */
+  netPeerScore: number;
+  /** Critique ratio: supportive critiques / total critiques (0-1) */
+  critiqueRatio: number;
+  /** Rolling summary of peer feedback */
+  rollingSummary: string;
+  /** Individual peer critiques */
+  critiques: PeerCritique[];
+  upvotes: number;
+  downvotes: number;
+  /** Normalized composite peer score (0-1) */
+  normalizedScore: number;
 }
 
 export interface Agent4ScienceSubmission {
@@ -185,9 +242,16 @@ export interface Agent4ScienceSubmission {
   improvesUpon: string | null;
   delta: string | null;
   declaredScore: number | null;
+  solutionData?: Record<string, unknown>;
   score: number;
   version: number;
   commentCount: number;
+  // Evaluation results
+  evaluationStatus: EvaluationStatus;
+  t1Result?: T1Result;
+  t2Scores?: T2Scores;
+  verifierScore?: number | null;
+  evaluatedScore?: number | null;
   createdAt: string;
 }
 
@@ -355,6 +419,14 @@ export interface RuntimeConfig {
     adminSecret?: string;
   };
   llm: {
+    provider: 'openrouter' | 'anthropic' | 'openai';
+    apiKey: string;
+    model: string;
+  };
+  /** Optional separate model for verifying challenge submissions.
+   *  When set, verification uses this model instead of the primary — cross-model
+   *  verification catches errors that self-verification misses. */
+  verifier?: {
     provider: 'openrouter' | 'anthropic' | 'openai';
     apiKey: string;
     model: string;

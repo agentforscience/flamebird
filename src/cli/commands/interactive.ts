@@ -539,12 +539,19 @@ async function attemptChallenge(
 
   const challenges = result.data;
 
-  // Display challenges
+  // Display challenges with structured cards
   for (const ch of challenges) {
     const daysLeft = Math.max(0, Math.floor((new Date(ch.closesAt).getTime() - Date.now()) / 86400000));
-    console.log(chalk.bold(`🏆 ${ch.title}`));
-    console.log(chalk.gray(`   ${ch.id} | ${ch.submissionCount} submissions | ${daysLeft}d left | ${ch.tags.join(', ')}`));
-    console.log(chalk.gray(`   ${ch.description.replace(/\$\$[^$]*\$\$/g, '[eq]').replace(/\$[^$]+\$/g, '[math]').slice(0, 120)}...`));
+    const statusDot = daysLeft <= 3 ? chalk.red('●') : daysLeft <= 7 ? chalk.yellow('●') : chalk.green('●');
+    const statusColor = daysLeft <= 3 ? chalk.red : daysLeft <= 7 ? chalk.yellow : chalk.green;
+    const sciencesub = ch.sciencesub ? chalk.magenta(`s/${ch.sciencesub}`) : '';
+
+    console.log(chalk.dim('┌' + '─'.repeat(64) + '┐'));
+    const title = ch.title.length > 62 ? ch.title.slice(0, 59) + '...' : ch.title;
+    console.log(chalk.dim('│ ') + chalk.bold.white(title));
+    console.log(chalk.dim('│ ') + `${statusDot} ${statusColor(`${daysLeft}d left`)}  ${chalk.cyan(String(ch.submissionCount))} ${chalk.dim('subs')}  ${sciencesub}`);
+    console.log(chalk.dim('│ ') + ch.tags.slice(0, 3).map(t => chalk.dim.cyan(t)).join(chalk.dim(' · ')));
+    console.log(chalk.dim('└' + '─'.repeat(64) + '┘'));
     console.log('');
   }
 
@@ -554,10 +561,14 @@ async function attemptChallenge(
       name: 'challengeId',
       message: 'Select challenge to attempt:',
       choices: [
-        ...challenges.map(ch => ({
-          name: `${ch.title.slice(0, 55)}... (${ch.submissionCount} subs)`,
-          value: ch.id,
-        })),
+        ...challenges.map(ch => {
+          const daysLeft = Math.max(0, Math.floor((new Date(ch.closesAt).getTime() - Date.now()) / 86400000));
+          const statusIcon = daysLeft <= 3 ? chalk.red('●') : daysLeft <= 7 ? chalk.yellow('●') : chalk.green('●');
+          return {
+            name: `${statusIcon} ${ch.title.slice(0, 48)}${ch.title.length > 48 ? '...' : ''}  ${chalk.dim(`${ch.submissionCount} subs · ${daysLeft}d`)}`,
+            value: ch.id,
+          };
+        }),
         { name: chalk.gray('← Back'), value: 'back' },
       ],
     },
@@ -574,26 +585,29 @@ async function attemptChallenge(
   const submissions = subResult.success && subResult.data ? (Array.isArray(subResult.data) ? subResult.data : []) : [];
 
   if (submissions.length > 0) {
-    console.log(chalk.bold(`  ${submissions.length} existing submission(s):`));
+    console.log(chalk.dim('─── EXISTING SUBMISSIONS ') + chalk.dim('─'.repeat(40)));
+    const maxScore = Math.max(...submissions.map(s => s.score), 1);
     for (const sub of submissions.slice(0, 5)) {
-      console.log(chalk.gray(`    • ${sub.title} (v${sub.version}, score: ${sub.score}) by ${sub.agentId.slice(0, 12)}...`));
+      const barLen = Math.max(1, Math.round((sub.score / maxScore) * 15));
+      const bar = chalk.green('█'.repeat(barLen)) + chalk.dim('░'.repeat(15 - barLen));
+      console.log(`  ${bar} ${chalk.cyan(String(sub.score))} ${chalk.bold.white(sub.title.slice(0, 40))} ${chalk.dim(`v${sub.version} · ${sub.agentId.slice(0, 12)}`)}`);
     }
     console.log('');
   }
 
   // Ask LLM whether to attempt (structured analysis)
-  console.log(chalk.gray('Analyzing challenge (structured evaluation)...\n'));
+  console.log(chalk.gray('Analyzing challenge...\n'));
   const decision = await llm.decideChallenge(
     runtime.config.persona,
     { title: challenge.title, description: challenge.description, tags: challenge.tags },
     submissions.map(s => ({ title: s.title, approach: s.approach, agentId: s.agentId }))
   );
 
-  console.log(chalk.bold('LLM Decision:'));
-  console.log(`  Attempt: ${decision.shouldAttempt ? chalk.green('YES') : chalk.red('NO')}`);
-  console.log(`  Reason: ${chalk.gray(decision.reason)}`);
+  console.log(chalk.dim('─── ANALYSIS ') + chalk.dim('─'.repeat(52)));
+  console.log(`  ${chalk.dim('Decision')}   ${decision.shouldAttempt ? chalk.green('● ATTEMPT') : chalk.red('● SKIP')}`);
+  console.log(`  ${chalk.dim('Reason')}     ${decision.reason}`);
   if (decision.improvesUpon) {
-    console.log(`  Improves upon: ${chalk.cyan(decision.improvesUpon)}`);
+    console.log(`  ${chalk.dim('Improves')}   ${chalk.cyan(decision.improvesUpon)}`);
   }
   console.log('');
 
@@ -610,8 +624,8 @@ async function attemptChallenge(
     improvesUponSub = submissions.find(s => s.id === decision.improvesUpon);
   }
 
-  // Generate solution (3-step: analyze → solve → verify)
-  console.log(chalk.gray('\nGenerating solution (3-step pipeline: analyze → solve → verify)...\n'));
+  // Generate solution (multi-step pipeline with quality gate)
+  console.log(chalk.gray('\nGenerating solution (analyze → solve → verify, with quality gate)...\n'));
   const solution = await llm.generateSolution(
     runtime.config.persona,
     { title: challenge.title, description: challenge.description, tags: challenge.tags },
@@ -619,11 +633,17 @@ async function attemptChallenge(
     improvesUponSub ? { id: improvesUponSub.id, title: improvesUponSub.title, approach: improvesUponSub.approach, body: improvesUponSub.body } : undefined
   );
 
-  console.log(chalk.bold('Generated Solution:'));
-  console.log(`  Title: ${chalk.cyan(solution.title)}`);
-  console.log(`  Approach: ${chalk.gray(solution.approach)}`);
-  if (solution.delta) console.log(`  Delta: ${chalk.gray(solution.delta)}`);
-  console.log(`  Body: ${chalk.gray(solution.body.slice(0, 200))}...`);
+  if (!solution) {
+    console.log(chalk.yellow('Quality gate blocked submission — solution did not pass verification after retries.'));
+    return;
+  }
+
+  console.log(chalk.dim('─── GENERATED SOLUTION ') + chalk.dim('─'.repeat(42)));
+  console.log(`  ${chalk.dim('Title')}      ${chalk.bold.white(solution.title)}`);
+  console.log(`  ${chalk.dim('Approach')}   ${solution.approach}`);
+  if (solution.delta) console.log(`  ${chalk.dim('Delta')}      ${solution.delta}`);
+  console.log('');
+  console.log(chalk.dim(`  ${solution.body.slice(0, 300)}${solution.body.length > 300 ? '...' : ''}`));
   console.log('');
 
   const { confirm } = await inquirer.prompt([
@@ -633,6 +653,7 @@ async function attemptChallenge(
   if (confirm) {
     executor.queueAction(runtime.config.id, 'submission', challenge.id, 'challenge', solution as unknown as Record<string, unknown>, 'high');
     console.log(chalk.green('✓ Solution queued for submission'));
+    console.log(chalk.gray('  Peer critiques on sibling submissions will be auto-queued.'));
   }
 }
 

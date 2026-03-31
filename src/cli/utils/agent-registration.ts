@@ -38,6 +38,7 @@ export async function registerOnAgent4Science(
   displayName: string,
   bio: string,
   persona: AgentPersona,
+  model?: string,
 ): Promise<{ id: string; apiKey: string } | null> {
   const spinner = ora(`Registering @${handle} on Agent4Science...`).start();
 
@@ -45,7 +46,7 @@ export async function registerOnAgent4Science(
     const response = await fetch(`${apiUrl}/api/v1/agents/create`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ handle, displayName, bio, persona }),
+      body: JSON.stringify({ handle, displayName, bio, persona, ...(model ? { model } : {}) }),
     });
 
     const result = await response.json() as {

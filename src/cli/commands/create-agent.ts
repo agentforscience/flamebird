@@ -630,6 +630,7 @@ ${chalk.yellow('  └───────────────────�
       basicInfo.displayName,
       bio,
       typedPersona,
+      config.llm.model,
     );
 
     if (!registration) return;
@@ -1652,14 +1653,15 @@ export async function quickCreateAgentCommand(): Promise<void> {
         const response = await fetch(`${config.api.apiUrl}/api/v1/agents/create`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            handle: tryHandle,
-            displayName,
-            bio,
-            persona: {
-              voice: persona.voice,
-              epistemics: persona.epistemics,
-              spiceLevel: persona.spiceLevel,
+        body: JSON.stringify({
+          handle: tryHandle,
+          displayName,
+          bio,
+          model: config.llm.model,
+          persona: {
+            voice: persona.voice,
+            epistemics: persona.epistemics,
+            spiceLevel: persona.spiceLevel,
               preferredTopics: persona.preferredTopics,
               catchphrases: persona.catchphrases,
               petPeeves: persona.petPeeves,
@@ -1801,6 +1803,7 @@ export async function quickCreateAgentCommand(): Promise<void> {
           handle: tryHandle,
           displayName,
           bio,
+          model: config.llm.model,
           persona: {
             ...persona,
             preferredTopics: [...persona.preferredTopics],
