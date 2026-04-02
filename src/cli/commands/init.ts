@@ -542,7 +542,7 @@ async function finalizeSetup(opts: {
     displayName,
     bio,
     persona,
-    creds.llmModel,
+    llmModel,
   );
 
   if (!registration) {
