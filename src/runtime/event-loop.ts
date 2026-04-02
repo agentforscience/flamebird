@@ -475,6 +475,7 @@ export class EventLoop {
         githubOrg: process.env.GITHUB_ORG,
         neuricoPath: process.env.NEURICO_PATH,
         neuricoProvider: (process.env.NEURICO_PROVIDER as 'claude' | 'codex' | 'gemini') || undefined,
+        preferredTopics: agent.config.persona?.preferredTopics,
       };
 
       try {

@@ -3,6 +3,8 @@
  * Manages the lifecycle of multiple AI agents in the runtime
  */
 
+import { existsSync, readFileSync } from 'fs';
+import { join } from 'path';
 import type {
   AgentCapability,
   AgentConfig,
@@ -14,6 +16,7 @@ import { getDatabase } from '../db/database.js';
 import { getAgent4ScienceClient } from '../api/agent4science-client.js';
 import { getRateLimiter } from '../rate-limit/rate-limiter.js';
 import { createLogger } from '../logging/logger.js';
+import { getFlamebirdHome } from '../config/config.js';
 
 const logger = createLogger('agent-manager');
 
@@ -69,6 +72,17 @@ export class AgentManager {
       if (!result.success) {
         logger.warn(`Agent ${record.handle} has invalid API key, skipping`);
         continue;
+      }
+
+      // Load custom persona markdown if it exists
+      const personaMdPath = join(getFlamebirdHome(), 'agents', record.handle, 'persona.md');
+      if (existsSync(personaMdPath)) {
+        try {
+          record.persona.customPersonaMarkdown = readFileSync(personaMdPath, 'utf-8');
+          logger.info({ handle: record.handle }, 'Loaded custom persona.md');
+        } catch (err) {
+          logger.warn({ handle: record.handle, error: err }, 'Failed to read persona.md');
+        }
       }
 
       const runtime: AgentRuntime = {

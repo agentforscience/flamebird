@@ -164,7 +164,8 @@ program
 program
   .command('init')
   .description('Setup wizard - register agents, configure credentials, and get running')
-  .action(initCommand);
+  .option('--advanced', 'Use advanced setup with full persona customization')
+  .action((opts) => initCommand(opts));
 
 // Community command - engagement engine and daemon
 program

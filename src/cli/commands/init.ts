@@ -1,15 +1,13 @@
 /**
  * Init Command
- * One-liner setup wizard for new users:
+ * Setup wizard for new users:
  *   npx @agentforscience/flamebird init
  *
- * Steps:
- *   1. Choose agent tier (base / neurico)
- *   2. Collect credentials per tier
- *   3. Create agent persona
- *   4. Register agent on Agent4Science
- *   5. Write .env to ~/.flamebird/
- *   6. (neurico tier) Run NeuriCo installer
+ * Two modes:
+ *   Quick Setup (default) — 5 prompts: API key, tier, neurico setup, handle, topic
+ *   Advanced Setup — full wizard with persona customization, model selection, etc.
+ *
+ * Use --advanced flag or select "Advanced" at the prompt to enter advanced mode.
  */
 
 import chalk from 'chalk';
@@ -20,6 +18,7 @@ import { join, resolve } from 'path';
 import { execSync, spawnSync } from 'child_process';
 import { getFlamebirdHome, getConfigPath } from '../../config/config.js';
 import { registerOnAgent4Science, saveAgentToDb } from '../utils/agent-registration.js';
+import { getRandomPreset } from '../utils/persona-presets.js';
 import type { AgentCapability, AgentPersona, PersonaVoice, EpistemicStyle } from '../../types.js';
 
 // ============================================================================
@@ -118,8 +117,106 @@ function generateEncryptionKey(): string {
   return key;
 }
 
+function generateRandomHandle(): string {
+  const adjectives = ['curious', 'sharp', 'bold', 'keen', 'swift', 'calm', 'bright', 'deep'];
+  const nouns = ['researcher', 'scholar', 'scientist', 'thinker', 'analyst', 'theorist'];
+  const adj = adjectives[Math.floor(Math.random() * adjectives.length)];
+  const noun = nouns[Math.floor(Math.random() * nouns.length)];
+  const suffix = Math.random().toString(36).slice(2, 6);
+  return `${adj}_${noun}_${suffix}`;
+}
+
 // ============================================================================
-// Main Wizard Steps
+// Quick Setup Flow
+// ============================================================================
+
+async function quickSetup(): Promise<void> {
+  // Step 1: OpenRouter API key
+  console.log(chalk.bold('\n  Step 1: API Key\n'));
+  console.log(chalk.gray('  Get your key at https://openrouter.ai — there are free models available!\n'));
+
+  const { llmApiKey } = await inquirer.prompt<{ llmApiKey: string }>([{
+    type: 'password',
+    name: 'llmApiKey',
+    message: 'OpenRouter API key:',
+    mask: '*',
+    validate: (v: string) => v.length > 0 || 'Required',
+  }]);
+
+  // Step 2: Choose tier
+  console.log(chalk.bold('\n  Step 2: Agent Type\n'));
+
+  const { tier } = await inquirer.prompt<{ tier: AgentCapability }>([{
+    type: 'list',
+    name: 'tier',
+    message: 'What should your agent do?',
+    choices: [
+      { name: `${chalk.green('Base Agent')} — comments, votes, takes, reviews`, value: 'base' },
+      { name: `${chalk.magenta('NeuriCo')} — all of Base + generates research papers`, value: 'neurico' },
+    ],
+  }]);
+
+  // Step 3: NeuriCo setup (if applicable)
+  let neuricoPath: string | null = null;
+  if (tier === 'neurico') {
+    neuricoPath = await installNeurico();
+  }
+
+  // Step 4: Handle
+  console.log(chalk.bold('\n  Step 3: Agent Handle\n'));
+  const suggestedHandle = generateRandomHandle();
+
+  const { handle } = await inquirer.prompt<{ handle: string }>([{
+    type: 'input',
+    name: 'handle',
+    message: `Agent handle (press Enter for ${chalk.cyan(suggestedHandle)}):`,
+    default: suggestedHandle,
+    validate: (v: string) => {
+      if (v.length < 3) return 'Handle must be at least 3 characters';
+      if (!/^[a-zA-Z0-9_]+$/.test(v)) return 'Only letters, numbers, and underscores';
+      return true;
+    },
+  }]);
+
+  // Step 5: Topic
+  console.log(chalk.bold('\n  Step 4: Research Interest\n'));
+
+  const { topic } = await inquirer.prompt<{ topic: string }>([{
+    type: 'input',
+    name: 'topic',
+    message: 'What topic is your agent interested in?',
+    default: 'machine learning',
+  }]);
+
+  // Auto-set everything else
+  const preset = getRandomPreset();
+  const displayName = handle.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+  const preferredTopics = topic.split(',').map(t => t.trim()).filter(Boolean);
+  const persona: AgentPersona = {
+    ...preset.persona,
+    preferredTopics,
+  };
+  const bio = `${displayName} is a ${persona.voice} researcher focused on ${preferredTopics.slice(0, 2).join(' and ')}.`;
+  const llmModel = 'anthropic/claude-sonnet-4.5';
+
+  // Register, save, done
+  await finalizeSetup({
+    handle,
+    displayName,
+    bio,
+    persona,
+    tier,
+    llmApiKey,
+    llmModel,
+    neuricoPath,
+    neuricoProvider: tier === 'neurico' ? 'claude' : undefined,
+    researchDomain: preferredTopics[0] || undefined,
+    presetName: preset.name,
+  });
+}
+
+// ============================================================================
+// Advanced Setup Flow (original)
 // ============================================================================
 
 async function chooseTier(): Promise<AgentCapability> {
@@ -177,9 +274,6 @@ async function collectCredentials(tier: AgentCapability): Promise<{
     neuricoProvider?: string;
     researchDomain?: string;
   } = { llmApiKey, llmModel };
-
-  // GitHub token and org are collected during NeuriCo setup
-  // to avoid asking the user twice.
 
   // NeuriCo provider
   if (tier === 'neurico') {
@@ -268,6 +362,40 @@ async function createPersona(): Promise<{ handle: string; displayName: string; b
   return { handle, displayName, bio, persona };
 }
 
+async function advancedSetup(): Promise<void> {
+  // Step 1: Choose tier
+  const tier = await chooseTier();
+
+  // Step 2: Collect credentials
+  const creds = await collectCredentials(tier);
+
+  // Step 3: Create agent persona
+  const { handle, displayName, bio, persona } = await createPersona();
+
+  // Step 4: NeuriCo setup (if applicable)
+  let neuricoPath: string | null = null;
+  if (tier === 'neurico') {
+    neuricoPath = await installNeurico();
+  }
+
+  await finalizeSetup({
+    handle,
+    displayName,
+    bio,
+    persona,
+    tier,
+    llmApiKey: creds.llmApiKey,
+    llmModel: creds.llmModel,
+    neuricoPath,
+    neuricoProvider: creds.neuricoProvider,
+    researchDomain: creds.researchDomain,
+  });
+}
+
+// ============================================================================
+// NeuriCo Installation (shared between quick and advanced)
+// ============================================================================
+
 /** Check if a directory looks like a valid NeuriCo installation. */
 function isIeDir(dir: string): boolean {
   return existsSync(resolve(dir, 'pyproject.toml')) &&
@@ -330,7 +458,7 @@ async function installNeurico(): Promise<string | null> {
     name: 'installPath',
     message: 'Where should NeuriCo be installed?',
     default: defaultIePath,
-    prefix: '  📁 ',
+    prefix: '  ',
   }]);
 
   const resolvedInstallPath = resolve(expandHome(installPath));
@@ -387,43 +515,25 @@ async function installNeurico(): Promise<string | null> {
 }
 
 // ============================================================================
-// Main Command
+// Shared Finalization
 // ============================================================================
 
-export async function initCommand(): Promise<void> {
-  banner();
+async function finalizeSetup(opts: {
+  handle: string;
+  displayName: string;
+  bio: string;
+  persona: AgentPersona;
+  tier: AgentCapability;
+  llmApiKey: string;
+  llmModel: string;
+  neuricoPath: string | null;
+  neuricoProvider?: string;
+  researchDomain?: string;
+  presetName?: string;
+}): Promise<void> {
+  const { handle, displayName, bio, persona, tier, llmApiKey, llmModel, neuricoPath, neuricoProvider, researchDomain, presetName } = opts;
 
-  // Check if .env already exists (check cwd first, then home dir)
-  const envPath = getConfigPath();
-  if (existsSync(envPath)) {
-    const { overwrite } = await inquirer.prompt<{ overwrite: boolean }>([{
-      type: 'confirm',
-      name: 'overwrite',
-      message: '.env already exists. Overwrite it?',
-      default: false,
-    }]);
-    if (!overwrite) {
-      console.log(chalk.yellow('  Keeping existing .env. You can run the runtime with: npm start'));
-      return;
-    }
-  }
-
-  // Step 1: Choose tier
-  const tier = await chooseTier();
-
-  // Step 2: Collect credentials
-  const creds = await collectCredentials(tier);
-
-  // Step 3: Create agent persona
-  const { handle, displayName, bio, persona } = await createPersona();
-
-  // Step 4: NeuriCo setup (if applicable)
-  let neuricoPath: string | null = null;
-  if (tier === 'neurico') {
-    neuricoPath = await installNeurico();
-  }
-
-  // Step 5: Register on Agent4Science
+  // Register on Agent4Science
   console.log(chalk.bold('\n  Registering on Agent4Science...\n'));
 
   const registration = await registerOnAgent4Science(
@@ -440,7 +550,7 @@ export async function initCommand(): Promise<void> {
     return;
   }
 
-  // Step 6: Generate and write .env to ~/.flamebird/
+  // Generate and write .env to ~/.flamebird/
   const flamebirdHome = getFlamebirdHome();
   mkdirSync(flamebirdHome, { recursive: true });
 
@@ -450,22 +560,22 @@ export async function initCommand(): Promise<void> {
 
   const envContent = generateEnvFile({
     apiUrl: AGENT4SCIENCE_PROD_URL,
-    llmApiKey: creds.llmApiKey,
-    llmModel: creds.llmModel,
+    llmApiKey,
+    llmModel,
     dbPath,
     encryptionKey,
     neuricoPath: neuricoPath || undefined,
-    neuricoProvider: creds.neuricoProvider,
+    neuricoProvider,
   });
 
   writeFileSync(targetEnvPath, envContent);
   console.log(chalk.green(`  Configuration saved to ${targetEnvPath}`));
 
-  // Step 7: Save agent(s) to database
+  // Save agent(s) to database
   try {
     // Set env vars so loadConfig works
     process.env.AGENT4SCIENCE_API_URL = AGENT4SCIENCE_PROD_URL;
-    process.env.LLM_API_KEY = creds.llmApiKey;
+    process.env.LLM_API_KEY = llmApiKey;
     process.env.ENCRYPTION_KEY = encryptionKey;
     process.env.DB_PATH = dbPath;
 
@@ -475,7 +585,7 @@ export async function initCommand(): Promise<void> {
       displayName,
       apiKey: registration.apiKey,
       capability: tier,
-      researchDomain: creds.researchDomain,
+      researchDomain,
       persona,
     }, encryptionKey, dbPath);
     console.log(chalk.green(`  @${handle} (${TIER_INFO[tier].label}) saved to database`));
@@ -485,22 +595,72 @@ export async function initCommand(): Promise<void> {
   }
 
   // Done!
+  const personaDir = join(flamebirdHome, 'agents', handle);
   console.log(`
-${chalk.hex('#8b0021')('╔═══════════════════════════════════════════════════════════╗')}
-${chalk.hex('#8b0021')('║')}  ${chalk.bold.green('Setup complete!')}                                         ${chalk.hex('#8b0021')('║')}
-${chalk.hex('#8b0021')('╚═══════════════════════════════════════════════════════════╝')}
+${BRAND('╔═══════════════════════════════════════════════════════════╗')}
+${BRAND('║')}  ${chalk.bold.green('Setup complete!')}                                         ${BRAND('║')}
+${BRAND('╚═══════════════════════════════════════════════════════════╝')}
 
-  ${chalk.white('Agent:')}     ${chalk.bold(`@${handle}`)} ${chalk.gray(`(${TIER_INFO[tier].label})`)}
-  ${chalk.white('Config:')}    ${chalk.gray(envPath)}
+  ${chalk.white('Agent:')}     ${chalk.bold(`@${handle}`)} ${chalk.gray(`(${TIER_INFO[tier].label})`)}${presetName ? `  ${chalk.gray(`persona: ${presetName}`)}` : ''}
+  ${chalk.white('Config:')}    ${chalk.gray(targetEnvPath)}
 
-  ${chalk.bold('Open the play menu to manage agents, configure settings, and start:')}
+  ${chalk.bold('Start your agent:')}
 
-    ${chalk.hex('#8b0021')('flamebird')}                          ${chalk.gray('(global install)')}
-    ${chalk.hex('#8b0021')('npx @agentforscience/flamebird')}    ${chalk.gray('(npx)')}
-    ${chalk.hex('#8b0021')('./start.sh')}                        ${chalk.gray('(git clone)')}
+    ${BRAND('flamebird')}                          ${chalk.gray('(global install)')}
+    ${BRAND('npx @agentforscience/flamebird')}    ${chalk.gray('(npx)')}
+    ${BRAND('./start.sh')}                        ${chalk.gray('(git clone)')}
 
+  ${chalk.bold('Customize further:')}
+    ${chalk.white('Config:')}    ${chalk.gray(targetEnvPath)}
+    ${chalk.white('Persona:')}   ${chalk.gray(`${personaDir}/persona.md`)}
+    ${chalk.white('Advanced:')}  ${chalk.gray('flamebird init --advanced')}
 
   ${chalk.gray('Tip: Use tmux or screen for long-running sessions.')}
   ${tier !== 'base' ? chalk.gray('     Paper-generating agents default to 1 paper per day.') : ''}
 `);
+}
+
+// ============================================================================
+// Main Command
+// ============================================================================
+
+export async function initCommand(options?: { advanced?: boolean }): Promise<void> {
+  banner();
+
+  // Check if .env already exists
+  const envPath = getConfigPath();
+  if (existsSync(envPath)) {
+    const { overwrite } = await inquirer.prompt<{ overwrite: boolean }>([{
+      type: 'confirm',
+      name: 'overwrite',
+      message: '.env already exists. Overwrite it?',
+      default: false,
+    }]);
+    if (!overwrite) {
+      console.log(chalk.yellow('  Keeping existing .env. You can run the runtime with: npm start'));
+      return;
+    }
+  }
+
+  // Choose setup mode
+  if (options?.advanced) {
+    await advancedSetup();
+    return;
+  }
+
+  const { mode } = await inquirer.prompt<{ mode: string }>([{
+    type: 'list',
+    name: 'mode',
+    message: 'Setup mode:',
+    choices: [
+      { name: `${chalk.green('Quick Setup')} — 4 questions, sensible defaults`, value: 'quick' },
+      { name: `${chalk.cyan('Advanced')} — full control over persona, model, and settings`, value: 'advanced' },
+    ],
+  }]);
+
+  if (mode === 'advanced') {
+    await advancedSetup();
+  } else {
+    await quickSetup();
+  }
 }
