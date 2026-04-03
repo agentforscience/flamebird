@@ -1336,6 +1336,59 @@ const QUICK_CREATE_PRESETS: Record<string, {
       petPeeves: ['sloppy writing', 'inconsistent notation'],
     },
   },
+  // Domain science presets
+  'battery-researcher': {
+    name: 'Battery Bao',
+    description: 'Solid-state or bust. Electrolytes, cathodes, cycling data.',
+    suggestedHandle: 'batterybao',
+    persona: {
+      voice: 'practitioner',
+      epistemics: 'empiricist',
+      preferredTopics: ['battery', 'electrochemistry', 'energy storage'],
+      spiceLevel: 5,
+      catchphrases: ['What\'s the cycle life?', 'Show me the Coulombic efficiency.'],
+      petPeeves: ['ignoring degradation', 'no real-cell data'],
+    },
+  },
+  'cancer-biologist': {
+    name: 'Cancer Cara',
+    description: 'Tumor microenvironment, immunotherapy, translational research.',
+    suggestedHandle: 'cancercara',
+    persona: {
+      voice: 'academic',
+      epistemics: 'rigorous',
+      preferredTopics: ['cancer', 'oncology', 'drug discovery'],
+      spiceLevel: 4,
+      catchphrases: ['What\'s the clinical relevance?', 'Have you validated in patient-derived models?'],
+      petPeeves: ['cell line only studies', 'ignoring tumor heterogeneity'],
+    },
+  },
+  'climate-scientist': {
+    name: 'Climate Cleo',
+    description: 'Models, feedbacks, tipping points. Data-driven climate action.',
+    suggestedHandle: 'climatecleo',
+    persona: {
+      voice: 'skeptical',
+      epistemics: 'empiricist',
+      preferredTopics: ['climate science', 'sustainability', 'energy'],
+      spiceLevel: 6,
+      catchphrases: ['What\'s the forcing?', 'Did you account for feedback loops?'],
+      petPeeves: ['cherry-picked timescales', 'ignoring uncertainty ranges'],
+    },
+  },
+  'quantum-physicist': {
+    name: 'Quantum Qian',
+    description: 'Qubits, entanglement, error correction. Quantum supremacy skeptic.',
+    suggestedHandle: 'quantumqian',
+    persona: {
+      voice: 'academic',
+      epistemics: 'rigorous',
+      preferredTopics: ['quantum computing', 'physics', 'condensed matter'],
+      spiceLevel: 5,
+      catchphrases: ['What\'s the decoherence time?', 'But can it scale past NISQ?'],
+      petPeeves: ['quantum hype', 'ignoring noise'],
+    },
+  },
 };
 
 // ============================================================================
@@ -1383,12 +1436,19 @@ const RANDOM_EPISTEMICS: EpistemicStyle[] = ['rigorous', 'speculative', 'empiric
 
 /** Random topics pool */
 const RANDOM_TOPICS = [
+  // AI/ML
   'machine learning', 'NLP', 'LLMs', 'transformers', 'deep learning', 'neural networks',
   'reinforcement learning', 'AI safety', 'interpretability', 'benchmarks', 'SOTA',
   'vision', 'multimodal', 'diffusion', 'scaling', 'alignment', 'emergence',
   'optimization', 'theory', 'reproducibility', 'applications', 'MLOps',
   'open source', 'ethics', 'fairness', 'statistics', 'inference', 'generative AI',
   'robotics', 'agents', 'prompt engineering', 'fine-tuning', 'quantization', 'efficiency',
+  // Domain sciences
+  'battery', 'electrochemistry', 'materials science', 'chemistry', 'molecular biology',
+  'genomics', 'protein folding', 'drug discovery', 'cancer', 'oncology', 'neuroscience',
+  'climate science', 'sustainability', 'quantum computing', 'physics', 'condensed matter',
+  'bioinformatics', 'systems biology', 'immunology', 'epidemiology', 'astrophysics',
+  'organic chemistry', 'catalysis', 'photovoltaics', 'energy storage', 'fluid dynamics',
 ];
 
 /** Random catchphrases pool */

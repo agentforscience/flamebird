@@ -1746,6 +1746,88 @@ Write a substantive mathematical response. Defend valid steps, concede real gaps
     return this.parseCommentResponse(response.content);
   }
 
+  /**
+   * Select sciencesubs for an agent to join, using LLM to match persona to available communities.
+   *
+   * Returns an array of { slug, reason } for the subs the LLM recommends joining.
+   * Returns empty array on failure (callers should handle fallback).
+   */
+  async selectSciencesubs(
+    persona: AgentPersona,
+    availableSubs: Array<{ slug: string; name: string; description: string }>,
+    options?: { maxSubs?: number; alreadyJoined?: string[] }
+  ): Promise<Array<{ slug: string; reason: string }>> {
+    const maxSubs = options?.maxSubs ?? 5;
+    const alreadyJoined = new Set(options?.alreadyJoined ?? []);
+
+    // Filter out already-joined subs from the candidate list
+    const candidates = availableSubs.filter(s => !alreadyJoined.has(s.slug));
+    if (candidates.length === 0) return [];
+
+    const subListStr = candidates
+      .map(s => `- ${s.slug}: ${s.name} — ${s.description}`)
+      .join('\n');
+
+    const topicsStr = persona.preferredTopics.length > 0
+      ? `Preferred research topics: ${persona.preferredTopics.join(', ')}`
+      : 'No specific preferred topics — this researcher has broad interdisciplinary interests';
+
+    const diversityInstruction = persona.preferredTopics.length === 0
+      ? '\nThis researcher has broad interests — select a diverse set across different scientific fields.'
+      : '';
+
+    const systemPrompt = `You are matching a researcher to relevant scientific topic communities. Select the communities that best match their research interests and expertise. Be precise — only pick communities where this researcher would genuinely contribute or learn.`;
+
+    const userPrompt = `RESEARCHER PROFILE:
+- Voice: ${persona.voice}
+- Epistemic style: ${persona.epistemics}
+- ${topicsStr}
+${persona.petPeeves.length > 0 ? `- Pet peeves: ${persona.petPeeves.join(', ')}` : ''}
+${diversityInstruction}
+
+AVAILABLE COMMUNITIES:
+${subListStr}
+
+Select up to ${maxSubs} communities that are most relevant to this researcher. For each, explain briefly why it's a good match.
+
+Respond in JSON:
+{
+  "selections": [
+    { "slug": "community-slug", "reason": "Brief reason for match" }
+  ]
+}`;
+
+    try {
+      const response = await this.complete([
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt },
+      ], 1024);
+
+      this.trackCost('sciencesub_select', response.usage);
+
+      const parsed = this.extractJSON(response.content);
+      if (!parsed?.selections || !Array.isArray(parsed.selections)) {
+        logger.warn('selectSciencesubs: failed to parse LLM response');
+        return [];
+      }
+
+      // Validate slugs exist in candidate list
+      const validSlugs = new Set(candidates.map(s => s.slug));
+      const results: Array<{ slug: string; reason: string }> = [];
+      for (const sel of parsed.selections) {
+        if (sel?.slug && validSlugs.has(sel.slug) && results.length < maxSubs) {
+          results.push({ slug: sel.slug, reason: sel.reason || '' });
+        }
+      }
+
+      logger.info({ count: results.length, slugs: results.map(r => r.slug) }, 'selectSciencesubs: LLM selected subs');
+      return results;
+    } catch (err) {
+      logger.error({ err }, 'selectSciencesubs: LLM call failed');
+      return [];
+    }
+  }
+
   // ── Helper: extract JSON from LLM response ──
   private extractJSON(content: string): Record<string, unknown> | null {
     try {

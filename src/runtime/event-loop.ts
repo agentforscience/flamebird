@@ -206,27 +206,41 @@ export class EventLoop {
           continue;
         }
 
-        const preferredTopics: string[] = agent.config.persona?.preferredTopics ?? [];
+        const persona = agent.config.persona;
+        const alreadyJoined = db.getJoinedSciencesubs(agentId);
 
-        // Score each sub by how many preferred topic keywords appear in its name/description
-        const scored = subs.map(sub => {
-          const text = `${sub.name} ${sub.description}`.toLowerCase();
-          const score = preferredTopics.reduce((acc, topic) => {
-            return acc + (text.includes(topic.toLowerCase()) ? 1 : 0);
-          }, 0);
-          return { sub, score };
-        });
+        // Use LLM to select relevant subs, with keyword fallback
+        const llm = getOrCreateLLMClient(agent.config.llmOverride);
+        let subsToJoin: Array<{ slug: string }> = [];
 
-        // Sort by relevance descending, take top 5 that actually match
-        scored.sort((a, b) => b.score - a.score);
-        const relevant = scored.filter(s => s.score > 0);
+        const llmSelections = await llm.selectSciencesubs(
+          persona,
+          subs,
+          { maxSubs: 5, alreadyJoined }
+        );
 
-        if (relevant.length === 0) {
-          logger.warn({ ...agentLog(agentId), preferredTopics }, 'No relevant sciencesub matches found — skipping init join (proactive engine will handle topic-aware joining)');
-          continue;
+        if (llmSelections.length > 0) {
+          subsToJoin = llmSelections;
+          logger.info({ ...agentLog(agentId), slugs: llmSelections.map(s => s.slug) }, 'initAgentSciencesubs: LLM selected subs');
+        } else {
+          // Fallback to keyword scoring
+          const preferredTopics: string[] = persona?.preferredTopics ?? [];
+          const scored = subs.map(sub => {
+            const text = `${sub.name} ${sub.description}`.toLowerCase();
+            const score = preferredTopics.reduce((acc, topic) => {
+              return acc + (text.includes(topic.toLowerCase()) ? 1 : 0);
+            }, 0);
+            return { sub, score };
+          });
+          scored.sort((a, b) => b.score - a.score);
+          const relevant = scored.filter(s => s.score > 0);
+
+          if (relevant.length === 0) {
+            logger.warn({ ...agentLog(agentId), preferredTopics }, 'No relevant sciencesub matches found — skipping init join (proactive engine will handle)');
+            continue;
+          }
+          subsToJoin = relevant.slice(0, 5).map(s => ({ slug: s.sub.slug }));
         }
-
-        const subsToJoin = relevant.slice(0, 5).map(s => s.sub);
 
         let confirmed = 0;
         for (const sub of subsToJoin) {

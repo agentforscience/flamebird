@@ -519,36 +519,51 @@ export class ProactiveEngine {
         return;
       }
 
-      // Score all subs by relevance (don't filter by local DB — it may be stale)
-      const candidates = subs
-        .map(sub => ({
-          sub,
-          relevance: this.calculateSciencesubRelevance(sub, persona),
-        }))
-        .filter(c => c.relevance > 0.2) // Only join subs with meaningful relevance
-        .sort((a, b) => b.relevance - a.relevance);
+      // Use LLM to select relevant subs, with heuristic fallback
+      const llm = this.llmFor(agentId);
+      const alreadyJoined = db.getJoinedSciencesubs(agentId);
+      let subsToJoin: Array<{ slug: string }> = [];
 
-      if (candidates.length === 0) {
-        logger.warn({ ...agentLog(agentId) }, 'ensureMinimumSciencesubs: no relevant subs found above threshold');
-        return;
+      const llmSelections = await llm.selectSciencesubs(persona, subs, {
+        maxSubs: MIN_SCIENCESUB_MEMBERSHIPS,
+        alreadyJoined,
+      });
+
+      if (llmSelections.length > 0) {
+        subsToJoin = llmSelections;
+        logger.info({ ...agentLog(agentId), slugs: llmSelections.map(s => s.slug) }, 'ensureMinimumSciencesubs: LLM selected subs');
+      } else {
+        // Fallback to heuristic scoring if LLM fails
+        logger.warn({ ...agentLog(agentId) }, 'ensureMinimumSciencesubs: LLM selection failed, falling back to heuristic');
+        const candidates = subs
+          .map(sub => ({
+            sub,
+            relevance: this.calculateSciencesubRelevance(sub, persona),
+          }))
+          .filter(c => c.relevance > 0.2)
+          .sort((a, b) => b.relevance - a.relevance);
+
+        if (candidates.length === 0) {
+          logger.warn({ ...agentLog(agentId) }, 'ensureMinimumSciencesubs: no relevant subs found');
+          return;
+        }
+        subsToJoin = candidates.slice(0, MIN_SCIENCESUB_MEMBERSHIPS).map(c => ({ slug: c.sub.slug }));
       }
 
-      // Try to join the top N most relevant subs.
+      // Try to join the selected subs.
       // Server returns 409 ALREADY_MEMBER if already joined — count those as memberships too.
-      const targetCount = Math.min(MIN_SCIENCESUB_MEMBERSHIPS, candidates.length);
       let confirmed = 0;
-      for (const { sub } of candidates) {
-        if (confirmed >= targetCount) break;
+      for (const { slug } of subsToJoin) {
+        if (confirmed >= MIN_SCIENCESUB_MEMBERSHIPS) break;
 
         try {
-          const joinResult = await client.joinSciencesub(sub.slug, apiKey);
+          const joinResult = await client.joinSciencesub(slug, apiKey);
           if (joinResult.success || joinResult.code === 'ALREADY_MEMBER') {
-            // Only cache when server confirms membership
-            db.recordSciencesubJoin(agentId, sub.slug);
+            db.recordSciencesubJoin(agentId, slug);
             confirmed++;
           }
         } catch (error) {
-          logger.debug({ err: error, ...agentLog(agentId), slug: sub.slug }, 'ensureMinimumSciencesubs: join failed');
+          logger.debug({ err: error, ...agentLog(agentId), slug }, 'ensureMinimumSciencesubs: join failed');
         }
       }
 
@@ -1295,25 +1310,33 @@ export class ProactiveEngine {
         autoJoinSlugs.add(challenge.sciencesub);
       }
     }
-    // Only auto-join subs that are relevant to the agent's preferred topics
+    // Only auto-join subs that are relevant to the agent's topics or already-joined sub domains
     const availableSubs = snapshot.sciencesubs || [];
+    const joinedSlugs = db.getJoinedSciencesubs(agentId);
     for (const slug of autoJoinSlugs) {
-      // Validate against known subs list and check topic relevance
+      // Validate against known subs list
       const subInfo = availableSubs.find(s => s.slug === slug);
       if (!subInfo) {
         logger.debug(`${agentName(agentId)} skipping auto-join of unknown sub ${slug}`);
         continue;
       }
-      const relevance = this.calculateSciencesubRelevance(subInfo, persona);
-      if (relevance < 0.2 && persona.preferredTopics.length > 0) {
-        logger.debug(`${agentName(agentId)} skipping auto-join of irrelevant sub ${slug} (relevance: ${(relevance * 100).toFixed(0)}%)`);
-        continue;
+      // Lightweight relevance check: match slug against preferredTopics + joined sub slug parts
+      if (persona.preferredTopics.length > 0) {
+        const subText = `${slug} ${subInfo.name} ${subInfo.description}`.toLowerCase();
+        const topics = persona.preferredTopics.map(t => t.toLowerCase());
+        const joinedParts = joinedSlugs.flatMap(s => s.split('-').filter(p => p.length > 2));
+        const allKeywords = [...topics, ...joinedParts];
+        const isRelevant = allKeywords.some(kw => subText.includes(kw) || slug.includes(kw));
+        if (!isRelevant) {
+          logger.debug(`${agentName(agentId)} skipping auto-join of irrelevant sub ${slug}`);
+          continue;
+        }
       }
       try {
         const joinResult = await client.joinSciencesub(slug, apiKey);
         if (joinResult.success || joinResult.code === 'ALREADY_MEMBER') {
           db.recordSciencesubJoin(agentId, slug);
-          logger.info(`${agentName(agentId)} auto-joined sciencesub ${slug} (engaged with content, relevance: ${(relevance * 100).toFixed(0)}%)`);
+          logger.info(`${agentName(agentId)} auto-joined sciencesub ${slug} (engaged with content)`);
         }
       } catch {
         // Ignore join errors — transient network issues
