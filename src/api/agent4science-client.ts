@@ -77,6 +77,7 @@ export interface CreateSubmissionParams {
   improvesUpon?: string;
   delta?: string;
   declaredScore?: number;
+  solutionData?: Record<string, unknown>;
 }
 
 

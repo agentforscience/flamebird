@@ -7,6 +7,7 @@ import type { AgentPersona, AgentLLMOverride, CommentIntent } from '../types.js'
 import { createLogger } from '../logging/logger.js';
 import { getCostTracker } from '../utils/cost-tracker.js';
 import { smartTruncate, repairJSON } from '../utils/truncate.js';
+import { runSolverCode } from '../execution/code-sandbox.js';
 
 const logger = createLogger('llm');
 
@@ -60,6 +61,7 @@ export interface GeneratedSolution {
   improvesUpon?: string;
   delta?: string;
   declaredScore?: number;
+  solutionData?: Record<string, unknown>;
 }
 
 export interface ChallengeDecision {
@@ -1458,6 +1460,138 @@ Respond in JSON:
 
     // Should not reach here, but safety fallback
     logger.warn('Challenge solver: QUALITY GATE — exhausted all retries');
+    return null;
+  }
+
+  /**
+   * Generate a solution for a DETERMINISTIC challenge by writing and executing solver code.
+   *
+   * Flow: LLM reads verifier + schema → generates Python solver → we execute it locally →
+   * parse stdout as solutionData → LLM writes title/body/approach describing the method.
+   *
+   * Returns null if code generation or execution fails after retries.
+   */
+  async generateSolverSolution(
+    persona: AgentPersona,
+    challenge: {
+      title: string;
+      description: string;
+      tags: string[];
+      verifier?: string;
+      solutionSchema?: Record<string, unknown>;
+      scoringDirection?: string;
+    },
+    topSubmissions: Array<{ title: string; approach: string; evaluatedScore?: number | null }>,
+  ): Promise<GeneratedSolution | null> {
+    const MAX_RETRIES = 2;
+
+    const schemaStr = challenge.solutionSchema
+      ? JSON.stringify(challenge.solutionSchema, null, 2)
+      : 'No schema provided';
+
+    const competitorContext = topSubmissions.length > 0
+      ? `\n\nExisting submissions (scores to beat):\n${topSubmissions.slice(0, 5).map((s, i) =>
+          `${i + 1}. "${s.title}" — ${s.approach} — score: ${s.evaluatedScore ?? 'pending'}`).join('\n')}`
+      : '\n\nNo existing submissions — you would be the first.';
+
+    // ── Step 1: LLM generates Python solver code ──
+
+    const codeGenPrompt = `You are an expert mathematician and programmer solving an optimization challenge.
+Your task: write a standalone Python script that computes an optimal solution and prints it as JSON.
+
+CHALLENGE:
+Title: ${challenge.title}
+Description: ${challenge.description}
+Scoring: ${challenge.scoringDirection || 'maximize'} (${challenge.scoringDirection === 'minimize' ? 'lower' : 'higher'} is better)
+
+SOLUTION SCHEMA (your output must match this):
+${schemaStr}
+
+VERIFIER CODE (this is what the server runs on your solution):
+\`\`\`python
+${challenge.verifier || 'No verifier available'}
+\`\`\`
+${competitorContext}
+
+REQUIREMENTS:
+1. Write a COMPLETE, STANDALONE Python script
+2. You may import: numpy, math, random, itertools, json, sys
+3. The script must print a single JSON object to stdout matching the solutionSchema
+4. Use efficient optimization (gradient descent, simulated annealing, greedy + local search, etc.)
+5. Must complete within 60 seconds
+6. Do NOT import any packages beyond the standard library and numpy
+7. Print ONLY the JSON result — no debug output to stdout (use stderr for debug)
+
+OUTPUT FORMAT: Respond with ONLY the Python code, no markdown fences, no explanation.`;
+
+    let lastError = '';
+
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+      const retryContext = attempt > 0
+        ? `\n\nYour previous code failed with error: ${lastError}\nFix the issue and try again.`
+        : '';
+
+      logger.info({ attempt }, 'Solver: generating Python code');
+      const codeResponse = await this.complete([
+        { role: 'system', content: `You are a Python optimization expert. Write clean, efficient code. ${persona.preferredTopics.length > 0 ? `Your expertise: ${persona.preferredTopics.join(', ')}.` : ''}` },
+        { role: 'user', content: codeGenPrompt + retryContext },
+      ], 8192);
+
+      this.trackCost('submission', codeResponse.usage);
+
+      // Extract Python code (strip markdown fences if present)
+      let code = codeResponse.content.trim();
+      code = code.replace(/^```python\n?/m, '').replace(/^```\n?/m, '').replace(/\n?```$/m, '');
+
+      if (code.length < 50) {
+        lastError = 'Generated code too short';
+        continue;
+      }
+
+      // ── Step 2: Execute the solver locally ──
+
+      logger.info({ attempt, codeLength: code.length }, 'Solver: executing Python code');
+      const result = await runSolverCode(code);
+
+      if (!result.success || !result.solutionData) {
+        lastError = result.error || 'Unknown execution error';
+        logger.warn({ attempt, error: lastError, timeMs: result.executionTimeMs }, 'Solver: execution failed');
+        continue;
+      }
+
+      logger.info({ attempt, timeMs: result.executionTimeMs, keys: Object.keys(result.solutionData) }, 'Solver: execution succeeded');
+
+      // ── Step 3: LLM writes the submission text (title, body, approach) ──
+
+      const describePrompt = `You just solved this challenge by writing and running optimization code.
+Challenge: ${challenge.title}
+Your solution data: ${JSON.stringify(result.solutionData).slice(0, 500)}...
+
+Write a brief submission describing your approach. Respond in JSON:
+{
+  "title": "Concise title (10-150 chars)",
+  "body": "Description of your method — what algorithm you used, key design choices, why it works. Markdown OK. 200-1000 chars.",
+  "approach": "One-line summary of method (20-200 chars)"
+}`;
+
+      const descResponse = await this.complete([
+        { role: 'system', content: this.buildPersonaPrompt(persona) },
+        { role: 'user', content: describePrompt },
+      ], 2048);
+
+      this.trackCost('submission', descResponse.usage);
+
+      const desc = this.extractJSON(descResponse.content);
+
+      return {
+        title: smartTruncate((desc?.title as string) || `Solver: ${challenge.title}`, 200),
+        body: (desc?.body as string) || `Automated solver solution for ${challenge.title}. Executed Python optimization code to generate an optimal configuration.`,
+        approach: smartTruncate((desc?.approach as string) || 'Numerical optimization via Python solver', 500),
+        solutionData: result.solutionData,
+      };
+    }
+
+    logger.warn('Solver: QUALITY GATE — failed to generate working solver after all retries');
     return null;
   }
 

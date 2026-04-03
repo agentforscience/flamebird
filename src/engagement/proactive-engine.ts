@@ -74,6 +74,7 @@ interface FeedSnapshot {
   }>;
   discoveredAgents: Map<string, string>; // handle → agentId
   sciencesubCandidates: Array<{ slug: string; name: string; description: string; relevance: number }>;
+  sciencesubs: Array<{ slug: string; name: string; description: string }>; // All available subs (for validation)
 }
 
 /**
@@ -524,13 +525,20 @@ export class ProactiveEngine {
           sub,
           relevance: this.calculateSciencesubRelevance(sub, persona),
         }))
+        .filter(c => c.relevance > 0.2) // Only join subs with meaningful relevance
         .sort((a, b) => b.relevance - a.relevance);
+
+      if (candidates.length === 0) {
+        logger.warn({ ...agentLog(agentId) }, 'ensureMinimumSciencesubs: no relevant subs found above threshold');
+        return;
+      }
 
       // Try to join the top N most relevant subs.
       // Server returns 409 ALREADY_MEMBER if already joined — count those as memberships too.
+      const targetCount = Math.min(MIN_SCIENCESUB_MEMBERSHIPS, candidates.length);
       let confirmed = 0;
       for (const { sub } of candidates) {
-        if (confirmed >= MIN_SCIENCESUB_MEMBERSHIPS) break;
+        if (confirmed >= targetCount) break;
 
         try {
           const joinResult = await client.joinSciencesub(sub.slug, apiKey);
@@ -682,6 +690,7 @@ export class ProactiveEngine {
       replyOpportunities: [],
       discoveredAgents: new Map(),
       sciencesubCandidates: [],
+      sciencesubs: [],
     };
 
     // Fetch all feeds in parallel
@@ -872,6 +881,8 @@ export class ProactiveEngine {
 
     // ── Scan sciencesub candidates (read-only) ──
     if (sciencesubsResult.success && sciencesubsResult.data) {
+      const allSubs = Array.isArray(sciencesubsResult.data) ? sciencesubsResult.data : [];
+      snapshot.sciencesubs = allSubs;
       snapshot.sciencesubCandidates = this.scanSciencesubCandidates(agentId, persona, sciencesubsResult.data);
     }
 
@@ -909,7 +920,13 @@ export class ProactiveEngine {
    * Based on stance interest, recency, and comment count.
    */
   private scoreTake(take: Agent4ScienceTake, persona: AgentPersona): number {
-    let score = 0.3; // base score
+    let score = 0.2; // base score
+
+    // Topic relevance (0-0.4) — only engage with takes in agent's domain
+    const takeTags = take.sciencesub ? [take.sciencesub] : [];
+    if (this.isTopicRelevant(takeTags, persona.preferredTopics)) {
+      score += 0.4;
+    }
 
     // Stance interest (0-0.3) — controversial takes are more interesting
     if (this.stanceStrictlyConflicts(take.stance, persona)) {
@@ -1266,7 +1283,7 @@ export class ProactiveEngine {
       }
     }
 
-    // ── Auto-join sciencesubs from browsed takes and challenges ──
+    // ── Auto-join sciencesubs from browsed takes and challenges (only if topic-relevant) ──
     const autoJoinSlugs = new Set<string>();
     for (const take of snapshot.takes) {
       if (take.sciencesub && !db.hasJoinedSciencesub(agentId, take.sciencesub)) {
@@ -1278,12 +1295,25 @@ export class ProactiveEngine {
         autoJoinSlugs.add(challenge.sciencesub);
       }
     }
+    // Only auto-join subs that are relevant to the agent's preferred topics
+    const availableSubs = snapshot.sciencesubs || [];
     for (const slug of autoJoinSlugs) {
+      // Validate against known subs list and check topic relevance
+      const subInfo = availableSubs.find(s => s.slug === slug);
+      if (!subInfo) {
+        logger.debug(`${agentName(agentId)} skipping auto-join of unknown sub ${slug}`);
+        continue;
+      }
+      const relevance = this.calculateSciencesubRelevance(subInfo, persona);
+      if (relevance < 0.2 && persona.preferredTopics.length > 0) {
+        logger.debug(`${agentName(agentId)} skipping auto-join of irrelevant sub ${slug} (relevance: ${(relevance * 100).toFixed(0)}%)`);
+        continue;
+      }
       try {
         const joinResult = await client.joinSciencesub(slug, apiKey);
         if (joinResult.success || joinResult.code === 'ALREADY_MEMBER') {
           db.recordSciencesubJoin(agentId, slug);
-          logger.info(`${agentName(agentId)} auto-joined sciencesub ${slug} (engaged with content)`);
+          logger.info(`${agentName(agentId)} auto-joined sciencesub ${slug} (engaged with content, relevance: ${(relevance * 100).toFixed(0)}%)`);
         }
       } catch {
         // Ignore join errors — transient network issues
@@ -2457,17 +2487,36 @@ export class ProactiveEngine {
         improvesUponSub = submissions.find(s => s.id === decision.improvesUpon);
       }
 
-      // Fetch platform skill.md for quality guidance
-      const skillMdContext = await client.fetchSkillMd();
+      // Route based on evaluation type: deterministic challenges use code execution
+      const isDeterministic = challenge.evaluationType === 'deterministic' && !!challenge.verifier;
+      let solution: import('../llm/llm-client.js').GeneratedSolution | null;
 
-      // Generate solution (returns null if quality gate blocks submission)
-      const solution = await llm.generateSolution(
-        persona,
-        { title: challenge.title, description: challenge.description, tags: challenge.tags },
-        submissions.slice(0, 3).map(s => ({ title: s.title, approach: s.approach, body: s.body })),
-        improvesUponSub ? { id: improvesUponSub.id, title: improvesUponSub.title, approach: improvesUponSub.approach, body: improvesUponSub.body } : undefined,
-        skillMdContext || undefined
-      );
+      if (isDeterministic) {
+        // ── Solver path: LLM writes Python code → execute locally → submit solutionData ──
+        logger.info({ ...agentLog(agentId), challengeId: challenge.id }, 'Using solver path for deterministic challenge');
+        solution = await llm.generateSolverSolution(
+          persona,
+          {
+            title: challenge.title,
+            description: challenge.description,
+            tags: challenge.tags,
+            verifier: challenge.verifier,
+            solutionSchema: challenge.solutionSchema,
+            scoringDirection: challenge.scoringDirection,
+          },
+          submissions.slice(0, 5).map(s => ({ title: s.title, approach: s.approach, evaluatedScore: s.evaluatedScore })),
+        );
+      } else {
+        // ── Text path: LLM generates proof/analysis (existing flow) ──
+        const skillMdContext = await client.fetchSkillMd();
+        solution = await llm.generateSolution(
+          persona,
+          { title: challenge.title, description: challenge.description, tags: challenge.tags },
+          submissions.slice(0, 3).map(s => ({ title: s.title, approach: s.approach, body: s.body })),
+          improvesUponSub ? { id: improvesUponSub.id, title: improvesUponSub.title, approach: improvesUponSub.approach, body: improvesUponSub.body } : undefined,
+          skillMdContext || undefined
+        );
+      }
 
       if (!solution) {
         logger.info({ ...agentLog(agentId), challengeId: challenge.id }, 'Quality gate blocked submission — solution did not pass verification');
@@ -2629,9 +2678,35 @@ export class ProactiveEngine {
     const lowerTags = contentTags.map(t => t.toLowerCase());
     const lowerTopics = preferredTopics.map(t => t.toLowerCase());
 
-    return lowerTopics.some(topic =>
-      lowerTags.some(tag => tag.includes(topic) || topic.includes(tag))
-    );
+    // Related terms for broader domain matching
+    const relatedTerms: Record<string, string[]> = {
+      'battery': ['electrochemistry', 'electrolyte', 'energy', 'materials', 'chemistry', 'cathode', 'anode', 'lithium', 'solid-state'],
+      'chemistry': ['molecular', 'reaction', 'synthesis', 'materials', 'drug-discovery', 'protein', 'electrochemistry'],
+      'materials': ['chemistry', 'battery', 'polymer', 'crystal', 'semiconductor'],
+      'biology': ['genomics', 'protein', 'cell', 'molecular', 'evolution', 'genetics', 'dna', 'systems-biology', 'drug-discovery'],
+      'physics': ['quantum', 'particle', 'thermodynamics', 'mechanics', 'condensed-matter'],
+      'neuroscience': ['brain', 'neural', 'cognition', 'computational-neuroscience'],
+      'climate': ['atmosphere', 'ocean', 'environmental', 'sustainability', 'energy'],
+      'energy': ['battery', 'solar', 'renewable', 'electrochemistry', 'grid'],
+      'protein': ['protein-folding', 'drug-discovery', 'molecular', 'biology'],
+      'genomics': ['genetics', 'dna', 'rna', 'sequencing', 'biology'],
+      'drug': ['drug-discovery', 'pharma', 'molecular', 'protein'],
+      'cancer': ['oncology', 'tumor', 'immunotherapy', 'genomics', 'drug-discovery', 'biomarker', 'chemotherapy', 'personalized-medicine'],
+      'lung cancer': ['cancer', 'oncology', 'tumor', 'immunotherapy', 'genomics', 'drug-discovery', 'biomarker'],
+      'oncology': ['cancer', 'tumor', 'immunotherapy', 'drug-discovery', 'genomics'],
+      'ml': ['machine-learning', 'deep-learning', 'neural', 'transformer', 'llm'],
+      'ai': ['artificial-intelligence', 'machine-learning', 'neural', 'agent'],
+      'math': ['mathematics', 'algebra', 'geometry', 'topology', 'combinatorics'],
+      'nlp': ['language', 'text', 'transformer', 'llm'],
+    };
+
+    return lowerTopics.some(topic => {
+      // Direct substring match
+      if (lowerTags.some(tag => tag.includes(topic) || topic.includes(tag))) return true;
+      // Related terms match
+      const related = relatedTerms[topic] || [];
+      return related.some(r => lowerTags.some(tag => tag.includes(r) || r.includes(tag)));
+    });
   }
 
   /**
@@ -2652,12 +2727,27 @@ export class ProactiveEngine {
       'math': ['mathematics', 'theory', 'optimization', 'algebra', 'calculus', 'topology'],
       'mathematics': ['math', 'theory', 'optimization', 'algebra', 'geometry'],
       'theory': ['mathematics', 'theoretical', 'proof', 'theorem'],
-      'optimization': ['efficiency', 'performance', 'scaling'],
+      'optimization': ['efficiency', 'performance', 'scaling', 'convex'],
       'nlp': ['language', 'text', 'transformer', 'llm', 'gpt'],
       'cv': ['vision', 'image', 'visual', 'cnn'],
       'rl': ['reinforcement', 'agent', 'policy', 'reward'],
       'alignment': ['safety', 'ethics', 'interpretability'],
       'scaling': ['efficiency', 'optimization', 'performance'],
+      // Domain sciences
+      'battery': ['electrochemistry', 'electrolyte', 'energy', 'materials', 'chemistry', 'cathode', 'anode', 'lithium', 'solid-state'],
+      'chemistry': ['molecular', 'reaction', 'synthesis', 'materials', 'drug-discovery', 'protein', 'electrochemistry', 'battery'],
+      'materials': ['chemistry', 'materials-science', 'battery', 'polymer', 'crystal', 'semiconductor'],
+      'biology': ['genomics', 'protein', 'cell', 'molecular', 'evolution', 'genetics', 'dna', 'systems-biology', 'drug-discovery'],
+      'physics': ['quantum', 'particle', 'thermodynamics', 'mechanics', 'condensed-matter', 'optics'],
+      'neuroscience': ['brain', 'neural', 'cognition', 'neurobiology', 'computational-neuroscience'],
+      'climate': ['atmosphere', 'ocean', 'earth', 'environmental', 'sustainability', 'energy'],
+      'energy': ['battery', 'solar', 'renewable', 'electrochemistry', 'grid', 'sustainability'],
+      'protein': ['protein-folding', 'drug-discovery', 'molecular', 'biology', 'genomics'],
+      'genomics': ['genetics', 'dna', 'rna', 'sequencing', 'biology', 'evolution'],
+      'drug': ['drug-discovery', 'pharma', 'molecular', 'protein', 'clinical'],
+      'cancer': ['oncology', 'tumor', 'immunotherapy', 'genomics', 'drug-discovery', 'biomarker', 'chemotherapy', 'personalized-medicine', 'cell-biology'],
+      'lung cancer': ['cancer', 'oncology', 'tumor', 'immunotherapy', 'genomics', 'drug-discovery', 'biomarker'],
+      'oncology': ['cancer', 'tumor', 'immunotherapy', 'drug-discovery', 'genomics', 'personalized-medicine'],
     };
 
     const slug = sciencesub.slug.toLowerCase();
@@ -2666,8 +2756,8 @@ export class ProactiveEngine {
     const slugParts = slug.split('-').filter(p => p.length > 2);
     const topics = persona.preferredTopics.map(t => t.toLowerCase());
 
-    // Agents without preferences get higher base interest (50%)
-    if (topics.length === 0) return 0.5;
+    // Agents without preferences get moderate base interest
+    if (topics.length === 0) return 0.3;
 
     let score = 0;
     for (const topic of topics) {

@@ -652,6 +652,7 @@ export class ActionExecutor {
       improvesUpon?: string;
       delta?: string;
       declaredScore?: number;
+      solutionData?: Record<string, unknown>;
     };
 
     // targetId is the challengeId
