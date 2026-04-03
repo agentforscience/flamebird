@@ -13,12 +13,11 @@
 import chalk from 'chalk';
 import inquirer from 'inquirer';
 import { existsSync, mkdirSync, writeFileSync } from 'fs';
-import { homedir } from 'os';
-import { join, resolve } from 'path';
-import { execSync, spawnSync } from 'child_process';
+import { join } from 'path';
 import { getFlamebirdHome, getConfigPath } from '../../config/config.js';
-import { registerOnAgent4Science, saveAgentToDb } from '../utils/agent-registration.js';
 import { getRandomPreset } from '../utils/persona-presets.js';
+import { ensureNeurico, ensureCredentials, generateEncryptionKey } from '../utils/ensure-credentials.js';
+import { registerAndSaveAgent } from '../utils/agent-creation.js';
 import type { AgentCapability, AgentPersona, PersonaVoice, EpistemicStyle } from '../../types.js';
 
 // ============================================================================
@@ -108,15 +107,6 @@ function generateEnvFile(options: {
   return lines.join('\n');
 }
 
-function generateEncryptionKey(): string {
-  const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
-  let key = '';
-  for (let i = 0; i < 32; i++) {
-    key += chars[Math.floor(Math.random() * chars.length)];
-  }
-  return key;
-}
-
 function generateRandomHandle(): string {
   const adjectives = ['curious', 'sharp', 'bold', 'keen', 'swift', 'calm', 'bright', 'deep'];
   const nouns = ['researcher', 'scholar', 'scientist', 'thinker', 'analyst', 'theorist'];
@@ -159,7 +149,7 @@ async function quickSetup(): Promise<void> {
   // Step 3: NeuriCo setup (if applicable)
   let neuricoPath: string | null = null;
   if (tier === 'neurico') {
-    neuricoPath = await installNeurico();
+    neuricoPath = await ensureNeurico();
   }
 
   // Step 4: Handle
@@ -209,7 +199,6 @@ async function quickSetup(): Promise<void> {
     llmApiKey,
     llmModel,
     neuricoPath,
-    neuricoProvider: tier === 'neurico' ? 'claude' : undefined,
     researchDomain: preferredTopics[0] || undefined,
     presetName: preset.name,
   });
@@ -244,11 +233,9 @@ async function chooseTier(): Promise<AgentCapability> {
   return tier;
 }
 
-async function collectCredentials(tier: AgentCapability): Promise<{
+async function collectCredentials(): Promise<{
   llmApiKey: string;
   llmModel: string;
-  neuricoProvider?: string;
-  researchDomain?: string;
 }> {
   console.log(chalk.bold('\n  Credentials\n'));
 
@@ -268,42 +255,7 @@ async function collectCredentials(tier: AgentCapability): Promise<{
     default: 'anthropic/claude-sonnet-4.5',
   }]);
 
-  const result: {
-    llmApiKey: string;
-    llmModel: string;
-    neuricoProvider?: string;
-    researchDomain?: string;
-  } = { llmApiKey, llmModel };
-
-  // NeuriCo provider
-  if (tier === 'neurico') {
-    const { provider } = await inquirer.prompt<{ provider: string }>([{
-      type: 'list',
-      name: 'provider',
-      message: 'AI provider for NeuriCo:',
-      choices: [
-        { name: 'Claude (Anthropic)', value: 'claude' },
-        { name: 'Codex (OpenAI)', value: 'codex' },
-        { name: 'Gemini (Google)', value: 'gemini' },
-      ],
-    }]);
-    result.neuricoProvider = provider;
-
-    // Research domain selection
-    const { domain } = await inquirer.prompt<{ domain: string }>([{
-      type: 'list',
-      name: 'domain',
-      message: 'Research domain:',
-      choices: [
-        { name: 'General (AI/ML)', value: 'artificial_intelligence' },
-        { name: 'Mathematics', value: 'mathematics' },
-      ],
-      default: 'artificial_intelligence',
-    }]);
-    result.researchDomain = domain;
-  }
-
-  return result;
+  return { llmApiKey, llmModel };
 }
 
 async function createPersona(): Promise<{ handle: string; displayName: string; bio: string; persona: AgentPersona }> {
@@ -367,7 +319,7 @@ async function advancedSetup(): Promise<void> {
   const tier = await chooseTier();
 
   // Step 2: Collect credentials
-  const creds = await collectCredentials(tier);
+  const creds = await collectCredentials();
 
   // Step 3: Create agent persona
   const { handle, displayName, bio, persona } = await createPersona();
@@ -375,7 +327,7 @@ async function advancedSetup(): Promise<void> {
   // Step 4: NeuriCo setup (if applicable)
   let neuricoPath: string | null = null;
   if (tier === 'neurico') {
-    neuricoPath = await installNeurico();
+    neuricoPath = await ensureNeurico();
   }
 
   await finalizeSetup({
@@ -387,131 +339,7 @@ async function advancedSetup(): Promise<void> {
     llmApiKey: creds.llmApiKey,
     llmModel: creds.llmModel,
     neuricoPath,
-    neuricoProvider: creds.neuricoProvider,
-    researchDomain: creds.researchDomain,
   });
-}
-
-// ============================================================================
-// NeuriCo Installation (shared between quick and advanced)
-// ============================================================================
-
-/** Check if a directory looks like a valid NeuriCo installation. */
-function isIeDir(dir: string): boolean {
-  return existsSync(resolve(dir, 'pyproject.toml')) &&
-    existsSync(resolve(dir, 'src', 'core', 'runner.py'));
-}
-
-/** Expand leading ~ to the user's home directory. */
-function expandHome(p: string): string {
-  return p.replace(/^~(?=$|\/)/, process.env.HOME || homedir());
-}
-
-/**
- * Find or install NeuriCo.
- * GitHub credentials are collected during NeuriCo's own setup wizard.
- */
-async function installNeurico(): Promise<string | null> {
-  console.log(chalk.bold('\n  NeuriCo Setup\n'));
-
-  // Check if already installed
-  const defaultIePath = join(getFlamebirdHome(), 'neurico');
-  const commonPaths = [
-    process.env.NEURICO_PATH || '',
-    defaultIePath,
-    resolve(process.env.HOME || '~', 'neurico'),
-    resolve('.', 'neurico'),
-  ].filter(Boolean);
-
-  for (const p of commonPaths) {
-    const resolved = isIeDir(p) ? p
-      : isIeDir(resolve(p, 'neurico')) ? resolve(p, 'neurico')
-      : null;
-    if (resolved) {
-      console.log(chalk.green(`  Found existing installation at ${resolved}`));
-      const { useExisting } = await inquirer.prompt<{ useExisting: boolean }>([{
-        type: 'confirm',
-        name: 'useExisting',
-        message: 'Use this installation?',
-        default: true,
-      }]);
-      if (useExisting) return resolved;
-    }
-  }
-
-  const { install } = await inquirer.prompt<{ install: boolean }>([{
-    type: 'confirm',
-    name: 'install',
-    message: 'NeuriCo is not installed. Install it now?',
-    default: true,
-  }]);
-
-  if (!install) {
-    console.log(chalk.yellow('  Skipping. You can install later with:'));
-    console.log(chalk.cyan('  curl -fsSL https://raw.githubusercontent.com/ChicagoHAI/neurico/main/install.sh | bash'));
-    return null;
-  }
-
-  // Ask where to install NeuriCo
-  const { installPath } = await inquirer.prompt<{ installPath: string }>([{
-    type: 'input',
-    name: 'installPath',
-    message: 'Where should NeuriCo be installed?',
-    default: defaultIePath,
-    prefix: '  ',
-  }]);
-
-  const resolvedInstallPath = resolve(expandHome(installPath));
-
-  // Check prerequisites
-  try {
-    execSync('git --version', { stdio: 'ignore' });
-  } catch {
-    console.log(chalk.red('  git is required but not installed.'));
-    return null;
-  }
-  try {
-    execSync('docker --version', { stdio: 'ignore' });
-  } catch {
-    console.log(chalk.red('  docker is required but not installed.'));
-    return null;
-  }
-
-  try {
-    // Clone or update NeuriCo
-    if (existsSync(join(resolvedInstallPath, '.git'))) {
-      console.log(chalk.gray(`\n  Updating existing installation at ${resolvedInstallPath}...`));
-      spawnSync('git', ['-C', resolvedInstallPath, 'pull', '--ff-only'], { stdio: 'inherit' });
-    } else {
-      console.log(chalk.gray(`\n  Cloning NeuriCo to ${resolvedInstallPath}...\n`));
-      const clone = spawnSync('git', ['clone', 'https://github.com/ChicagoHAI/neurico.git', resolvedInstallPath], {
-        stdio: 'inherit',
-      });
-      if (clone.status !== 0) {
-        console.log(chalk.red('  Failed to clone NeuriCo.'));
-        return null;
-      }
-    }
-
-    console.log(chalk.gray('\n  Running NeuriCo setup...\n'));
-    spawnSync('./neurico', ['setup'], {
-      cwd: resolvedInstallPath,
-      stdio: 'inherit',
-      timeout: 600000,
-    });
-
-    if (isIeDir(resolvedInstallPath)) {
-      console.log(chalk.green(`\n  NeuriCo installed at ${resolvedInstallPath}`));
-      return resolvedInstallPath;
-    }
-
-    console.log(chalk.yellow('\n  NeuriCo cloned but setup may not have completed.'));
-    console.log(chalk.yellow(`  You can finish setup later: cd ${resolvedInstallPath} && ./neurico setup`));
-    return resolvedInstallPath;
-  } catch {
-    console.log(chalk.yellow('\n  Installation did not complete. You can install later.'));
-    return null;
-  }
 }
 
 // ============================================================================
@@ -527,28 +355,10 @@ async function finalizeSetup(opts: {
   llmApiKey: string;
   llmModel: string;
   neuricoPath: string | null;
-  neuricoProvider?: string;
   researchDomain?: string;
   presetName?: string;
 }): Promise<void> {
-  const { handle, displayName, bio, persona, tier, llmApiKey, llmModel, neuricoPath, neuricoProvider, researchDomain, presetName } = opts;
-
-  // Register on Agent4Science
-  console.log(chalk.bold('\n  Registering on Agent4Science...\n'));
-
-  const registration = await registerOnAgent4Science(
-    AGENT4SCIENCE_PROD_URL,
-    handle,
-    displayName,
-    bio,
-    persona,
-    llmModel,
-  );
-
-  if (!registration) {
-    console.log(chalk.red('\n  Could not register agent. Please check your internet connection and try again.'));
-    return;
-  }
+  const { handle, displayName, bio, persona, tier, llmApiKey, llmModel, neuricoPath, researchDomain, presetName } = opts;
 
   // Generate and write .env to ~/.flamebird/
   const flamebirdHome = getFlamebirdHome();
@@ -565,34 +375,48 @@ async function finalizeSetup(opts: {
     dbPath,
     encryptionKey,
     neuricoPath: neuricoPath || undefined,
-    neuricoProvider,
   });
 
   writeFileSync(targetEnvPath, envContent);
   console.log(chalk.green(`  Configuration saved to ${targetEnvPath}`));
 
-  // Save agent(s) to database
-  try {
-    // Set env vars so loadConfig works
-    process.env.AGENT4SCIENCE_API_URL = AGENT4SCIENCE_PROD_URL;
-    process.env.LLM_API_KEY = llmApiKey;
-    process.env.ENCRYPTION_KEY = encryptionKey;
-    process.env.DB_PATH = dbPath;
-
-    saveAgentToDb({
-      id: registration.id,
-      handle,
-      displayName,
-      apiKey: registration.apiKey,
-      capability: tier,
-      researchDomain,
-      persona,
-    }, encryptionKey, dbPath);
-    console.log(chalk.green(`  @${handle} (${TIER_INFO[tier].label}) saved to database`));
-
-  } catch (err) {
-    console.log(chalk.yellow(`  Warning: Could not save to database: ${err instanceof Error ? err.message : String(err)}`));
+  // Set env vars so loadConfig and ensureCredentials work
+  process.env.AGENT4SCIENCE_API_URL = AGENT4SCIENCE_PROD_URL;
+  process.env.LLM_API_KEY = llmApiKey;
+  process.env.ENCRYPTION_KEY = encryptionKey;
+  process.env.DB_PATH = dbPath;
+  if (neuricoPath) {
+    process.env.NEURICO_PATH = neuricoPath;
   }
+
+  // For neurico tier, run ensureCredentials to handle GitHub token import,
+  // provider selection, and credential sync — through the single canonical path
+  if (tier === 'neurico') {
+    await ensureCredentials(tier);
+  }
+
+  // Register on Agent4Science + save to local DB
+  console.log(chalk.bold('\n  Registering on Agent4Science...\n'));
+
+  const registration = await registerAndSaveAgent({
+    apiUrl: AGENT4SCIENCE_PROD_URL,
+    handle,
+    displayName,
+    bio,
+    persona,
+    model: llmModel,
+    capability: tier,
+    researchDomain,
+    encryptionKey,
+    dbPath,
+  });
+
+  if (!registration) {
+    console.log(chalk.red('\n  Could not register agent. Please check your internet connection and try again.'));
+    return;
+  }
+
+  console.log(chalk.green(`  @${handle} (${TIER_INFO[tier].label}) saved to database`));
 
   // Done!
   const personaDir = join(flamebirdHome, 'agents', handle);

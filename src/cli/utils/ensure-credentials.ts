@@ -10,8 +10,9 @@
 import chalk from 'chalk';
 import inquirer from 'inquirer';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
-import { spawnSync } from 'child_process';
+import { execSync, spawnSync } from 'child_process';
 import { config as loadEnv } from 'dotenv';
 import { getConfigPath, getFlamebirdHome } from '../../config/config.js';
 import type { AgentCapability } from '../../types.js';
@@ -87,7 +88,7 @@ export function upsertEnvVars(
 }
 
 /** Generate a 32-char random encryption key. */
-function generateEncryptionKey(): string {
+export function generateEncryptionKey(): string {
   const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
   let key = '';
   for (let i = 0; i < 32; i++) {
@@ -99,6 +100,17 @@ function generateEncryptionKey(): string {
 // ============================================================================
 // NeuriCo
 // ============================================================================
+
+/** Check if a directory looks like a valid NeuriCo installation. */
+export function isNeuricoDir(dir: string): boolean {
+  return fs.existsSync(path.join(dir, 'pyproject.toml')) &&
+    fs.existsSync(path.join(dir, 'src', 'core', 'runner.py'));
+}
+
+/** Expand leading ~ to the user's home directory. */
+function expandHome(p: string): string {
+  return p.replace(/^~(?=$|\/)/, process.env.HOME || os.homedir());
+}
 
 /**
  * Find or install NeuriCo.
@@ -113,10 +125,6 @@ export async function ensureNeurico(): Promise<string | null> {
     path.resolve('.', 'neurico'),
     path.resolve('..', 'neurico'),
   ].filter(Boolean);
-
-  const isNeuricoDir = (dir: string) =>
-    fs.existsSync(path.join(dir, 'pyproject.toml')) &&
-    fs.existsSync(path.join(dir, 'src', 'core', 'runner.py'));
 
   for (const p of candidates) {
     // Check if p itself is NeuriCo, or if p/neurico is
@@ -151,31 +159,67 @@ export async function ensureNeurico(): Promise<string | null> {
     return null;
   }
 
-  console.log(chalk.gray('\n    Running NeuriCo installer...\n'));
+  // Ask where to install
+  const defaultInstallPath = path.join(getFlamebirdHome(), 'neurico');
+  const { installPath } = await inquirer.prompt<{ installPath: string }>([{
+    type: 'input',
+    name: 'installPath',
+    message: 'Where should NeuriCo be installed?',
+    prefix: '    ',
+    default: defaultInstallPath,
+  }]);
 
-  // Run the one-liner installer with inherited stdio so the user sees
-  // the full interactive setup (Docker pull, CLI login, etc.)
-  spawnSync('bash', ['-c', 'curl -fsSL https://raw.githubusercontent.com/ChicagoHAI/neurico/main/install.sh | bash'], {
-    stdio: 'inherit',
-    timeout: 600000, // 10 minutes
-  });
+  const resolvedInstallPath = path.resolve(expandHome(installPath));
 
-  // Check if it was installed
-  const homePath = path.resolve(process.env.HOME || '~', 'neurico');
-  if (isNeuricoDir(homePath)) {
-    console.log(chalk.green(`\n    NeuriCo installed at ${homePath}`));
-    return homePath;
+  // Check prerequisites
+  try {
+    execSync('git --version', { stdio: 'ignore' });
+  } catch {
+    console.log(chalk.red('    git is required but not installed.'));
+    return null;
+  }
+  try {
+    execSync('docker --version', { stdio: 'ignore' });
+  } catch {
+    console.log(chalk.red('    docker is required but not installed.'));
+    return null;
   }
 
-  // Ask where it was installed
-  const { iePath } = await inquirer.prompt<{ iePath: string }>([{
-    type: 'input',
-    name: 'iePath',
-    message: 'Where was NeuriCo installed?',
-    prefix: '    ',
-    default: homePath,
-  }]);
-  return iePath || null;
+  try {
+    // Clone or update NeuriCo
+    if (fs.existsSync(path.join(resolvedInstallPath, '.git'))) {
+      console.log(chalk.gray(`\n    Updating existing installation at ${resolvedInstallPath}...`));
+      spawnSync('git', ['-C', resolvedInstallPath, 'pull', '--ff-only'], { stdio: 'inherit' });
+    } else {
+      console.log(chalk.gray(`\n    Cloning NeuriCo to ${resolvedInstallPath}...\n`));
+      const clone = spawnSync('git', ['clone', 'https://github.com/ChicagoHAI/neurico.git', resolvedInstallPath], {
+        stdio: 'inherit',
+      });
+      if (clone.status !== 0) {
+        console.log(chalk.red('    Failed to clone NeuriCo.'));
+        return null;
+      }
+    }
+
+    console.log(chalk.gray('\n    Running NeuriCo setup...\n'));
+    spawnSync('./neurico', ['setup'], {
+      cwd: resolvedInstallPath,
+      stdio: 'inherit',
+      timeout: 600000, // 10 minutes
+    });
+
+    if (isNeuricoDir(resolvedInstallPath)) {
+      console.log(chalk.green(`\n    NeuriCo installed at ${resolvedInstallPath}`));
+      return resolvedInstallPath;
+    }
+
+    console.log(chalk.yellow('\n    NeuriCo cloned but setup may not have completed.'));
+    console.log(chalk.yellow(`    You can finish setup later: cd ${resolvedInstallPath} && ./neurico setup`));
+    return resolvedInstallPath;
+  } catch {
+    console.log(chalk.yellow('\n    Installation did not complete. You can install later.'));
+    return null;
+  }
 }
 
 /**
@@ -239,28 +283,30 @@ export async function ensureCredentials(tier: AgentCapability): Promise<boolean>
     process.env.ENCRYPTION_KEY = key;
   }
 
-  // 2. NeuriCo installation (neurico tier only — do this first so we can
-  //    pick up GitHub credentials that neurico install already collected)
+  // 2. NeuriCo installation (neurico tier only)
   if (tier === 'neurico') {
     if (!env.NEURICO_PATH && !process.env.NEURICO_PATH) {
       const iePath = await ensureNeurico();
       if (iePath) {
         varsToAdd.NEURICO_PATH = iePath;
         process.env.NEURICO_PATH = iePath;
+      }
+    }
 
-        // Import GitHub credentials from neurico/.env if available
-        // (neurico install already prompts for these)
-        const ieEnvPath = path.join(iePath, '.env');
-        if (fs.existsSync(ieEnvPath)) {
-          const ieEnv = readEnvFile(ieEnvPath);
-          if (ieEnv.GITHUB_TOKEN && !env.GITHUB_TOKEN && !process.env.GITHUB_TOKEN) {
-            varsToAdd.GITHUB_TOKEN = ieEnv.GITHUB_TOKEN;
-            process.env.GITHUB_TOKEN = ieEnv.GITHUB_TOKEN;
-          }
-          if (ieEnv.GITHUB_ORG && !env.GITHUB_ORG && !process.env.GITHUB_ORG) {
-            varsToAdd.GITHUB_ORG = ieEnv.GITHUB_ORG;
-            process.env.GITHUB_ORG = ieEnv.GITHUB_ORG;
-          }
+    // Import GitHub credentials from neurico/.env if available.
+    // This runs whether neurico was just discovered OR was already configured.
+    const resolvedNeuricoPath = process.env.NEURICO_PATH || env.NEURICO_PATH;
+    if (resolvedNeuricoPath) {
+      const ieEnvPath = path.join(resolvedNeuricoPath, '.env');
+      if (fs.existsSync(ieEnvPath)) {
+        const ieEnv = readEnvFile(ieEnvPath);
+        if (ieEnv.GITHUB_TOKEN && !env.GITHUB_TOKEN && !process.env.GITHUB_TOKEN && !varsToAdd.GITHUB_TOKEN) {
+          varsToAdd.GITHUB_TOKEN = ieEnv.GITHUB_TOKEN;
+          process.env.GITHUB_TOKEN = ieEnv.GITHUB_TOKEN;
+        }
+        if (ieEnv.GITHUB_ORG && !env.GITHUB_ORG && !process.env.GITHUB_ORG && !varsToAdd.GITHUB_ORG) {
+          varsToAdd.GITHUB_ORG = ieEnv.GITHUB_ORG;
+          process.env.GITHUB_ORG = ieEnv.GITHUB_ORG;
         }
       }
     }

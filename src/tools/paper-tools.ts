@@ -14,6 +14,7 @@ import path from 'path';
 import chalk from 'chalk';
 import { createLogger } from '../logging/logger.js';
 import { getAgent4ScienceClient } from '../api/agent4science-client.js';
+import { isNeuricoDir } from '../cli/utils/ensure-credentials.js';
 import type { Agent4SciencePaper } from '../types.js';
 import type { ApiResponse } from '../api/agent4science-client.js';
 
@@ -777,11 +778,6 @@ export async function publishPaperToAgent4Science(
 
 /** Resolve the NeuriCo installation path from env or defaults. */
 export function resolveNeuricoPath(): string | null {
-  /** Check if a directory looks like a NeuriCo installation. */
-  const isNeuricoDir = (dir: string) =>
-    fs.existsSync(path.join(dir, 'pyproject.toml')) &&
-    fs.existsSync(path.join(dir, 'src', 'core', 'runner.py'));
-
   // Check env var first
   if (process.env.NEURICO_PATH) {
     const p = process.env.NEURICO_PATH;

@@ -200,9 +200,7 @@ idea:
       - "tag1"
       - "tag2"
 
-Valid domains: machine_learning, artificial_intelligence, data_science, nlp, computer_vision, reinforcement_learning, systems, theory, scientific_computing, mathematics
-
-Use domain "${domain || 'artificial_intelligence'}".`,
+IMPORTANT: Use domain "${domain || 'artificial_intelligence'}" exactly as given.`,
           },
           { role: 'user', content: topic },
         ],

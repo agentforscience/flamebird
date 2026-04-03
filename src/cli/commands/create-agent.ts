@@ -10,9 +10,9 @@ import ora from 'ora';
 import { loadConfig, validateSecrets } from '../../config/config.js';
 import { createDatabase, getDatabase } from '../../db/database.js';
 import type { AgentPersona, PersonaVoice, EpistemicStyle, AgentCapability } from '../../types.js';
-import { ensureCredentials } from '../utils/ensure-credentials.js';
 import { normalizeApiError } from '../../api/agent4science-client.js';
-import { registerOnAgent4Science, saveAgentToDb } from '../utils/agent-registration.js';
+import { setupAgentCapability, registerAndSaveAgent } from '../utils/agent-creation.js';
+import { saveAgentToDb } from '../utils/agent-registration.js';
 import { playCommand } from './play.js';
 
 // Large pixel art characters for each personality - game style!
@@ -458,25 +458,7 @@ export async function createAgentCommand(): Promise<void> {
     ],
   }]);
 
-  let selectedDomain: string | undefined;
-  if (selectedCapability !== 'base') {
-    console.log(chalk.yellow(`\n  Note: NeuriCo agents use LLM credits and GitHub API calls.`));
-    console.log(chalk.gray('  Default cadence: 1 paper per day. You can adjust this in settings.\n'));
-    await ensureCredentials(selectedCapability);
-
-    const { domain } = await inquirer.prompt<{ domain: string }>([{
-      type: 'list',
-      name: 'domain',
-      message: chalk.white('Research domain:'),
-      prefix: '  ',
-      choices: [
-        { name: 'General (AI/ML)', value: 'artificial_intelligence' },
-        { name: 'Mathematics', value: 'mathematics' },
-      ],
-      default: 'artificial_intelligence',
-    }]);
-    selectedDomain = domain;
-  }
+  const { domain: selectedDomain } = await setupAgentCapability(selectedCapability);
 
   const creativityLevel = persona.epistemics === 'speculative' ? 10 : persona.epistemics === 'theorist' ? 8 : 5;
   const creativityBar = chalk.magenta('█'.repeat(creativityLevel)) + chalk.gray('░'.repeat(10 - creativityLevel));
@@ -550,33 +532,22 @@ ${chalk.yellow('  └───────────────────�
       petPeeves: persona.petPeeves,
     };
 
-    // Register on Agent4Science
+    // Register on Agent4Science + save to local DB
     const bio = basicInfo.bio || `${basicInfo.displayName} is a ${typedPersona.voice} AI researcher focused on ${typedPersona.preferredTopics.slice(0, 2).join(' and ')}.`;
-    const registration = await registerOnAgent4Science(
-      config.api.apiUrl,
-      basicInfo.handle,
-      basicInfo.displayName,
+    const registration = await registerAndSaveAgent({
+      apiUrl: config.api.apiUrl,
+      handle: basicInfo.handle,
+      displayName: basicInfo.displayName,
       bio,
-      typedPersona,
-      config.llm.model,
-    );
+      persona: typedPersona,
+      model: config.llm.model,
+      capability: selectedCapability,
+      researchDomain: selectedDomain,
+      encryptionKey: config.security.encryptionKey,
+      dbPath: config.database.path,
+    });
 
     if (!registration) return;
-
-    // Save to database + local backup
-    try {
-      saveAgentToDb({
-        id: registration.id,
-        handle: basicInfo.handle,
-        displayName: basicInfo.displayName,
-        apiKey: registration.apiKey,
-        capability: selectedCapability,
-        researchDomain: selectedDomain,
-        persona: typedPersona,
-      }, config.security.encryptionKey, config.database.path);
-    } catch (err) {
-      console.log(chalk.yellow(`  Warning: Could not save to database: ${err instanceof Error ? err.message : String(err)}`));
-    }
 
     // Victory fanfare text
     await typeText(chalk.gray('\n  [ NEURAL UPLOAD COMPLETE ]'), 20);
@@ -1501,23 +1472,7 @@ export async function quickCreateAgentCommand(): Promise<void> {
     ],
   }]);
 
-  let quickDomain: string | undefined;
-  if (quickCapability !== 'base') {
-    await ensureCredentials(quickCapability);
-
-    const { domain } = await inquirer.prompt<{ domain: string }>([{
-      type: 'list',
-      name: 'domain',
-      message: chalk.white('Research domain:'),
-      prefix: '  ',
-      choices: [
-        { name: 'General (AI/ML)', value: 'artificial_intelligence' },
-        { name: 'Mathematics', value: 'mathematics' },
-      ],
-      default: 'artificial_intelligence',
-    }]);
-    quickDomain = domain;
-  }
+  const { domain: quickDomain } = await setupAgentCapability(quickCapability);
 
   // ═══════════════════════════════════════════════════════════════════════════
   // RANDOM MODE: Generate everything automatically with creative names
