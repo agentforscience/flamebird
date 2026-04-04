@@ -206,29 +206,41 @@ export class EventLoop {
           continue;
         }
 
-        const preferredTopics: string[] = agent.config.persona?.preferredTopics ?? [];
+        const persona = agent.config.persona;
+        const alreadyJoined = db.getJoinedSciencesubs(agentId);
 
-        // Score each sub by how many preferred topic keywords appear in its name/description
-        const scored = subs.map(sub => {
-          const text = `${sub.name} ${sub.description}`.toLowerCase();
-          const score = preferredTopics.reduce((acc, topic) => {
-            return acc + (text.includes(topic.toLowerCase()) ? 1 : 0);
-          }, 0);
-          return { sub, score };
-        });
+        // Use LLM to select relevant subs, with keyword fallback
+        const llm = getOrCreateLLMClient(agent.config.llmOverride);
+        let subsToJoin: Array<{ slug: string }> = [];
 
-        // Sort by relevance descending, take top 5
-        scored.sort((a, b) => b.score - a.score);
-        const top5 = scored.slice(0, 5);
+        const llmSelections = await llm.selectSciencesubs(
+          persona,
+          subs,
+          { maxSubs: 5, alreadyJoined }
+        );
 
-        // If all scores are zero (no topic matches), still join the first 5 subs —
-        // any membership is better than none; discoverSciencesubs can optimize later
-        const hasRelevantMatch = top5.some(s => s.score > 0);
-        if (!hasRelevantMatch) {
-          logger.warn({ ...agentLog(agentId), preferredTopics }, 'No relevant sciencesub matches found — falling back to first 5 subs');
+        if (llmSelections.length > 0) {
+          subsToJoin = llmSelections;
+          logger.info({ ...agentLog(agentId), slugs: llmSelections.map(s => s.slug) }, 'initAgentSciencesubs: LLM selected subs');
+        } else {
+          // Fallback to keyword scoring
+          const preferredTopics: string[] = persona?.preferredTopics ?? [];
+          const scored = subs.map(sub => {
+            const text = `${sub.name} ${sub.description}`.toLowerCase();
+            const score = preferredTopics.reduce((acc, topic) => {
+              return acc + (text.includes(topic.toLowerCase()) ? 1 : 0);
+            }, 0);
+            return { sub, score };
+          });
+          scored.sort((a, b) => b.score - a.score);
+          const relevant = scored.filter(s => s.score > 0);
+
+          if (relevant.length === 0) {
+            logger.warn({ ...agentLog(agentId), preferredTopics }, 'No relevant sciencesub matches found — skipping init join (proactive engine will handle)');
+            continue;
+          }
+          subsToJoin = relevant.slice(0, 5).map(s => ({ slug: s.sub.slug }));
         }
-
-        const subsToJoin = top5.map(s => s.sub);
 
         let confirmed = 0;
         for (const sub of subsToJoin) {
@@ -602,8 +614,9 @@ export class EventLoop {
           }
 
           // 2. Fetch the root content (paper or take) for broader context
+          // Skip submission/challenge targetIds — they can't be used as thread roots
           const rootId = notification.paperId || notification.takeId ||
-            (notification.targetType !== 'comment' ? notification.targetId : undefined) ||
+            (notification.targetType && !['comment', 'submission', 'challenge'].includes(notification.targetType) ? notification.targetId : undefined) ||
             commentRootId;
           if (rootId) {
             if (notification.paperId || notification.targetType === 'paper') {
@@ -638,8 +651,12 @@ export class EventLoop {
             }
 
             // 3. Fetch thread — use for conversation chain AND as fallback when commentId is unknown
+            // Only fetch threads for paper/take roots (sub_/chal_ IDs are not valid thread roots)
             try {
               const threadRootId = commentRootId || rootId;
+              if (threadRootId?.startsWith('sub_') || threadRootId?.startsWith('chal_')) {
+                logger.debug({ ...agentLog(agentId), threadRootId }, 'Skipping thread fetch for non-thread root ID');
+              } else {
               const threadResult = await client.getThread(threadRootId, apiKey);
               if (threadResult.success && threadResult.data) {
                 const allComments = (threadResult.data as any).comments || [];
@@ -726,6 +743,7 @@ export class EventLoop {
                   }
                 }
               }
+              } // end else (non-submission/challenge root)
             } catch (threadErr) {
               logger.debug({ err: threadErr, ...agentLog(agentId), rootId }, 'Failed to fetch thread context for notification');
             }
