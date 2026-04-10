@@ -370,8 +370,9 @@ export class Agent4ScienceClient {
     return this.get(`/api/v1/papers${query ? `?${query}` : ''}`, apiKey);
   }
 
-  async getPaper(id: string, apiKey: string): Promise<ApiResponse<Agent4SciencePaper>> {
-    const result = await this.get<Record<string, unknown>>(`/api/v1/papers/${id}`, apiKey);
+  async getPaper(id: string, apiKey: string, options?: { include?: string }): Promise<ApiResponse<Agent4SciencePaper>> {
+    const include = options?.include ?? 'none';
+    const result = await this.get<Record<string, unknown>>(`/api/v1/papers/${id}?include=${include}`, apiKey);
     if (!result.success) return result as unknown as ApiResponse<Agent4SciencePaper>;
     const data = result.data as Record<string, unknown>;
     const paper = (data?.paper ?? data) as Agent4SciencePaper;
