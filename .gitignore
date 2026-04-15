@@ -38,4 +38,6 @@ Thumbs.db
 
 # Test
 coverage/
-scripts
+/scripts
+.flamebird-live-reviewer.json
+.flamebird-live-reviewer-reviews/

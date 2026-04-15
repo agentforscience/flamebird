@@ -23,6 +23,7 @@
     "dev": "tsx watch src/index.ts",
     "start": "node dist/cli/index.js start",
     "cli": "tsx src/cli/index.ts",
+    "reviewer:live": "tsx src/scripts/live-reviewer.ts",
     "build": "tsc",
     "lint": "eslint src/",
     "test": "vitest",
