@@ -337,6 +337,8 @@ export function ensureFirstTagIsSciencesub(
 export class ProactiveEngine {
   private config: ProactiveConfig;
   private lastDiscoveryTime: Map<string, Date> = new Map();
+  /** Tracks commentCount per root ID from last cycle — skip getThread() if unchanged */
+  private lastSeenCommentCount: Map<string, number> = new Map();
 
   constructor(config: ProactiveConfig = DEFAULT_PROACTIVE_CONFIG) {
     this.config = config;
@@ -916,11 +918,13 @@ export class ProactiveEngine {
       score += 0.4;
     }
 
-    // Recency bonus (0-0.15) — newer papers get a boost
+    // Recency bonus (0-0.30) — newer papers get a strong boost
     const ageHours = (Date.now() - new Date(paper.createdAt).getTime()) / (1000 * 60 * 60);
-    if (ageHours < 1) score += 0.15;
-    else if (ageHours < 6) score += 0.10;
-    else if (ageHours < 24) score += 0.05;
+    if (ageHours < 1) score += 0.30;
+    else if (ageHours < 6) score += 0.25;
+    else if (ageHours < 24) score += 0.20;
+    else if (ageHours < 48) score += 0.12;
+    else if (ageHours < 168) score += 0.05;
 
     // Comment count bonus (0-0.15) — more comments = more interesting
     if (paper.commentCount >= 5) score += 0.15;
@@ -952,11 +956,13 @@ export class ProactiveEngine {
       score += 0.1;
     }
 
-    // Recency bonus (0-0.15)
+    // Recency bonus (0-0.30)
     const ageHours = (Date.now() - new Date(take.createdAt).getTime()) / (1000 * 60 * 60);
-    if (ageHours < 1) score += 0.15;
-    else if (ageHours < 6) score += 0.10;
-    else if (ageHours < 24) score += 0.05;
+    if (ageHours < 1) score += 0.30;
+    else if (ageHours < 6) score += 0.25;
+    else if (ageHours < 24) score += 0.20;
+    else if (ageHours < 48) score += 0.12;
+    else if (ageHours < 168) score += 0.05;
 
     // Comment count bonus (0-0.15)
     if (take.commentCount >= 5) score += 0.15;
@@ -978,11 +984,13 @@ export class ProactiveEngine {
       score += 0.4;
     }
 
-    // Recency bonus (0-0.15)
+    // Recency bonus (0-0.30)
     const ageHours = (Date.now() - new Date(review.createdAt).getTime()) / (1000 * 60 * 60);
-    if (ageHours < 1) score += 0.15;
-    else if (ageHours < 6) score += 0.10;
-    else if (ageHours < 24) score += 0.05;
+    if (ageHours < 1) score += 0.30;
+    else if (ageHours < 6) score += 0.25;
+    else if (ageHours < 24) score += 0.20;
+    else if (ageHours < 48) score += 0.12;
+    else if (ageHours < 168) score += 0.05;
 
     // Comment count bonus (0-0.15)
     const commentCount = review.commentCount || 0;
@@ -1004,11 +1012,13 @@ export class ProactiveEngine {
       score += 0.3;
     }
 
-    // Recency bonus (0-0.15)
+    // Recency bonus (0-0.30)
     const ageHours = (Date.now() - new Date(challenge.createdAt).getTime()) / (1000 * 60 * 60);
-    if (ageHours < 1) score += 0.15;
-    else if (ageHours < 6) score += 0.10;
-    else if (ageHours < 24) score += 0.05;
+    if (ageHours < 1) score += 0.30;
+    else if (ageHours < 6) score += 0.25;
+    else if (ageHours < 24) score += 0.20;
+    else if (ageHours < 48) score += 0.12;
+    else if (ageHours < 168) score += 0.05;
 
     // Low submission count bonus (0-0.2) — unsolved challenges are high priority
     if (challenge.submissionCount === 0) score += 0.20;
@@ -1039,25 +1049,25 @@ export class ProactiveEngine {
       .filter(t => (t.commentCount || 0) > 0)
       .sort((a, b) => (b.commentCount || 0) - (a.commentCount || 0));
 
-    const roots: { id: string; type: 'paper' | 'take' | 'review' | 'submission'; title?: string }[] = [];
-    for (const p of papersWithComments.slice(0, 10)) {
-      roots.push({ id: p.id, type: 'paper', title: p.title });
+    const roots: { id: string; type: 'paper' | 'take' | 'review' | 'submission'; title?: string; commentCount: number }[] = [];
+    for (const p of papersWithComments.slice(0, 3)) {
+      roots.push({ id: p.id, type: 'paper', title: p.title, commentCount: p.commentCount || 0 });
     }
-    for (const t of takesWithComments.slice(0, 10)) {
-      roots.push({ id: t.id, type: 'take', title: t.title || t.hotTake?.slice(0, 60) });
+    for (const t of takesWithComments.slice(0, 3)) {
+      roots.push({ id: t.id, type: 'take', title: t.title || t.hotTake?.slice(0, 60), commentCount: t.commentCount || 0 });
     }
     const reviewsWithComments = [...snapshot.reviews]
       .filter(r => (r.commentCount || 0) > 0)
       .sort((a, b) => (b.commentCount || 0) - (a.commentCount || 0));
-    for (const r of reviewsWithComments.slice(0, 5)) {
-      roots.push({ id: r.id, type: 'review', title: r.summary?.slice(0, 60) });
+    for (const r of reviewsWithComments.slice(0, 2)) {
+      roots.push({ id: r.id, type: 'review', title: r.summary?.slice(0, 60), commentCount: r.commentCount || 0 });
     }
 
     // Submissions with comments from browsed challenges
     for (const ch of snapshot.challenges) {
       for (const sub of ch.submissions) {
         if ((sub.commentCount || 0) > 0) {
-          roots.push({ id: sub.id, type: 'submission', title: sub.title });
+          roots.push({ id: sub.id, type: 'submission', title: sub.title, commentCount: sub.commentCount || 0 });
         }
       }
     }
@@ -1065,18 +1075,24 @@ export class ProactiveEngine {
     // Fallback: if no content has comments yet, scan top papers/takes/reviews by relevance
     // (they might have comments the listing didn't report, or comments from this cycle)
     if (roots.length === 0) {
-      for (const p of snapshot.papers.slice(0, 5)) {
-        roots.push({ id: p.id, type: 'paper', title: p.title });
+      for (const p of snapshot.papers.slice(0, 2)) {
+        roots.push({ id: p.id, type: 'paper', title: p.title, commentCount: p.commentCount || 0 });
       }
-      for (const t of snapshot.takes.slice(0, 5)) {
-        roots.push({ id: t.id, type: 'take', title: t.title || t.hotTake?.slice(0, 60) });
+      for (const t of snapshot.takes.slice(0, 2)) {
+        roots.push({ id: t.id, type: 'take', title: t.title || t.hotTake?.slice(0, 60), commentCount: t.commentCount || 0 });
       }
-      for (const r of snapshot.reviews.slice(0, 3)) {
-        roots.push({ id: r.id, type: 'review', title: r.summary?.slice(0, 60) });
+      for (const r of snapshot.reviews.slice(0, 1)) {
+        roots.push({ id: r.id, type: 'review', title: r.summary?.slice(0, 60), commentCount: r.commentCount || 0 });
       }
     }
 
     roots.sort(() => Math.random() - 0.5);
+
+    // Cap total roots to avoid excessive getThread() calls (1 GET per root)
+    const MAX_ROOTS_TO_SCAN = 5;
+    if (roots.length > MAX_ROOTS_TO_SCAN) {
+      roots.length = MAX_ROOTS_TO_SCAN;
+    }
 
     logger.info({
       ...agentLog(agentId),
@@ -1090,7 +1106,15 @@ export class ProactiveEngine {
 
     type ReplyableComment = { id: string; body: string; agentId?: string; parentId?: string | null; depth?: number };
 
-    for (const { id: rootId, type: rootType, title: rootTitle } of roots) {
+    for (const { id: rootId, type: rootType, title: rootTitle, commentCount } of roots) {
+      // Skip thread fetch if commentCount hasn't changed since last cycle
+      const lastSeen = this.lastSeenCommentCount.get(rootId);
+      if (lastSeen !== undefined && commentCount <= lastSeen) {
+        logger.debug({ ...agentLog(agentId), rootId: rootId.slice(-8), commentCount, lastSeen }, 'Skipping thread fetch — no new comments');
+        continue;
+      }
+      this.lastSeenCommentCount.set(rootId, commentCount);
+
       try {
         let comments: ReplyableComment[] = [];
 
@@ -1760,22 +1784,22 @@ export class ProactiveEngine {
     // Get this agent's own papers and takes
     const roots: { id: string; type: 'paper' | 'take'; title: string }[] = [];
 
-    const myPapersResult = await client.getPapers(apiKey, { limit: 5, sort: 'new', agentId });
+    const myPapersResult = await client.getPapers(apiKey, { limit: 3, sort: 'new', agentId });
     if (myPapersResult.success && myPapersResult.data) {
       const papers = Array.isArray(myPapersResult.data)
         ? myPapersResult.data
         : (myPapersResult.data as { papers?: { id: string; title: string }[] }).papers ?? [];
-      for (const p of (papers as { id: string; title: string }[]).slice(0, 5)) {
+      for (const p of (papers as { id: string; title: string }[]).slice(0, 3)) {
         roots.push({ id: p.id, type: 'paper', title: p.title || '' });
       }
     }
 
-    const myTakesResult = await client.getTakes(apiKey, { limit: 5, sort: 'new', agentId });
+    const myTakesResult = await client.getTakes(apiKey, { limit: 3, sort: 'new', agentId });
     if (myTakesResult.success && myTakesResult.data) {
       const takes = Array.isArray(myTakesResult.data)
         ? myTakesResult.data
         : (myTakesResult.data as { takes?: { id: string; hotTake?: string; title?: string }[] }).takes ?? [];
-      for (const t of (takes as { id: string; hotTake?: string; title?: string }[]).slice(0, 5)) {
+      for (const t of (takes as { id: string; hotTake?: string; title?: string }[]).slice(0, 3)) {
         roots.push({ id: t.id, type: 'take', title: t.hotTake || t.title || '' });
       }
     }

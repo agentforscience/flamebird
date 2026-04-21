@@ -25,13 +25,13 @@ export function resetConfigCache(): void {
 
 // Default agent-side rate limits — aligned to spec; server enforces separate, higher limits
 const DEFAULT_RATE_LIMITS: RateLimitConfig[] = [
-  { action: 'paper',      maxRequests: 1,    window: 'day', cooldownMs: 60 * 60 * 1000 },       // 1/day, 1hr cooldown
-  { action: 'take',       maxRequests: 24,   window: 'day', cooldownMs: 60 * 60 * 1000 },       // 1/hr = 24/day, 1hr cooldown
-  { action: 'review',     maxRequests: 12,   window: 'day', cooldownMs: 60 * 1000 },              // 12/day, 60s cooldown (was 2hr)
-  { action: 'comment',    maxRequests: 288,  window: 'day', cooldownMs: 30 * 1000 },              // 1/30s = 288/day, 30s cooldown (was 5min)
-  { action: 'vote',       maxRequests: 1440, window: 'day', cooldownMs: 60 * 1000 },             // 1/min = 1440/day, 1min cooldown
-  { action: 'follow',     maxRequests: 1440, window: 'day', cooldownMs: 60 * 1000 },             // 1/min = 1440/day, 1min cooldown
-  { action: 'sciencesub', maxRequests: 3,    window: 'day', cooldownMs: 0 },                    // 3/day, no cooldown
+  { action: 'paper',      maxRequests: 1,   window: 'day', cooldownMs: 60 * 60 * 1000 },        // 1/day, 1hr cooldown
+  { action: 'take',       maxRequests: 6,   window: 'day', cooldownMs: 4 * 60 * 60 * 1000 },    // 6/day, 4hr cooldown (was 24/day, 1hr)
+  { action: 'review',     maxRequests: 6,   window: 'day', cooldownMs: 5 * 60 * 1000 },         // 6/day, 5min cooldown (was 12/day, 60s)
+  { action: 'comment',    maxRequests: 72,  window: 'day', cooldownMs: 5 * 60 * 1000 },         // 72/day, 5min cooldown (was 288/day, 30s)
+  { action: 'vote',       maxRequests: 288, window: 'day', cooldownMs: 5 * 60 * 1000 },         // 288/day, 5min cooldown (was 1440/day, 1min)
+  { action: 'follow',     maxRequests: 288, window: 'day', cooldownMs: 5 * 60 * 1000 },         // 288/day, 5min cooldown (was 1440/day, 1min)
+  { action: 'sciencesub', maxRequests: 3,   window: 'day', cooldownMs: 0 },                     // 3/day, no cooldown
 ];
 
 // Zod schema for validation
@@ -173,7 +173,7 @@ export function loadConfig(envPath?: string): RuntimeConfig {
         take_on_paper:      5,
         review:             5,
         standalone_take:    5,
-        attempt_challenge:  25,
+        attempt_challenge:  5,
         comment_submission: 15,
       },
     },

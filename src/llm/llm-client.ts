@@ -102,7 +102,7 @@ export class LLMClient {
 
   constructor(config: LLMConfig) {
     this.config = {
-      maxTokens: 4096,
+      maxTokens: 2048,
       temperature: 0.7,
       ...config,
     };
@@ -267,7 +267,7 @@ export class LLMClient {
     const response = await this.complete([
       { role: 'system', content: systemPrompt },
       { role: 'user', content: userPrompt },
-    ]);
+    ], 1024);
 
     // Track cost
     try {
@@ -312,7 +312,7 @@ Tags: ${content.tags.join(', ')}`;
     const response = await this.complete([
       { role: 'system', content: systemPrompt },
       { role: 'user', content: userPrompt },
-    ]);
+    ], 512);
 
     try {
       // Try to extract JSON from response
@@ -384,7 +384,7 @@ Limitations: ${paper.limitations.join('; ')}`;
     const response = await this.complete([
       { role: 'system', content: systemPrompt },
       { role: 'user', content: userPrompt },
-    ], 8192);
+    ], 4096);
 
     // Track cost
     try {
@@ -449,7 +449,7 @@ Write a take that reflects your unique viewpoint. Be opinionated and substantive
     const response = await this.complete([
       { role: 'system', content: systemPrompt },
       { role: 'user', content: userPrompt },
-    ], 8192);
+    ], 4096);
 
     // Track cost
     try {
@@ -505,7 +505,7 @@ Stated Limitations: ${paper.limitations.join('; ')}`;
     const response = await this.complete([
       { role: 'system', content: systemPrompt },
       { role: 'user', content: userPrompt },
-    ], 16384);
+    ], 8192);
 
     try {
       const costTracker = getCostTracker();
@@ -637,7 +637,7 @@ CRITICAL: You MUST complete every field fully. Do NOT leave any sentence unfinis
     const response = await this.complete([
       { role: 'system', content: systemPrompt },
       { role: 'user', content: userPrompt },
-    ], 16384);
+    ], 8192);
 
     // Track cost
     try {
@@ -1211,7 +1211,7 @@ Tags: ${challenge.tags.join(', ')}${submissionsContext}`;
     improvesUpon?: { id: string; title: string; approach: string; body: string },
     skillMdContext?: string
   ): Promise<GeneratedSolution | null> {
-    const MAX_RETRIES = 2;
+    const MAX_RETRIES = 1;
 
     // ── Platform skill.md context (if available) ──
     const skillGuidance = skillMdContext
@@ -1331,7 +1331,7 @@ Now produce the complete, rigorous solution.`;
       const draft = await this.complete([
         { role: 'system', content: solveSystemPrompt },
         { role: 'user', content: solveUserPrompt },
-      ], 16384);
+      ], 8192);
 
       this.trackCost('submission', draft.usage);
 
@@ -1389,7 +1389,7 @@ Respond in JSON:
       const verification = await verifier.complete([
         { role: 'system', content: 'You are a mathematical referee known for thoroughness. Find every logical gap. Be adversarial — assume the solution is wrong until convinced otherwise.' },
         { role: 'user', content: verifyPrompt },
-      ], 8192);
+      ], 4096);
 
       this.trackCost('submission', verification.usage);
 
@@ -1489,7 +1489,7 @@ Respond in JSON:
     },
     topSubmissions: Array<{ title: string; approach: string; evaluatedScore?: number | null }>,
   ): Promise<GeneratedSolution | null> {
-    const MAX_RETRIES = 2;
+    const MAX_RETRIES = 1;
 
     const schemaStr = challenge.solutionSchema
       ? JSON.stringify(challenge.solutionSchema, null, 2)
@@ -1541,7 +1541,7 @@ OUTPUT FORMAT: Respond with ONLY the Python code, no markdown fences, no explana
       const codeResponse = await this.complete([
         { role: 'system', content: `You are a Python optimization expert. Write clean, efficient code. ${persona.preferredTopics.length > 0 ? `Your expertise: ${persona.preferredTopics.join(', ')}.` : ''}` },
         { role: 'user', content: codeGenPrompt + retryContext },
-      ], 8192);
+      ], 4096);
 
       this.trackCost('submission', codeResponse.usage);
 
@@ -1569,29 +1569,61 @@ OUTPUT FORMAT: Respond with ONLY the Python code, no markdown fences, no explana
 
       // ── Step 3: LLM writes the submission text (title, body, approach) ──
 
-      const describePrompt = `You just solved this challenge by writing and running optimization code.
-Challenge: ${challenge.title}
-Your solution data: ${JSON.stringify(result.solutionData).slice(0, 500)}...
+      const describePrompt = `You just solved this optimization challenge by writing and running Python code.
 
-Write a brief submission describing your approach. Respond in JSON:
+Challenge: ${challenge.title}
+Description: ${challenge.description.slice(0, 500)}
+Scoring: ${challenge.scoringDirection || 'maximize'}
+
+YOUR SOLVER CODE:
+\`\`\`python
+${code}
+\`\`\`
+
+Write a detailed, technical submission describing your approach. Study the code carefully and explain the specific algorithms, parameters, and design choices.
+
+Respond in JSON with these fields:
 {
-  "title": "Concise title (10-150 chars)",
-  "body": "Description of your method — what algorithm you used, key design choices, why it works. Markdown OK. 200-1000 chars.",
-  "approach": "One-line summary of method (20-200 chars)"
-}`;
+  "title": "Descriptive title with key technique and parameters (10-150 chars)",
+  "body": "Markdown body with structured sections (see requirements below)",
+  "approach": "One-line summary naming the specific algorithm and key parameters (20-200 chars)"
+}
+
+BODY STRUCTURE — the body field MUST use this format:
+## Approach
+One paragraph summarizing the high-level strategy with specific parameter values.
+
+### Method
+- **Step/technique name**: Specific description referencing actual code details
+- (3-8 bullet points covering the key algorithmic steps)
+
+### Code
+Include the full solver code in a python code fence.
+
+QUALITY REQUIREMENTS:
+- Name actual functions, parameters, constants from the code (e.g. "15 L-BFGS-B restarts", "Fibonacci lattice initialization for N=282", "temperature annealing 0.01→1e-8")
+- Do NOT write generic filler like "Solver generated by X" or "The LLM was asked to write a solver"
+- Describe WHAT the algorithm does and WHY each design choice matters
+- Body should be 800-3000 chars (excluding code block)`;
 
       const descResponse = await this.complete([
         { role: 'system', content: this.buildPersonaPrompt(persona) },
         { role: 'user', content: describePrompt },
-      ], 2048);
+      ], 4096);
 
       this.trackCost('submission', descResponse.usage);
 
       const desc = this.extractJSON(descResponse.content);
 
+      let body = (desc?.body as string) || '';
+      // Ensure the code is included in the body — append if missing
+      if (!body.includes('```python') && !body.includes('```py')) {
+        body += `\n\n### Code\n\n\`\`\`python\n${code}\n\`\`\``;
+      }
+
       return {
         title: smartTruncate((desc?.title as string) || `Solver: ${challenge.title}`, 200),
-        body: (desc?.body as string) || `Automated solver solution for ${challenge.title}. Executed Python optimization code to generate an optimal configuration.`,
+        body,
         approach: smartTruncate((desc?.approach as string) || 'Numerical optimization via Python solver', 500),
         solutionData: result.solutionData,
       };
