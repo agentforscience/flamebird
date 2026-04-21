@@ -9,7 +9,7 @@ import { loadConfig, validateSecrets } from '../../config/config.js';
 import { createDatabase, getDatabase, tryGetDatabase } from '../../db/database.js';
 import { createAgentManager, getAgentManager } from '../../agents/agent-manager.js';
 import { createAgent4ScienceClient, getAgent4ScienceClient } from '../../api/agent4science-client.js';
-import { createLLMClient, getLLMClient } from '../../llm/llm-client.js';
+import { createLLMClient, getLLMClient, getOrCreateLLMClient } from '../../llm/llm-client.js';
 import { createRateLimiter } from '../../rate-limit/rate-limiter.js';
 import { createActionExecutor, getActionExecutor } from '../../actions/action-executor.js';
 import type { AgentRuntime } from '../../types.js';
@@ -87,7 +87,7 @@ export async function interactiveCommand(): Promise<void> {
 
 async function interactionLoop(runtime: AgentRuntime, apiKey: string): Promise<void> {
   const client = getAgent4ScienceClient();
-  const llm = getLLMClient();
+  const llm = getOrCreateLLMClient(runtime.config.llmOverride);
   const executor = getActionExecutor();
   const db = getDatabase();
 
@@ -624,14 +624,32 @@ async function attemptChallenge(
     improvesUponSub = submissions.find(s => s.id === decision.improvesUpon);
   }
 
-  // Generate solution (multi-step pipeline with quality gate)
-  console.log(chalk.gray('\nGenerating solution (analyze → solve → verify, with quality gate)...\n'));
-  const solution = await llm.generateSolution(
-    runtime.config.persona,
-    { title: challenge.title, description: challenge.description, tags: challenge.tags },
-    submissions.slice(0, 3).map(s => ({ title: s.title, approach: s.approach, body: s.body })),
-    improvesUponSub ? { id: improvesUponSub.id, title: improvesUponSub.title, approach: improvesUponSub.approach, body: improvesUponSub.body } : undefined
-  );
+  // Generate solution — use solver path for deterministic challenges (code execution), text path otherwise
+  const isDeterministic = challenge.evaluationType === 'deterministic' && !!challenge.verifier;
+  let solution;
+  if (isDeterministic) {
+    console.log(chalk.gray('\nGenerating solver solution (LLM writes code → execute → submit)...\n'));
+    solution = await llm.generateSolverSolution(
+      runtime.config.persona,
+      {
+        title: challenge.title,
+        description: challenge.description,
+        tags: challenge.tags,
+        verifier: challenge.verifier,
+        solutionSchema: challenge.solutionSchema,
+        scoringDirection: challenge.scoringDirection,
+      },
+      submissions.slice(0, 5).map(s => ({ title: s.title, approach: s.approach, evaluatedScore: s.evaluatedScore })),
+    );
+  } else {
+    console.log(chalk.gray('\nGenerating solution (analyze → solve → verify, with quality gate)...\n'));
+    solution = await llm.generateSolution(
+      runtime.config.persona,
+      { title: challenge.title, description: challenge.description, tags: challenge.tags },
+      submissions.slice(0, 3).map(s => ({ title: s.title, approach: s.approach, body: s.body })),
+      improvesUponSub ? { id: improvesUponSub.id, title: improvesUponSub.title, approach: improvesUponSub.approach, body: improvesUponSub.body } : undefined
+    );
+  }
 
   if (!solution) {
     console.log(chalk.yellow('Quality gate blocked submission — solution did not pass verification after retries.'));
