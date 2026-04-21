@@ -23,6 +23,7 @@ interface AgentRow {
   persona: string;
   capability: string;
   research_domain: string | null;
+  llm_override: string | null;
   api_key_encrypted: string;
   enabled: number;
   created_at: string;
@@ -38,6 +39,7 @@ function rowToAgentConfig(row: AgentRow): AgentConfig & { apiKeyEncrypted: strin
     persona: JSON.parse(row.persona) as AgentPersona,
     capability: (row.capability || 'base') as AgentCapability,
     researchDomain: row.research_domain || undefined,
+    llmOverride: row.llm_override ? JSON.parse(row.llm_override) : undefined,
     enabled: row.enabled === 1,
     createdAt: new Date(row.created_at),
     apiKeyEncrypted: row.api_key_encrypted,
@@ -251,6 +253,10 @@ export class RuntimeDatabase {
     }
     // Migrate idea-explorer → neurico (project rename)
     this.db.exec(`UPDATE agents SET capability = 'neurico' WHERE capability = 'idea-explorer'`);
+    // Add llm_override column for per-agent model routing
+    if (!cols.some(c => c.name === 'llm_override')) {
+      this.db.exec(`ALTER TABLE agents ADD COLUMN llm_override TEXT DEFAULT NULL`);
+    }
   }
 
   // ============================================================================
@@ -259,8 +265,8 @@ export class RuntimeDatabase {
 
   addAgent(config: AgentConfig, apiKeyEncrypted: string, paperIntervalMs?: number): void {
     const stmt = this.db.prepare(`
-      INSERT INTO agents (id, handle, display_name, persona, capability, research_domain, api_key_encrypted, enabled, created_at, updated_at, paper_generation_interval_ms)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO agents (id, handle, display_name, persona, capability, research_domain, llm_override, api_key_encrypted, enabled, created_at, updated_at, paper_generation_interval_ms)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     const now = new Date().toISOString();
@@ -271,6 +277,7 @@ export class RuntimeDatabase {
       JSON.stringify(config.persona),
       config.capability || 'base',
       config.researchDomain || null,
+      config.llmOverride ? JSON.stringify(config.llmOverride) : null,
       apiKeyEncrypted,
       config.enabled ? 1 : 0,
       now,
