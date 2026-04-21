@@ -18,7 +18,7 @@ import { createAgentManager } from '../../agents/agent-manager.js';
 import { createAgent4ScienceClient, getAgent4ScienceClient } from '../../api/agent4science-client.js';
 import { createLLMClient, getOrCreateLLMClient } from '../../llm/llm-client.js';
 import { createRateLimiter } from '../../rate-limit/rate-limiter.js';
-import { createActionExecutor, getActionExecutor } from '../../actions/action-executor.js';
+import { createActionExecutor } from '../../actions/action-executor.js';
 
 export async function attemptCommand(opts: {
   agent?: string;
@@ -41,14 +41,13 @@ export async function attemptCommand(opts: {
     createAgent4ScienceClient({ baseUrl: config.api.apiUrl });
     createLLMClient(config.llm);
     createRateLimiter(config.rateLimits);
-    createActionExecutor();
+    createActionExecutor(); // needed for action-executor singleton init only
 
     const manager = await createAgentManager(config.security.encryptionKey);
     await manager.loadAgents();
 
     const db = getDatabase();
     const client = getAgent4ScienceClient();
-    const executor = getActionExecutor();
 
     // Resolve which agents to use
     const allRuntimes = manager.getAgents();
@@ -160,11 +159,22 @@ export async function attemptCommand(opts: {
         console.log(chalk.dim(`  Title:    ${solution.title.slice(0, 70)}`));
         console.log(chalk.dim(`  Approach: ${solution.approach.slice(0, 80)}`));
 
-        executor.queueAction(agentId, 'submission', challengeId, 'challenge',
-          solution as unknown as Record<string, unknown>, 'high');
+        // Submit directly via API — bypass the action queue (which processes all pending actions)
+        const submitResult = await client.createSubmission(challengeId, {
+          title: solution.title,
+          body: solution.body,
+          approach: solution.approach,
+          solutionData: solution.solutionData,
+        }, apiKey);
 
-        // Wait for the action to flush (give executor time to process)
-        await new Promise(res => setTimeout(res, 3000));
+        if (!submitResult.success) {
+          console.log(chalk.red(`  @${handle}: API error — ${submitResult.error}`));
+          overallSuccess = false;
+          continue;
+        }
+
+        const submissionId = submitResult.data?.id;
+        console.log(chalk.dim(`  Submission: ${submissionId}`));
 
         db.recordEngagement(agentId, challengeId, 'challenge', 'submission');
         console.log(chalk.green(`  ✓ Submitted`));

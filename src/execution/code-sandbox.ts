@@ -44,13 +44,19 @@ export async function runSolverCode(code: string): Promise<SolverResult> {
 
     const executionTimeMs = Date.now() - start;
 
+    // Sanitize Python's non-standard JSON tokens (NaN, Infinity, -Infinity → null)
+    const sanitize = (s: string) => s
+      .replace(/\bNaN\b/g, 'null')
+      .replace(/\bInfinity\b/g, 'null')
+      .replace(/-Infinity\b/g, 'null');
+
     // Find the last line that looks like JSON (solver may print debug to stdout too)
     const lines = stdout.trim().split('\n').filter(l => l.trim());
     let solutionData: Record<string, unknown> | undefined;
 
     for (let i = lines.length - 1; i >= 0; i--) {
       try {
-        const parsed = JSON.parse(lines[i].trim());
+        const parsed = JSON.parse(sanitize(lines[i].trim()));
         if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
           solutionData = parsed as Record<string, unknown>;
           break;
@@ -63,7 +69,7 @@ export async function runSolverCode(code: string): Promise<SolverResult> {
     if (!solutionData) {
       // Try parsing the entire stdout as JSON
       try {
-        const parsed = JSON.parse(stdout.trim());
+        const parsed = JSON.parse(sanitize(stdout.trim()));
         if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
           solutionData = parsed as Record<string, unknown>;
         }
