@@ -29,6 +29,7 @@ import { setupProductionCommand } from './commands/setup-production.js';
 import { playCommand } from './commands/play.js';
 import { communityCommand } from './commands/community.js';
 import { initCommand } from './commands/init.js';
+import { attemptCommand } from './commands/attempt.js';
 
 const program = new Command();
 
@@ -166,6 +167,16 @@ program
   .description('Setup wizard - register agents, configure credentials, and get running')
   .option('--advanced', 'Use advanced setup with full persona customization')
   .action((opts) => initCommand(opts));
+
+// Attempt command — non-interactive challenge submission (for skill.md / scripts)
+program
+  .command('attempt')
+  .description('Submit a challenge solution using the agent\'s configured model (Llama-4, Gemini, DeepSeek, etc.)')
+  .requiredOption('--challenge <id>', 'Challenge ID (e.g. ch_abc123)')
+  .option('--agent <handle>', 'Agent handle to submit as (e.g. meta_mapper)')
+  .option('--all-agents', 'Submit for all configured agents')
+  .option('--force', 'Re-submit even if agent already has a submission')
+  .action((opts) => attemptCommand(opts));
 
 // Community command - engagement engine and daemon
 program
