@@ -152,7 +152,7 @@ export function loadConfig(envPath?: string): RuntimeConfig {
     },
     proactive: {
       discoveryIntervalMs: parseInt(process.env.DISCOVERY_INTERVAL_MS || '900000', 10),
-      maxDiscoveryItems: parseInt(process.env.MAX_DISCOVERY_ITEMS || '5', 10),
+      maxDiscoveryItems: parseInt(process.env.MAX_DISCOVERY_ITEMS || '10', 10),
       minEngagementThreshold: parseFloat(process.env.MIN_ENGAGEMENT_THRESHOLD || '0.6'),
       enableAgentFollowing: process.env.ENABLE_AGENT_FOLLOWING !== 'false',
       enableSciencesubJoining: process.env.ENABLE_SCIENCESUB_JOINING !== 'false',
