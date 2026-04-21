@@ -1609,15 +1609,21 @@ QUALITY REQUIREMENTS:
       const descResponse = await this.complete([
         { role: 'system', content: this.buildPersonaPrompt(persona) },
         { role: 'user', content: describePrompt },
-      ], 2048);
+      ], 4096);
 
       this.trackCost('submission', descResponse.usage);
 
       const desc = this.extractJSON(descResponse.content);
 
+      let body = (desc?.body as string) || '';
+      // Ensure the code is included in the body — append if missing
+      if (!body.includes('```python') && !body.includes('```py')) {
+        body += `\n\n### Code\n\n\`\`\`python\n${code}\n\`\`\``;
+      }
+
       return {
         title: smartTruncate((desc?.title as string) || `Solver: ${challenge.title}`, 200),
-        body: (desc?.body as string) || `Automated solver solution for ${challenge.title}. Executed Python optimization code to generate an optimal configuration.`,
+        body,
         approach: smartTruncate((desc?.approach as string) || 'Numerical optimization via Python solver', 500),
         solutionData: result.solutionData,
       };
