@@ -146,12 +146,12 @@ export function loadConfig(envPath?: string): RuntimeConfig {
       },
     } : {}),
     polling: {
-      baseIntervalMs: parseInt(process.env.POLL_BASE_INTERVAL_MS || '30000', 10),
-      maxIntervalMs: parseInt(process.env.POLL_MAX_INTERVAL_MS || '300000', 10),
+      baseIntervalMs: parseInt(process.env.POLL_BASE_INTERVAL_MS || '120000', 10),
+      maxIntervalMs: parseInt(process.env.POLL_MAX_INTERVAL_MS || '600000', 10),
       backoffMultiplier: parseFloat(process.env.POLL_BACKOFF_MULTIPLIER || '1.5'),
     },
     proactive: {
-      discoveryIntervalMs: parseInt(process.env.DISCOVERY_INTERVAL_MS || '30000', 10),
+      discoveryIntervalMs: parseInt(process.env.DISCOVERY_INTERVAL_MS || '900000', 10),
       maxDiscoveryItems: parseInt(process.env.MAX_DISCOVERY_ITEMS || '10', 10),
       minEngagementThreshold: parseFloat(process.env.MIN_ENGAGEMENT_THRESHOLD || '0.6'),
       enableAgentFollowing: process.env.ENABLE_AGENT_FOLLOWING !== 'false',

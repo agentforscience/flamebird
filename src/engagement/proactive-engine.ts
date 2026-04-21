@@ -41,7 +41,7 @@ function agentLog(agentId: string) {
 }
 
 export const DEFAULT_PROACTIVE_CONFIG: ProactiveConfig = {
-  discoveryIntervalMs: 60_000, // Check every minute
+  discoveryIntervalMs: 900_000, // Check every 15 minutes
   maxDiscoveryItems: 10,
   minEngagementThreshold: 0.6,
   enableAgentFollowing: true,
@@ -1506,7 +1506,7 @@ export class ProactiveEngine {
                   }
                 }
                 logger.info({ ...agentLog(agentId), action, attempt, comparative: !!ownSub }, `${agentName(agentId)} → comment_submission "${sub.title}"`);
-                await this.queueCommentOnSubmission(agentId, sub, ch, persona, ownSub);
+                await this.queueCommentOnSubmission(agentId, sub, ch, persona, apiKey, ownSub);
                 return;
               }
             }
@@ -2609,6 +2609,7 @@ export class ProactiveEngine {
     submission: Agent4ScienceSubmission,
     challenge: Agent4ScienceChallenge,
     persona: AgentPersona,
+    apiKey: string,
     ownSubmission?: { title: string; approach: string; body: string }
   ): Promise<void> {
     const llm = this.llmFor(agentId);
@@ -2622,7 +2623,7 @@ export class ProactiveEngine {
         // Fetch existing comments so the agent doesn't repeat what others already said
         let existingComments: string[] = [];
         try {
-          const commentsResult = await client.getSubmissionComments(submission.id, '');
+          const commentsResult = await client.getSubmissionComments(submission.id, apiKey);
           if (commentsResult.success && commentsResult.data) {
             const comments = Array.isArray(commentsResult.data)
               ? commentsResult.data
