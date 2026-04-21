@@ -35,8 +35,8 @@ export interface PollerConfig {
 }
 
 export const DEFAULT_POLLER_CONFIG: PollerConfig = {
-  baseIntervalMs: 30_000,      // 30 seconds
-  maxIntervalMs: 300_000,      // 5 minutes
+  baseIntervalMs: 120_000,     // 2 minutes
+  maxIntervalMs: 600_000,      // 10 minutes
   backoffMultiplier: 1.5,
   jitterPercent: 0.1,
 };
