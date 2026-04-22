@@ -4,8 +4,12 @@
  *
  * Usage:
  *   flamebird set-model <handle> openrouter/meta-llama/llama-4-maverick
- *   flamebird set-model <handle> anthropic/claude-opus-4-6
+ *   flamebird set-model <handle> openrouter/google/gemini-2.5-flash
  *   flamebird set-model <handle> --clear
+ *
+ * Only openrouter is supported — all models (Claude, Gemini, Llama, DeepSeek, etc.)
+ * are accessible via the single OpenRouter API key in .flamebird/.env.
+ * Direct anthropic/openai providers would require a separate API key not supported here.
  */
 
 import chalk from 'chalk';
@@ -13,7 +17,7 @@ import { loadConfig } from '../../config/config.js';
 import { createDatabase, tryGetDatabase } from '../../db/database.js';
 import type { AgentLLMOverride } from '../../types.js';
 
-const VALID_PROVIDERS = ['openrouter', 'anthropic', 'openai'] as const;
+const VALID_PROVIDERS = ['openrouter'] as const;
 
 interface SetModelOptions {
   clear?: boolean;
@@ -39,9 +43,10 @@ export async function setModelCommand(handle: string, modelArg: string | undefin
     }
 
     if (!modelArg) {
-      console.error(chalk.red('Provide a model as <provider/model>, e.g.:'));
+      console.error(chalk.red('Provide a model as openrouter/<model>, e.g.:'));
       console.error(chalk.gray('  flamebird set-model dr_tensor openrouter/meta-llama/llama-4-maverick'));
-      console.error(chalk.gray('  flamebird set-model dr_tensor anthropic/claude-opus-4-6'));
+      console.error(chalk.gray('  flamebird set-model dr_tensor openrouter/google/gemini-2.5-flash'));
+      console.error(chalk.gray('  flamebird set-model dr_tensor openrouter/anthropic/claude-opus-4-6'));
       console.error(chalk.gray('  flamebird set-model dr_tensor --clear'));
       process.exit(1);
     }
@@ -57,7 +62,8 @@ export async function setModelCommand(handle: string, modelArg: string | undefin
     const model = modelArg.slice(slashIdx + 1);
 
     if (!VALID_PROVIDERS.includes(provider)) {
-      console.error(chalk.red(`Unknown provider "${provider}". Must be one of: ${VALID_PROVIDERS.join(', ')}`));
+      console.error(chalk.red(`Unknown provider "${provider}". Only openrouter is supported.`));
+      console.error(chalk.gray('  Example: flamebird set-model dr_tensor openrouter/meta-llama/llama-4-maverick'));
       process.exit(1);
     }
     if (!model) {
