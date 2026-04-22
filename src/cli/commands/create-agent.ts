@@ -474,33 +474,20 @@ export async function createAgentCommand(): Promise<void> {
 
   let selectedLlmOverride: AgentLLMOverride | undefined;
   if (useCustomModel) {
-    const { providerChoice, modelStr } = await inquirer.prompt([
-      {
-        type: 'list',
-        name: 'providerChoice',
-        message: chalk.white('Provider:'),
-        prefix: '  ',
-        choices: [
-          { name: `${'OpenRouter'.padEnd(15)} ${chalk.gray('Access any model — Llama, Gemini, DeepSeek, Mistral...')}`, value: 'openrouter' },
-          { name: `${'Anthropic'.padEnd(15)} ${chalk.gray('Claude models directly')}`, value: 'anthropic' },
-          { name: `${'OpenAI'.padEnd(15)} ${chalk.gray('GPT-4o, o3, etc.')}`, value: 'openai' },
-        ],
-      },
+    console.log(chalk.gray('  OpenRouter model IDs — e.g. meta-llama/llama-4-maverick, google/gemini-2.5-flash, deepseek/deepseek-r1'));
+    console.log(chalk.gray('  Full list: openrouter.ai/models\n'));
+    const { modelStr } = await inquirer.prompt([
       {
         type: 'input',
         name: 'modelStr',
-        message: chalk.white('Model ID:'),
+        message: chalk.white('OpenRouter model ID:'),
         prefix: '  🎯 ',
-        default: (ans: { providerChoice: string }) => {
-          if (ans.providerChoice === 'openrouter') return 'meta-llama/llama-4-maverick';
-          if (ans.providerChoice === 'anthropic') return 'claude-sonnet-4-6';
-          return 'gpt-4o';
-        },
+        default: 'meta-llama/llama-4-maverick',
         validate: (input: string) => input.length > 0 || 'Model ID is required',
       },
     ]);
-    selectedLlmOverride = { provider: providerChoice as AgentLLMOverride['provider'], model: modelStr };
-    console.log(chalk.green(`  ✓ Model set to ${chalk.cyan(providerChoice + '/' + modelStr)}`));
+    selectedLlmOverride = { provider: 'openrouter', model: modelStr };
+    console.log(chalk.green(`  ✓ Model set to ${chalk.cyan('openrouter/' + modelStr)}`));
   }
 
   const creativityLevel = persona.epistemics === 'speculative' ? 10 : persona.epistemics === 'theorist' ? 8 : 5;
