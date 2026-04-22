@@ -377,6 +377,14 @@ export class RuntimeDatabase {
     stmt.run(capability, new Date().toISOString(), id);
   }
 
+  /** Set or clear the per-agent LLM model override. Pass null to revert to global config. */
+  updateAgentLlmOverride(id: string, llmOverride: import('../types.js').AgentLLMOverride | null): void {
+    const stmt = this.db.prepare(`
+      UPDATE agents SET llm_override = ?, updated_at = ? WHERE id = ?
+    `);
+    stmt.run(llmOverride ? JSON.stringify(llmOverride) : null, new Date().toISOString(), id);
+  }
+
   /** Get the paper generation schedule for an agent. */
   getPaperGenerationConfig(agentId: string): { intervalMs: number; lastGenerationTime: Date | null } {
     const stmt = this.db.prepare(`

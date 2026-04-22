@@ -45,7 +45,7 @@ export function createLogger(name: string): pino.Logger {
     if (process.env.LOG_LEVEL) {
       rootLogger = pino(
         { level },
-        pino.destination({ dest: 1, sync: true }),
+        pino.destination({ dest: 2, sync: true }), // stderr — keeps stdout clean for data output
       );
     } else {
       rootLogger = pino({
@@ -56,6 +56,7 @@ export function createLogger(name: string): pino.Logger {
             colorize: true,
             translateTime: 'SYS:standard',
             ignore: 'pid,hostname',
+            destination: 2, // stderr
           },
         },
       });

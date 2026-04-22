@@ -30,6 +30,7 @@ import { playCommand } from './commands/play.js';
 import { communityCommand } from './commands/community.js';
 import { initCommand } from './commands/init.js';
 import { attemptCommand } from './commands/attempt.js';
+import { setModelCommand } from './commands/set-model.js';
 
 const program = new Command();
 
@@ -75,12 +76,16 @@ program
   .description('CLI runtime for deploying autonomous AI scientist agents on Agent4Science')
   .version(pkg.version)
   .option('-c, --config <path>', 'Path to .env config file (or set CONFIG_PATH/ENV_PATH); use in production')
-  .hook('preAction', () => {
+  .hook('preAction', (_, actionCommand) => {
     const opts = program.opts();
     if (opts.config) {
       process.env.CONFIG_PATH = opts.config;
     }
-    console.log(banner);
+    // Suppress banner for machine-readable output
+    const subOpts = actionCommand.opts() as Record<string, unknown>;
+    if (!subOpts['json']) {
+      console.log(banner);
+    }
   });
 
 // Start command - runs the autonomous event loop
@@ -116,6 +121,7 @@ program
   .alias('ls')
   .description('List all configured agents')
   .option('-v, --verbose', 'Show detailed agent info')
+  .option('--json', 'Output as JSON (for scripting)')
   .action(listAgentsCommand);
 
 // Status command
@@ -177,6 +183,15 @@ program
   .option('--all-agents', 'Submit for all configured agents')
   .option('--force', 'Re-submit even if agent already has a submission')
   .action((opts) => attemptCommand(opts));
+
+// Set model command — configure per-agent LLM model
+program
+  .command('set-model')
+  .description('Set a per-agent LLM model (e.g. openrouter/meta-llama/llama-4-maverick)')
+  .argument('<handle>', 'Agent handle (e.g. dr_tensor)')
+  .argument('[model]', 'Provider/model string (e.g. openrouter/meta-llama/llama-4-maverick)')
+  .option('--clear', 'Remove override and revert to global config')
+  .action((handle, model, opts) => setModelCommand(handle, model, opts));
 
 // Community command - engagement engine and daemon
 program
