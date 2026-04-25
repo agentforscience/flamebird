@@ -9,7 +9,7 @@ import inquirer from 'inquirer';
 import ora from 'ora';
 import { loadConfig, validateSecrets } from '../../config/config.js';
 import { createDatabase, getDatabase } from '../../db/database.js';
-import type { AgentPersona, PersonaVoice, EpistemicStyle, AgentCapability } from '../../types.js';
+import type { AgentPersona, PersonaVoice, EpistemicStyle, AgentCapability, AgentLLMOverride } from '../../types.js';
 import { normalizeApiError } from '../../api/agent4science-client.js';
 import { setupAgentCapability, registerAndSaveAgent } from '../utils/agent-creation.js';
 import { saveAgentToDb } from '../utils/agent-registration.js';
@@ -460,6 +460,36 @@ export async function createAgentCommand(): Promise<void> {
 
   const { domain: selectedDomain } = await setupAgentCapability(selectedCapability);
 
+  // --- Model Selection ---
+  console.log(chalk.bold.cyan('\n  ◆ AGENT MODEL\n'));
+  console.log(chalk.gray(`  Default: ${chalk.white(config.llm.provider + '/' + config.llm.model)} (from global config)\n`));
+
+  const { useCustomModel } = await inquirer.prompt<{ useCustomModel: boolean }>([{
+    type: 'confirm',
+    name: 'useCustomModel',
+    message: chalk.white('Use a different model for this agent?'),
+    prefix: '  🤖 ',
+    default: false,
+  }]);
+
+  let selectedLlmOverride: AgentLLMOverride | undefined;
+  if (useCustomModel) {
+    console.log(chalk.gray('  OpenRouter model IDs — e.g. meta-llama/llama-4-maverick, google/gemini-2.5-flash, deepseek/deepseek-r1'));
+    console.log(chalk.gray('  Full list: openrouter.ai/models\n'));
+    const { modelStr } = await inquirer.prompt([
+      {
+        type: 'input',
+        name: 'modelStr',
+        message: chalk.white('OpenRouter model ID:'),
+        prefix: '  🎯 ',
+        default: 'meta-llama/llama-4-maverick',
+        validate: (input: string) => input.length > 0 || 'Model ID is required',
+      },
+    ]);
+    selectedLlmOverride = { provider: 'openrouter', model: modelStr };
+    console.log(chalk.green(`  ✓ Model set to ${chalk.cyan('openrouter/' + modelStr)}`));
+  }
+
   const creativityLevel = persona.epistemics === 'speculative' ? 10 : persona.epistemics === 'theorist' ? 8 : 5;
   const creativityBar = chalk.magenta('█'.repeat(creativityLevel)) + chalk.gray('░'.repeat(10 - creativityLevel));
 
@@ -548,6 +578,17 @@ ${chalk.yellow('  └───────────────────�
     });
 
     if (!registration) return;
+
+    // Apply per-agent model override if selected
+    if (selectedLlmOverride) {
+      try {
+        const db = getDatabase();
+        const saved = db.getAgentByHandle(basicInfo.handle);
+        if (saved) db.updateAgentLlmOverride(saved.id, selectedLlmOverride);
+      } catch {
+        // Non-fatal — model can be set later with set-model
+      }
+    }
 
     // Victory fanfare text
     await typeText(chalk.gray('\n  [ NEURAL UPLOAD COMPLETE ]'), 20);

@@ -1521,12 +1521,11 @@ ${competitorContext}
 
 REQUIREMENTS:
 1. Write a COMPLETE, STANDALONE Python script
-2. You may import: numpy, math, random, itertools, json, sys
+2. You may import: numpy, scipy, math, random, itertools, json, sys — scipy is available (v1.17)
 3. The script must print a single JSON object to stdout matching the solutionSchema
-4. Use efficient optimization (gradient descent, simulated annealing, greedy + local search, etc.)
-5. Must complete within 60 seconds
-6. Do NOT import any packages beyond the standard library and numpy
-7. Print ONLY the JSON result — no debug output to stdout (use stderr for debug)
+4. Use efficient optimization — scipy.optimize (minimize, linprog, differential_evolution), scipy.spatial, scipy.linalg are all available and preferred over reimplementing from scratch
+5. Must complete within 85 seconds
+6. Print ONLY the JSON result — no debug output to stdout (use stderr for debug)
 
 OUTPUT FORMAT: Respond with ONLY the Python code, no markdown fences, no explanation.`;
 
@@ -1541,7 +1540,7 @@ OUTPUT FORMAT: Respond with ONLY the Python code, no markdown fences, no explana
       const codeResponse = await this.complete([
         { role: 'system', content: `You are a Python optimization expert. Write clean, efficient code. ${persona.preferredTopics.length > 0 ? `Your expertise: ${persona.preferredTopics.join(', ')}.` : ''}` },
         { role: 'user', content: codeGenPrompt + retryContext },
-      ], 4096);
+      ], 8192);
 
       this.trackCost('submission', codeResponse.usage);
 
@@ -1609,7 +1608,7 @@ QUALITY REQUIREMENTS:
       const descResponse = await this.complete([
         { role: 'system', content: this.buildPersonaPrompt(persona) },
         { role: 'user', content: describePrompt },
-      ], 4096);
+      ], 8192);
 
       this.trackCost('submission', descResponse.usage);
 

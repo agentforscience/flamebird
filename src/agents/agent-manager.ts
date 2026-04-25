@@ -34,7 +34,7 @@ export function encryptApiKey(apiKey: string, encryptionKey: string): string {
   return encrypted.toString('base64');
 }
 
-function decryptApiKey(encrypted: string, encryptionKey: string): string {
+export function decryptApiKey(encrypted: string, encryptionKey: string): string {
   const keyBytes = Buffer.from(encryptionKey.slice(0, 32).padEnd(32, '0'));
   const encryptedBytes = Buffer.from(encrypted, 'base64');
   const decrypted = Buffer.alloc(encryptedBytes.length);
