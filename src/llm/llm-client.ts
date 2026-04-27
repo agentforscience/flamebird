@@ -11,7 +11,7 @@ import { runSolverCode } from '../execution/code-sandbox.js';
 
 const logger = createLogger('llm');
 
-export type LLMProvider = 'openrouter' | 'anthropic' | 'openai';
+export type LLMProvider = 'openrouter';
 
 export interface LLMConfig {
   provider: LLMProvider;
@@ -91,11 +91,7 @@ export interface EngagementDecision {
   priority?: number;
 }
 
-const PROVIDER_ENDPOINTS: Record<LLMProvider, string> = {
-  openrouter: 'https://openrouter.ai/api/v1/chat/completions',
-  anthropic: 'https://api.anthropic.com/v1/messages',
-  openai: 'https://api.openai.com/v1/chat/completions',
-};
+const OPENROUTER_ENDPOINT = 'https://openrouter.ai/api/v1/chat/completions';
 
 export class LLMClient {
   private config: LLMConfig;
@@ -113,119 +109,28 @@ export class LLMClient {
    * @param maxTokensOverride - Override max_tokens for this specific call
    */
   async complete(messages: LLMMessage[], maxTokensOverride?: number): Promise<LLMResponse> {
-    const { provider, apiKey, model, maxTokens: configMaxTokens, temperature } = this.config;
+    const { apiKey, model, maxTokens: configMaxTokens, temperature } = this.config;
     const maxTokens = maxTokensOverride ?? configMaxTokens;
 
-    if (provider === 'anthropic') {
-      return this.callAnthropic(messages, apiKey, model, maxTokens!, temperature!);
-    }
-
-    // OpenRouter and OpenAI use compatible API format
-    return this.callOpenAICompatible(
-      PROVIDER_ENDPOINTS[provider],
-      messages,
-      apiKey,
-      model,
-      maxTokens!,
-      temperature!,
-      provider
-    );
-  }
-
-  /**
-   * Call Anthropic API (different format)
-   */
-  private async callAnthropic(
-    messages: LLMMessage[],
-    apiKey: string,
-    model: string,
-    maxTokens: number,
-    temperature: number
-  ): Promise<LLMResponse> {
-    const systemMessage = messages.find(m => m.role === 'system');
-    const otherMessages = messages.filter(m => m.role !== 'system');
-
-    const response = await fetch(PROVIDER_ENDPOINTS.anthropic, {
+    const response = await fetch(OPENROUTER_ENDPOINT, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01',
+        'Authorization': `Bearer ${apiKey}`,
+        'HTTP-Referer': 'https://agent4science.org',
+        'X-Title': 'Agent4Science Agent Runtime',
       },
       body: JSON.stringify({
         model,
         max_tokens: maxTokens,
         temperature,
-        system: systemMessage?.content,
-        messages: otherMessages.map(m => ({
-          role: m.role,
-          content: m.content,
-        })),
+        messages: messages.map(m => ({ role: m.role, content: m.content })),
       }),
     });
 
     if (!response.ok) {
       const error = await response.text();
-      throw new Error(`Anthropic API error: ${response.status} - ${error}`);
-    }
-
-    const data = await response.json() as {
-      content: Array<{ text: string }>;
-      model: string;
-      usage: { input_tokens: number; output_tokens: number };
-    };
-
-    return {
-      content: data.content[0].text,
-      model: data.model,
-      usage: {
-        promptTokens: data.usage.input_tokens,
-        completionTokens: data.usage.output_tokens,
-        totalTokens: data.usage.input_tokens + data.usage.output_tokens,
-      },
-    };
-  }
-
-  /**
-   * Call OpenAI-compatible API (OpenRouter, OpenAI)
-   */
-  private async callOpenAICompatible(
-    endpoint: string,
-    messages: LLMMessage[],
-    apiKey: string,
-    model: string,
-    maxTokens: number,
-    temperature: number,
-    provider: LLMProvider
-  ): Promise<LLMResponse> {
-    const headers: Record<string, string> = {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${apiKey}`,
-    };
-
-    // OpenRouter specific headers
-    if (provider === 'openrouter') {
-      headers['HTTP-Referer'] = 'https://agent4science.org';
-      headers['X-Title'] = 'Agent4Science Agent Runtime';
-    }
-
-    const response = await fetch(endpoint, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({
-        model,
-        max_tokens: maxTokens,
-        temperature,
-        messages: messages.map(m => ({
-          role: m.role,
-          content: m.content,
-        })),
-      }),
-    });
-
-    if (!response.ok) {
-      const error = await response.text();
-      throw new Error(`${provider} API error: ${response.status} - ${error}`);
+      throw new Error(`OpenRouter API error: ${response.status} - ${error}`);
     }
 
     const data = await response.json() as {
@@ -1945,16 +1850,16 @@ export function getLLMClient(): LLMClient {
 export function getOrCreateLLMClient(override?: AgentLLMOverride): LLMClient {
   if (!override) return getLLMClient();
 
-  const key = `${override.provider}/${override.model}`;
+  const key = override.model;
   let client = agentClientCache.get(key);
   if (!client) {
     client = new LLMClient({
-      provider: override.provider,
+      provider: 'openrouter',
       model: override.model,
-      apiKey: override.apiKey || globalApiKey,
+      apiKey: globalApiKey,
     });
     agentClientCache.set(key, client);
-    logger.info({ provider: override.provider, model: override.model }, 'Created per-agent LLM client');
+    logger.info({ model: override.model }, 'Created per-agent LLM client');
   }
   return client;
 }

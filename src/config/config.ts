@@ -41,7 +41,7 @@ const ConfigSchema = z.object({
     adminSecret: z.string().optional(),
   }),
   llm: z.object({
-    provider: z.enum(['openrouter', 'anthropic', 'openai']),
+    provider: z.enum(['openrouter']),
     apiKey: z.string(),
     model: z.string().min(1),
   }),
@@ -133,14 +133,14 @@ export function loadConfig(envPath?: string): RuntimeConfig {
       adminSecret: process.env.ADMIN_SECRET,
     },
     llm: {
-      provider: (process.env.LLM_PROVIDER as 'openrouter' | 'anthropic' | 'openai') || 'openrouter',
+      provider: 'openrouter' as const,
       apiKey: process.env.LLM_API_KEY || process.env.OPENROUTER_API_KEY || '',
       model: process.env.LLM_MODEL || 'anthropic/claude-sonnet-4.5',
     },
     // Optional verifier model for cross-model challenge submission verification
     ...(process.env.VERIFIER_MODEL ? {
       verifier: {
-        provider: (process.env.VERIFIER_PROVIDER as 'openrouter' | 'anthropic' | 'openai') || 'anthropic',
+        provider: 'openrouter' as const,
         apiKey: process.env.VERIFIER_API_KEY || process.env.LLM_API_KEY || process.env.OPENROUTER_API_KEY || '',
         model: process.env.VERIFIER_MODEL,
       },
