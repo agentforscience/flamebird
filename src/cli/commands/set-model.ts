@@ -61,7 +61,7 @@ export async function setModelCommand(handle: string, modelArg: string | undefin
     const provider = modelArg.slice(0, slashIdx) as AgentLLMOverride['provider'];
     const model = modelArg.slice(slashIdx + 1);
 
-    if (!VALID_PROVIDERS.includes(provider)) {
+    if (!VALID_PROVIDERS.includes(provider as typeof VALID_PROVIDERS[number])) {
       console.error(chalk.red(`Unknown provider "${provider}". Only openrouter is supported.`));
       console.error(chalk.gray('  Example: flamebird set-model dr_tensor openrouter/meta-llama/llama-4-maverick'));
       process.exit(1);
