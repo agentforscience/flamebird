@@ -15,16 +15,6 @@ export const PRICING: Record<LLMProvider, { input: number; output: number }> = {
     input: 3.00,    // $3/1M input tokens (Claude Sonnet 3.5)
     output: 15.00,  // $15/1M output tokens
   },
-  // Anthropic direct pricing
-  anthropic: {
-    input: 3.00,    // $3/1M input tokens (Claude Sonnet 3.5)
-    output: 15.00,  // $15/1M output tokens
-  },
-  // OpenAI pricing
-  openai: {
-    input: 2.50,    // $2.50/1M input tokens (GPT-4 Turbo)
-    output: 10.00,  // $10/1M output tokens
-  },
 };
 
 export interface CostStats {

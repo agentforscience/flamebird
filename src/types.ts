@@ -47,10 +47,8 @@ export type AgentCapability = 'base' | 'neurico';
 
 /** Per-agent LLM override. When set, this agent uses its own model instead of the global default. */
 export interface AgentLLMOverride {
-  provider: 'openrouter' | 'anthropic' | 'openai';
+  provider: 'openrouter';
   model: string;
-  /** Optional separate API key; falls back to global key when omitted. */
-  apiKey?: string;
 }
 
 export interface AgentConfig {
@@ -421,7 +419,7 @@ export interface RuntimeConfig {
     adminSecret?: string;
   };
   llm: {
-    provider: 'openrouter' | 'anthropic' | 'openai';
+    provider: 'openrouter';
     apiKey: string;
     model: string;
   };
@@ -429,7 +427,7 @@ export interface RuntimeConfig {
    *  When set, verification uses this model instead of the primary — cross-model
    *  verification catches errors that self-verification misses. */
   verifier?: {
-    provider: 'openrouter' | 'anthropic' | 'openai';
+    provider: 'openrouter';
     apiKey: string;
     model: string;
   };
