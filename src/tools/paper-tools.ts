@@ -227,14 +227,25 @@ export function launchNeuricoRunDetached(
     + `runId: ${runId}\nideaId: ${ideaId}\nargs: ${args.join(' ')}\ncwd: ${neuricoPath}\n\n`,
   );
 
-  const child = spawn(wrapper, args, {
-    stdio: ['ignore', logFd, logFd],
-    cwd: neuricoPath,
-    detached: true,
-    env: { ...process.env },
+  let child;
+  try {
+    child = spawn(wrapper, args, {
+      stdio: ['ignore', logFd, logFd],
+      cwd: neuricoPath,
+      detached: true,
+      env: { ...process.env },
+    });
+  } finally {
+    // Close parent's copy of the fd — the child inherits its own.
+    try { fs.closeSync(logFd); } catch { /* ignore */ }
+  }
+  // Log spawn errors (e.g. permission denied) that fire asynchronously on the
+  // detached child. Without this listener the error is silently swallowed
+  // after unref().
+  child.on('error', (err) => {
+    logger.error({ runId, err: err.message }, 'Detached neurico wrapper failed to start');
   });
   child.unref();
-  try { fs.closeSync(logFd); } catch { /* ignore */ }
 
   logger.info(
     { runId, ideaId, wrapperPid: child.pid, logFile },
@@ -362,18 +373,15 @@ export function harvestNeuricoRun(run: LaunchedNeuricoRun, neuricoPath: string):
 }
 
 /**
- * Submit an idea YAML and start a NeuriCo run. Returns the launched-run
- * handle as soon as the wrapper subprocess is spawned. The caller is
- * responsible for tracking the run (typically via the DB) and polling
- * for completion with `pollNeuricoRun`.
- *
- * This is the non-blocking path used by the event loop.
+ * Validate that docker and the neurico wrapper are available, then submit
+ * the idea YAML. Returns the idea ID on success. Shared prereq logic for
+ * both `submitAndLaunchNeurico` and `runNeurico`.
  */
-export async function submitAndLaunchNeurico(
+async function submitIdea(
   neuricoPath: string,
   params: NeuricoParams,
 ): Promise<
-  | { success: true; launched: LaunchedNeuricoRun }
+  | { success: true; ideaId: string; provider: string; writePaper: boolean; noGithub: boolean }
   | { success: false; error: string }
 > {
   const {
@@ -418,9 +426,30 @@ export async function submitAndLaunchNeurico(
     };
   }
 
-  logger.info({ ideaId: submit.ideaId }, 'Idea submitted, launching run');
-  const launched = launchNeuricoRunDetached(neuricoPath, submit.ideaId, {
-    provider, writePaper, noGithub,
+  return { success: true, ideaId: submit.ideaId, provider, writePaper, noGithub };
+}
+
+/**
+ * Submit an idea YAML and start a NeuriCo run. Returns the launched-run
+ * handle as soon as the wrapper subprocess is spawned. The caller is
+ * responsible for tracking the run (typically via the DB) and polling
+ * for completion with `pollNeuricoRun`.
+ *
+ * This is the non-blocking path used by the event loop.
+ */
+export async function submitAndLaunchNeurico(
+  neuricoPath: string,
+  params: NeuricoParams,
+): Promise<
+  | { success: true; launched: LaunchedNeuricoRun }
+  | { success: false; error: string }
+> {
+  const result = await submitIdea(neuricoPath, params);
+  if (!result.success) return result;
+
+  logger.info({ ideaId: result.ideaId }, 'Idea submitted, launching run');
+  const launched = launchNeuricoRunDetached(neuricoPath, result.ideaId, {
+    provider: result.provider, writePaper: result.writePaper, noGithub: result.noGithub,
   });
   return { success: true, launched };
 }
@@ -437,15 +466,18 @@ export async function runNeurico(
   neuricoPath: string,
   params: NeuricoParams,
 ): Promise<NeuricoResult> {
+  // Submit-only path: don't spawn a detached run if autoRun is false.
+  if (params.autoRun === false) {
+    const submitResult = await submitIdea(neuricoPath, params);
+    if (!submitResult.success) return { success: false, error: submitResult.error };
+    return { success: true, title: submitResult.ideaId };
+  }
+
   const launchResult = await submitAndLaunchNeurico(neuricoPath, params);
   if (!launchResult.success) {
     return { success: false, error: launchResult.error };
   }
   const launched = launchResult.launched;
-
-  if (params.autoRun === false) {
-    return { success: true, title: launched.ideaId };
-  }
 
   const pollIntervalMs = 30_000;
   const timeoutMs = 6 * 3600 * 1000;
