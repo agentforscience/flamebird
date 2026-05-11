@@ -71,84 +71,6 @@ export interface PublishPaperParams {
 // NeuriCo Integration
 // ============================================================================
 
-/**
- * Build the common Docker args that mirror NeuriCo's docker/run.sh.
- * We call docker directly (instead of the bash wrapper) to avoid the `-t`
- * TTY flag that breaks non-interactive spawning.
- */
-function buildDockerArgs(neuricoPath: string): string[] {
-  const args: string[] = ['run', '-i', '--rm'];
-
-  // User ID mapping (same as the wrapper's get_user_flags)
-  try {
-    const uid = execSync('id -u', { encoding: 'utf-8' }).trim();
-    const gid = execSync('id -g', { encoding: 'utf-8' }).trim();
-    args.push('--user', `${uid}:${gid}`);
-  } catch { /* skip if id command fails */ }
-
-  // GPU support (auto-detect nvidia)
-  try {
-    const dockerInfo = execSync('docker info 2>/dev/null', { encoding: 'utf-8' });
-    if (/nvidia/i.test(dockerInfo)) {
-      args.push('--gpus', 'all');
-    }
-  } catch { /* no GPU */ }
-
-  // Environment file
-  const envFile = path.join(neuricoPath, '.env');
-  if (fs.existsSync(envFile)) {
-    args.push('--env-file', envFile);
-  }
-
-  // Workspace env var
-  args.push('-e', 'NEURICO_WORKSPACE=/workspaces');
-
-  // Resolve workspace dir from config or default
-  const workspaceDir = resolveWorkspaceDir(neuricoPath);
-  fs.mkdirSync(workspaceDir, { recursive: true });
-
-  // Standard volume mounts (mirrors docker/run.sh)
-  args.push('-v', `${workspaceDir}:/workspaces`);
-
-  // Ensure ideas subdirectories exist on the host so the container user can write to them
-  // Must match docker/run.sh ensure_directories()
-  const ideasDir = path.join(neuricoPath, 'ideas');
-  for (const sub of ['submitted', 'in_progress', 'completed']) {
-    fs.mkdirSync(path.join(ideasDir, sub), { recursive: true });
-  }
-  args.push('-v', `${ideasDir}:/app/ideas`);
-
-  const logsDir = path.join(neuricoPath, 'logs');
-  fs.mkdirSync(logsDir, { recursive: true });
-  args.push('-v', `${logsDir}:/app/logs`);
-
-  const configDir = path.join(neuricoPath, 'config');
-  if (fs.existsSync(configDir)) {
-    args.push('-v', `${configDir}:/app/config:ro`);
-  }
-
-  const templatesDir = path.join(neuricoPath, 'templates');
-  if (fs.existsSync(templatesDir)) {
-    args.push('-v', `${templatesDir}:/app/templates:ro`);
-  }
-
-  // CLI credential mounts (Claude, Codex, Gemini)
-  // Must also set CLAUDE_CONFIG_DIR so Claude Code looks in /tmp/.claude
-  // (container HOME is /home/researcher, not /tmp)
-  args.push('-e', 'CLAUDE_CONFIG_DIR=/tmp/.claude');
-  const home = process.env.HOME || '';
-  for (const cred of ['.claude', '.codex', '.gemini']) {
-    const credPath = path.join(home, cred);
-    if (fs.existsSync(credPath)) {
-      args.push('-v', `${credPath}:/tmp/${cred}`);
-    }
-  }
-
-  args.push('-w', '/app');
-
-  return args;
-}
-
 /** Resolve the workspace directory from NeuriCo's config. */
 function resolveWorkspaceDir(neuricoPath: string): string {
   // Try workspace.yaml, then workspace.yaml.example
@@ -167,20 +89,54 @@ function resolveWorkspaceDir(neuricoPath: string): string {
   return path.join(neuricoPath, 'workspaces');
 }
 
+// ============================================================================
+// NeuriCo wrapper invocation (./neurico submit, ./neurico run)
+//
+// The `./neurico` bash wrapper handles docker mounts, credential isolation
+// (codex .codex-host shuffle), TTY detection, idea-file path translation,
+// and image version checks. By delegating to it instead of constructing
+// docker args here, flamebird gets future improvements to neurico for free.
+//
+// The wrapper auto-detects TTY via `[ -t 0 ]` and falls back to `-i` when
+// stdin is not a terminal — so non-interactive spawning works fine.
+// ============================================================================
+
+/** Path to the `./neurico` wrapper script for a given NeuriCo install. */
+function neuricoWrapperPath(neuricoPath: string): string {
+  return path.join(neuricoPath, 'neurico');
+}
+
+/** Verify the wrapper exists. */
+function ensureWrapperPresent(neuricoPath: string): string | null {
+  const wrapper = neuricoWrapperPath(neuricoPath);
+  if (!fs.existsSync(wrapper)) {
+    return `NeuriCo wrapper not found at ${wrapper}. Is NEURICO_PATH correct?`;
+  }
+  return null;
+}
+
 /**
- * Spawn a docker command and capture output. Returns { stdout, stderr, code }.
+ * Submit an idea YAML via `./neurico submit`. Synchronous — submit is fast
+ * (creates a GitHub repo and registers the idea, ~10-30s).
  */
-function spawnDocker(
-  args: string[],
-  timeoutMs: number,
-): Promise<{ stdout: string; stderr: string; code: number | null }> {
+async function submitIdeaViaWrapper(
+  neuricoPath: string,
+  source: string,
+  provider: string,
+  noGithub: boolean,
+): Promise<{ ideaId: string | null; code: number | null; stdout: string; stderr: string }> {
   return new Promise((resolve) => {
+    const wrapper = neuricoWrapperPath(neuricoPath);
+    const args = ['submit', source, '--provider', provider];
+    if (noGithub) args.push('--no-github');
+
     let stdout = '';
     let stderr = '';
 
-    const child = spawn('docker', args, {
+    const child = spawn(wrapper, args, {
       stdio: ['ignore', 'pipe', 'pipe'],
-      timeout: timeoutMs,
+      cwd: neuricoPath,
+      timeout: 120_000,
       env: { ...process.env },
     });
 
@@ -189,154 +145,200 @@ function spawnDocker(
       stdout += text;
       process.stdout.write(chalk.gray(text));
     });
-
     child.stderr.on('data', (chunk: Buffer) => {
       const text = chunk.toString();
       stderr += text;
-      // Filter out Docker credential-check noise
       if (!/\[OK\]/.test(text)) {
         process.stderr.write(chalk.yellow(text));
       }
     });
-
-    child.on('close', (code) => resolve({ stdout, stderr, code }));
+    child.on('close', (code) => {
+      const ideaId = parseIdeaId(stdout)
+        ?? findLatestIdeaId(path.join(neuricoPath, 'ideas', 'submitted'));
+      resolve({ ideaId, code, stdout, stderr });
+    });
     child.on('error', (err) => {
-      resolve({ stdout, stderr: err.message, code: 1 });
+      resolve({ ideaId: null, code: 1, stdout, stderr: err.message });
     });
   });
 }
 
-/**
- * Run NeuriCo via Docker, using the two-step flow:
- *   1. submit <yaml>  – registers the idea, creates GitHub repo
- *   2. run <idea_id>  – runs the research agent
- *
- * Calls docker directly (bypassing the bash wrapper) so we can omit the -t
- * flag that causes "not a TTY" errors when running as a daemon.
- */
-export async function runNeurico(
-  neuricoPath: string,
-  params: NeuricoParams,
-): Promise<NeuricoResult> {
-  const {
-    source,
-    provider = 'claude',
-    autoRun = true,
-    writePaper = true,
-    noGithub = false,
-  } = params;
-
-  // Verify Docker is available
-  try {
-    execSync('docker info', { stdio: 'ignore' });
-  } catch {
-    return { success: false, error: 'Docker is not available. NeuriCo requires Docker.' };
-  }
-
-  // Verify Docker image exists
-  try {
-    execSync(`docker image inspect ${DOCKER_IMAGE}`, { stdio: 'ignore' });
-  } catch {
-    return {
-      success: false,
-      error: `Docker image ${DOCKER_IMAGE} not found. Run: docker pull ghcr.io/chicagohai/neurico:latest && docker tag ghcr.io/chicagohai/neurico:latest ${DOCKER_IMAGE}`,
-    };
-  }
-
-  const baseArgs = buildDockerArgs(neuricoPath);
-
-  // ── Step 1: Submit the idea YAML ──
-  logger.info({ source }, 'Submitting idea to NeuriCo');
-
-  const yamlDir = path.dirname(source);
-  const yamlName = path.basename(source);
-  const submitArgs = [
-    ...baseArgs,
-    '-v', `${yamlDir}:/input:ro`,
-    DOCKER_IMAGE,
-    'python', '/app/src/cli/submit.py', `/input/${yamlName}`,
-    '--provider', provider,
-  ];
-  if (noGithub) submitArgs.push('--no-github');
-
-  const submitResult = await spawnDocker(submitArgs, 120_000); // 2 min for submit
-
-  if (submitResult.code !== 0) {
-    logger.error({ code: submitResult.code }, 'NeuriCo submit failed');
-    return {
-      success: false,
-      error: `NeuriCo submit failed (code ${submitResult.code}): ${submitResult.stderr.slice(-500)}`,
-    };
-  }
-
-  // Parse the idea ID from submit output (e.g. "Idea ID: abc123" or filename-based)
-  const ideaId = parseIdeaId(submitResult.stdout);
-  if (!ideaId) {
-    // If we can't parse the ID, try to find the most recent idea in ideas/submitted/
-    const submittedDir = path.join(neuricoPath, 'ideas', 'submitted');
-    const fallbackId = findLatestIdeaId(submittedDir);
-    if (!fallbackId) {
-      return {
-        success: false,
-        error: 'Could not determine idea ID after submit. Check NeuriCo logs.',
-      };
-    }
-    logger.info({ ideaId: fallbackId }, 'Found idea ID from submitted directory');
-    return autoRun
-      ? runIdeaById(neuricoPath, baseArgs, fallbackId, provider, writePaper, noGithub)
-      : { success: true, title: fallbackId };
-  }
-
-  logger.info({ ideaId }, 'Idea submitted successfully');
-
-  if (!autoRun) {
-    return { success: true, title: ideaId };
-  }
-
-  // ── Step 2: Run the idea ──
-  return runIdeaById(neuricoPath, baseArgs, ideaId, provider, writePaper, noGithub);
+/** Handle for a detached `./neurico run` subprocess. */
+export interface LaunchedNeuricoRun {
+  /** Unique run identifier (used as DB primary key). */
+  runId: string;
+  /** Idea ID being run. */
+  ideaId: string;
+  /** PID of the spawned `./neurico` wrapper subprocess. */
+  wrapperPid: number;
+  /** Host path to the workspaces parent dir we expect neurico to use. */
+  workspaceDir: string;
+  /** Path to the log file where stdout/stderr are appended. */
+  logFile: string;
 }
 
-/** Run an already-submitted idea by its ID. */
-async function runIdeaById(
+/**
+ * Launch `./neurico run <idea_id>` as a detached subprocess.
+ *
+ * Spawned with `detached: true` (new process group), stdout/stderr redirected
+ * to a log file (no pipes back to Node — so neurico's runner.py streaming
+ * loop never blocks on a closed pipe), and `unref()` so the Node event loop
+ * doesn't keep flamebird alive waiting on it.
+ *
+ * Properties this gives us:
+ *   - flamebird's event loop is NOT blocked on the run; the call returns
+ *     immediately
+ *   - if flamebird crashes / is killed, the wrapper is reparented to init
+ *     and continues running. On restart flamebird can resume tracking via
+ *     the DB row recorded alongside this launch.
+ *   - the wrapper still owns its docker child, so killing the wrapper
+ *     (e.g. with `kill -- -<pgid>` on shutdown) cleans up the container
+ */
+export function launchNeuricoRunDetached(
   neuricoPath: string,
-  baseArgs: string[],
   ideaId: string,
-  provider: string,
-  writePaper: boolean,
-  noGithub: boolean,
-): Promise<NeuricoResult> {
-  logger.info({ ideaId, provider, writePaper }, 'Running NeuriCo research agent');
+  opts: {
+    provider?: string;
+    writePaper?: boolean;
+    noGithub?: boolean;
+    runId?: string;
+  } = {},
+): LaunchedNeuricoRun {
+  const provider = opts.provider ?? 'claude';
+  const writePaper = opts.writePaper ?? true;
+  const noGithub = opts.noGithub ?? false;
+  const runId = opts.runId ?? `${ideaId}-${Date.now()}`;
 
-  const runArgs = [
-    ...baseArgs,
-    DOCKER_IMAGE,
-    'python', '/app/src/core/runner.py', ideaId,
-    '--provider', provider,
-    '--full-permissions',
-  ];
-  if (writePaper) runArgs.push('--write-paper');
-  if (noGithub) runArgs.push('--no-github');
+  const wrapper = neuricoWrapperPath(neuricoPath);
+  const workspacesDir = resolveWorkspaceDir(neuricoPath);
 
-  // No explicit timeout — let NeuriCo run to completion
-  // Use a generous 6-hour cap to prevent zombie processes
-  const runResult = await spawnDocker(runArgs, 6 * 3600 * 1000);
+  const logsDir = path.join(neuricoPath, 'logs');
+  fs.mkdirSync(logsDir, { recursive: true });
+  const logFile = path.join(logsDir, `neurico-run-${runId}.log`);
+  const logFd = fs.openSync(logFile, 'a');
 
-  if (runResult.code !== 0 && runResult.code !== null) {
-    logger.error({ code: runResult.code }, 'NeuriCo run failed');
-    return {
-      success: false,
-      error: `NeuriCo run failed (code ${runResult.code}): ${runResult.stderr.slice(-500)}`,
-    };
+  const args = ['run', ideaId, '--provider', provider, '--full-permissions'];
+  if (writePaper) args.push('--write-paper');
+  if (noGithub) args.push('--no-github');
+
+  fs.writeSync(
+    logFd,
+    `--- NeuriCo run launched by flamebird ${new Date().toISOString()} ---\n`
+    + `runId: ${runId}\nideaId: ${ideaId}\nargs: ${args.join(' ')}\ncwd: ${neuricoPath}\n\n`,
+  );
+
+  const child = spawn(wrapper, args, {
+    stdio: ['ignore', logFd, logFd],
+    cwd: neuricoPath,
+    detached: true,
+    env: { ...process.env },
+  });
+  child.unref();
+  try { fs.closeSync(logFd); } catch { /* ignore */ }
+
+  logger.info(
+    { runId, ideaId, wrapperPid: child.pid, logFile },
+    'Launched detached `./neurico run` subprocess',
+  );
+
+  return {
+    runId,
+    ideaId,
+    wrapperPid: child.pid ?? 0,
+    workspaceDir: workspacesDir,
+    logFile,
+  };
+}
+
+/** Cheap liveness check on a PID. */
+function isPidAlive(pid: number | null): boolean {
+  if (!pid || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export type NeuricoRunStatus =
+  | { state: 'running'; pidAlive: boolean }
+  | { state: 'completed' }
+  | { state: 'failed'; reason: string };
+
+/** Locate the workspace dir that neurico created for the given idea ID. */
+function findWorkspaceForIdeaId(workspacesParent: string, ideaId: string): string | null {
+  if (!fs.existsSync(workspacesParent)) return null;
+  try {
+    const matches = fs.readdirSync(workspacesParent).filter(name => name.includes(ideaId));
+    if (matches.length === 0) return null;
+    const sorted = matches
+      .map(name => ({ name, mtime: fs.statSync(path.join(workspacesParent, name)).mtimeMs }))
+      .sort((a, b) => b.mtime - a.mtime);
+    return path.join(workspacesParent, sorted[0].name);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Poll the status of a launched neurico run. Cheap — no subprocess spawned.
+ *
+ * Completion is determined by reading `<workspace>/.neurico/pipeline_state.json`
+ * (written by neurico's PipelineState) once the wrapper PID is no longer alive.
+ */
+export function pollNeuricoRun(run: LaunchedNeuricoRun): NeuricoRunStatus {
+  if (isPidAlive(run.wrapperPid)) {
+    return { state: 'running', pidAlive: true };
   }
 
-  const parsed = parseNeuricoOutput(runResult.stdout, neuricoPath, ideaId);
+  const workspace = findWorkspaceForIdeaId(run.workspaceDir, run.ideaId);
+  if (!workspace) {
+    return { state: 'failed', reason: 'Wrapper exited before workspace was created' };
+  }
 
-  // Only check for auth failures if the run produced no useful output.
-  // NeuriCo logs may contain transient "Invalid API key" warnings even on
-  // successful runs, so we avoid false positives by checking after parsing.
+  const stateFile = path.join(workspace, '.neurico', 'pipeline_state.json');
+  if (!fs.existsSync(stateFile)) {
+    return { state: 'failed', reason: 'Wrapper exited but pipeline_state.json was never written' };
+  }
+
+  try {
+    const state = JSON.parse(fs.readFileSync(stateFile, 'utf-8')) as {
+      completed?: boolean;
+      stages?: Record<string, { status?: string; success?: boolean }>;
+    };
+    if (state.completed === true) {
+      return { state: 'completed' };
+    }
+    for (const [stageName, info] of Object.entries(state.stages ?? {})) {
+      if (info.status === 'failed') {
+        return { state: 'failed', reason: `Stage ${stageName} failed` };
+      }
+    }
+    return { state: 'failed', reason: 'Wrapper exited but pipeline did not mark completed' };
+  } catch (err) {
+    return {
+      state: 'failed',
+      reason: `Could not parse pipeline_state.json: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+}
+
+/**
+ * Harvest outputs from a completed neurico run: reads the captured log + the
+ * workspace's idea.yaml / REPORT.md / etc. Reuses parseNeuricoOutput so the
+ * resulting NeuricoResult shape matches the synchronous-path callers.
+ */
+export function harvestNeuricoRun(run: LaunchedNeuricoRun, neuricoPath: string): NeuricoResult {
+  let logContent = '';
+  try {
+    logContent = fs.readFileSync(run.logFile, 'utf-8');
+  } catch {
+    /* log may be missing if launch failed early; parse will fall back */
+  }
+  const parsed = parseNeuricoOutput(logContent, neuricoPath, run.ideaId);
+
   if (!parsed.success || !parsed.githubUrl) {
-    const combined = runResult.stdout + runResult.stderr;
     const authFailurePatterns = [
       /Not logged in.*Please run \/login/i,
       /Invalid API key/i,
@@ -345,9 +347,9 @@ async function runIdeaById(
       /unauthorized/i,
     ];
     for (const pattern of authFailurePatterns) {
-      const match = combined.match(pattern);
+      const match = logContent.match(pattern);
       if (match) {
-        logger.error({ pattern: match[0] }, 'NeuriCo authentication failure detected in output');
+        logger.error({ pattern: match[0] }, 'NeuriCo authentication failure detected in log');
         return {
           success: false,
           error: `NeuriCo authentication failed: "${match[0]}". Check ANTHROPIC_API_KEY in NeuriCo .env or CLI login.`,
@@ -357,6 +359,127 @@ async function runIdeaById(
   }
 
   return parsed;
+}
+
+/**
+ * Submit an idea YAML and start a NeuriCo run. Returns the launched-run
+ * handle as soon as the wrapper subprocess is spawned. The caller is
+ * responsible for tracking the run (typically via the DB) and polling
+ * for completion with `pollNeuricoRun`.
+ *
+ * This is the non-blocking path used by the event loop.
+ */
+export async function submitAndLaunchNeurico(
+  neuricoPath: string,
+  params: NeuricoParams,
+): Promise<
+  | { success: true; launched: LaunchedNeuricoRun }
+  | { success: false; error: string }
+> {
+  const {
+    source,
+    provider = 'claude',
+    writePaper = true,
+    noGithub = false,
+  } = params;
+
+  const wrapperErr = ensureWrapperPresent(neuricoPath);
+  if (wrapperErr) return { success: false, error: wrapperErr };
+
+  // Fail fast on missing docker — gives a cleaner error than letting the
+  // wrapper bubble it up.
+  try {
+    execSync('docker info', { stdio: 'ignore' });
+  } catch {
+    return { success: false, error: 'Docker is not available. NeuriCo requires Docker.' };
+  }
+  try {
+    execSync(`docker image inspect ${DOCKER_IMAGE}`, { stdio: 'ignore' });
+  } catch {
+    return {
+      success: false,
+      error: `Docker image ${DOCKER_IMAGE} not found. Run: docker pull ghcr.io/chicagohai/neurico:latest && docker tag ghcr.io/chicagohai/neurico:latest ${DOCKER_IMAGE}`,
+    };
+  }
+
+  logger.info({ source }, 'Submitting idea to NeuriCo (./neurico submit)');
+  const submit = await submitIdeaViaWrapper(neuricoPath, source, provider, noGithub);
+
+  if (submit.code !== 0) {
+    return {
+      success: false,
+      error: `NeuriCo submit failed (code ${submit.code}): ${submit.stderr.slice(-500)}`,
+    };
+  }
+  if (!submit.ideaId) {
+    return {
+      success: false,
+      error: 'Could not determine idea ID after submit. Check NeuriCo logs.',
+    };
+  }
+
+  logger.info({ ideaId: submit.ideaId }, 'Idea submitted, launching run');
+  const launched = launchNeuricoRunDetached(neuricoPath, submit.ideaId, {
+    provider, writePaper, noGithub,
+  });
+  return { success: true, launched };
+}
+
+/**
+ * Synchronous run helper: submit + launch + poll-to-completion. Preserves the
+ * pre-refactor `runNeurico` contract (await one Promise, get a NeuricoResult)
+ * for tests and CLI callers that don't want a state machine.
+ *
+ * Long-running callers (the event loop) should use submitAndLaunchNeurico +
+ * pollNeuricoRun + harvestNeuricoRun instead so the loop isn't blocked.
+ */
+export async function runNeurico(
+  neuricoPath: string,
+  params: NeuricoParams,
+): Promise<NeuricoResult> {
+  const launchResult = await submitAndLaunchNeurico(neuricoPath, params);
+  if (!launchResult.success) {
+    return { success: false, error: launchResult.error };
+  }
+  const launched = launchResult.launched;
+
+  if (params.autoRun === false) {
+    return { success: true, title: launched.ideaId };
+  }
+
+  const pollIntervalMs = 30_000;
+  const timeoutMs = 6 * 3600 * 1000;
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    await new Promise(r => setTimeout(r, pollIntervalMs));
+    const status = pollNeuricoRun(launched);
+    if (status.state === 'completed') {
+      return harvestNeuricoRun(launched, neuricoPath);
+    }
+    if (status.state === 'failed') {
+      logger.error({ reason: status.reason }, 'NeuriCo run failed');
+      const partial = harvestNeuricoRun(launched, neuricoPath);
+      return {
+        success: false,
+        error: partial.error || `NeuriCo run failed: ${status.reason}`,
+        workDir: partial.workDir,
+        githubUrl: partial.githubUrl,
+        title: partial.title,
+      };
+    }
+  }
+
+  // Timed out — try to terminate the wrapper's process group to clean up.
+  try {
+    if (launched.wrapperPid) {
+      process.kill(-launched.wrapperPid, 'SIGTERM');
+    }
+  } catch { /* may already be gone */ }
+
+  return {
+    success: false,
+    error: `NeuriCo run timed out after ${timeoutMs / 1000}s. See ${launched.logFile}`,
+  };
 }
 
 /** Parse the idea ID from submit.py output. */
