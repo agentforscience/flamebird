@@ -15,6 +15,22 @@ import type {
   ActionType,
 } from '../types.js';
 
+/** Raw row shape from the neurico_runs table. */
+export interface NeuricoRunRow {
+  run_id: string;
+  agent_id: string | null;
+  idea_id: string | null;
+  workspace_dir: string;
+  wrapper_pid: number | null;
+  log_file: string | null;
+  topic: string | null;
+  started_at: string;
+  finished_at: string | null;
+  status: 'running' | 'completed' | 'failed';
+  exit_code: number | null;
+  error: string | null;
+}
+
 /** Raw row shape from the agents table. */
 interface AgentRow {
   id: string;
@@ -230,6 +246,33 @@ export class RuntimeDatabase {
       CREATE INDEX IF NOT EXISTS idx_agent_interactions
       ON agent_interactions(agent_id, other_agent_id)
     `);
+
+    // NeuriCo runs — tracks detached `./neurico run` subprocesses launched by
+    // tickPaperGeneration. The launch is fire-and-forget; the event loop polls
+    // pending rows on each tick to harvest results when the run finishes.
+    // This lets the daemon survive a flamebird crash mid-run: the docker
+    // container keeps going (it's detached + reparented to init), and on
+    // restart the poller picks up where it left off.
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS neurico_runs (
+        run_id TEXT PRIMARY KEY,
+        agent_id TEXT,
+        idea_id TEXT,
+        workspace_dir TEXT NOT NULL,
+        wrapper_pid INTEGER,
+        log_file TEXT,
+        topic TEXT,
+        started_at TEXT NOT NULL,
+        finished_at TEXT,
+        status TEXT NOT NULL DEFAULT 'running',
+        exit_code INTEGER,
+        error TEXT
+      )
+    `);
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_neurico_runs_status
+      ON neurico_runs(status, agent_id)
+    `);
   }
 
   /** Run schema migrations for existing databases. */
@@ -415,6 +458,67 @@ export class RuntimeDatabase {
       UPDATE agents SET paper_generation_interval_ms = ?, updated_at = ? WHERE id = ?
     `);
     stmt.run(intervalMs, new Date().toISOString(), agentId);
+  }
+
+  // ============================================================================
+  // NeuriCo Run Tracking
+  // ============================================================================
+
+  recordNeuricoRunLaunch(params: {
+    runId: string;
+    agentId: string | null;
+    ideaId: string | null;
+    workspaceDir: string;
+    wrapperPid: number | null;
+    logFile: string | null;
+    topic: string | null;
+  }): void {
+    const stmt = this.db.prepare(`
+      INSERT INTO neurico_runs
+        (run_id, agent_id, idea_id, workspace_dir, wrapper_pid, log_file, topic, started_at, status)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'running')
+    `);
+    stmt.run(
+      params.runId,
+      params.agentId,
+      params.ideaId,
+      params.workspaceDir,
+      params.wrapperPid,
+      params.logFile,
+      params.topic,
+      new Date().toISOString(),
+    );
+  }
+
+  getActiveNeuricoRunForAgent(agentId: string): NeuricoRunRow | null {
+    const stmt = this.db.prepare(`
+      SELECT * FROM neurico_runs
+      WHERE agent_id = ? AND status = 'running'
+      ORDER BY started_at DESC
+      LIMIT 1
+    `);
+    return (stmt.get(agentId) as NeuricoRunRow | undefined) ?? null;
+  }
+
+  listActiveNeuricoRuns(): NeuricoRunRow[] {
+    const stmt = this.db.prepare(`
+      SELECT * FROM neurico_runs WHERE status = 'running'
+    `);
+    return stmt.all() as NeuricoRunRow[];
+  }
+
+  markNeuricoRunFinished(
+    runId: string,
+    status: 'completed' | 'failed',
+    exitCode: number | null,
+    error: string | null,
+  ): void {
+    const stmt = this.db.prepare(`
+      UPDATE neurico_runs
+      SET status = ?, finished_at = ?, exit_code = ?, error = ?
+      WHERE run_id = ?
+    `);
+    stmt.run(status, new Date().toISOString(), exitCode, error, runId);
   }
 
   // ============================================================================

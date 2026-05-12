@@ -15,7 +15,15 @@ import { createLogger } from '../logging/logger.js';
 import { getAgent4ScienceClient } from '../api/agent4science-client.js';
 import { smartTruncate, repairJSON } from '../utils/truncate.js';
 import { ensureFirstTagIsSciencesub } from '../engagement/proactive-engine.js';
-import { runNeurico, resolveNeuricoPath, type NeuricoResult } from './paper-tools.js';
+import {
+  runNeurico,
+  submitAndLaunchNeurico,
+  pollNeuricoRun,
+  harvestNeuricoRun,
+  resolveNeuricoPath,
+  type LaunchedNeuricoRun,
+  type NeuricoResult,
+} from './paper-tools.js';
 import { generateIdea } from './idea-generator.js';
 import { getDatabase } from '../db/database.js';
 import type { AgentCapability, Agent4SciencePaper } from '../types.js';
@@ -380,24 +388,11 @@ Output ONLY valid JSON, no markdown fences.`,
 }
 
 /**
- * Run the full NeuriCo paper generation flow:
- * discover topic → generate idea YAML → submit + run → post to Agent4Science
+ * Pick a research topic, either via the HypogenicAI backend or by falling
+ * back to a pure LLM-based discoverer.
  */
-export async function runNeuricoFlow(config: ManagerAgentConfig): Promise<PaperGenerationResult> {
-  const iePath = config.neuricoPath || resolveNeuricoPath();
-  if (!iePath) {
-    return {
-      success: false,
-      error: 'NeuriCo not found. Install it: curl -fsSL https://raw.githubusercontent.com/ChicagoHAI/neurico/main/install.sh | bash',
-    };
-  }
-
-  // Step 1: Generate research idea via HypogenicAI backend (with fallback to LLM)
-  logger.info({ agentId: config.agentId }, 'Generating research idea for NeuriCo');
-
-  let topic: string;
+async function pickResearchTopic(config: ManagerAgentConfig): Promise<string> {
   try {
-    // Fetch feed context for the idea generator
     const client = getAgent4ScienceClient();
     const [papersResult, takesResult] = await Promise.all([
       client.getPapers(config.apiKey, { limit: 10, sort: 'hot' }),
@@ -412,29 +407,63 @@ export async function runNeuricoFlow(config: ManagerAgentConfig): Promise<PaperG
       preferredTopics: config.preferredTopics || [],
       domain: config.researchDomain,
     });
-    // Combine title and description as rich context for YAML generation
-    topic = `${idea.title}\n\n${idea.description}`;
+    const topic = `${idea.title}\n\n${idea.description}`;
     logger.info({ title: idea.title }, 'Idea generated via HypogenicAI backend');
+    return topic;
   } catch (err) {
-    logger.warn({ error: err instanceof Error ? err.message : String(err) }, 'HypogenicAI backend failed, falling back to LLM-based topic discovery');
-    topic = await discoverTopic(config.apiKey, config.llmApiKey, config.llmModel, config.researchDomain);
+    logger.warn(
+      { error: err instanceof Error ? err.message : String(err) },
+      'HypogenicAI backend failed, falling back to LLM-based topic discovery',
+    );
+    return discoverTopic(config.apiKey, config.llmApiKey, config.llmModel, config.researchDomain);
   }
-  logger.info({ topic: topic.slice(0, 200) }, 'Topic selected');
+}
 
-  // Step 2: Generate a structured idea YAML
+/**
+ * Generate a structured idea YAML for the given topic and write it to a
+ * temp file under the neurico repo. Returns the YAML path so the caller
+ * can pass it to `./neurico submit`.
+ */
+async function writeIdeaYamlForTopic(
+  neuricoPath: string,
+  topic: string,
+  config: ManagerAgentConfig,
+): Promise<string> {
   logger.info('Generating structured idea YAML');
   const ideaYaml = await generateIdeaYaml(topic, config.llmApiKey, config.llmModel, config.researchDomain);
-
-  // Write YAML to a temp file
   const fs = await import('fs');
   const path = await import('path');
-  const tmpDir = path.join(iePath, '.tmp-ideas');
+  const tmpDir = path.join(neuricoPath, '.tmp-ideas');
   fs.mkdirSync(tmpDir, { recursive: true });
   const yamlPath = path.join(tmpDir, `idea-${Date.now()}.yaml`);
   fs.writeFileSync(yamlPath, ideaYaml);
   logger.info({ yamlPath }, 'Idea YAML written');
+  return yamlPath;
+}
 
-  // Step 3: Run NeuriCo (submit + run via Docker)
+/**
+ * Run the full NeuriCo paper generation flow:
+ * discover topic → generate idea YAML → submit + run → post to Agent4Science
+ *
+ * Synchronous (awaits NeuriCo to completion). Kept for back-compat; the
+ * event loop uses the non-blocking state machine in `tickPaperGeneration`.
+ */
+export async function runNeuricoFlow(config: ManagerAgentConfig): Promise<PaperGenerationResult> {
+  const iePath = config.neuricoPath || resolveNeuricoPath();
+  if (!iePath) {
+    return {
+      success: false,
+      error: 'NeuriCo not found. Install it: curl -fsSL https://raw.githubusercontent.com/ChicagoHAI/neurico/main/install.sh | bash',
+    };
+  }
+
+  // Step 1-2: pick topic, generate idea YAML
+  logger.info({ agentId: config.agentId }, 'Generating research idea for NeuriCo');
+  const topic = await pickResearchTopic(config);
+  logger.info({ topic: topic.slice(0, 200) }, 'Topic selected');
+  const yamlPath = await writeIdeaYamlForTopic(iePath, topic, config);
+
+  // Step 3: Run NeuriCo (submit + run via ./neurico wrapper, polling to completion)
   const ieResult: NeuricoResult = await runNeurico(iePath, {
     source: yamlPath,
     provider: config.neuricoProvider || 'claude',
@@ -442,8 +471,27 @@ export async function runNeuricoFlow(config: ManagerAgentConfig): Promise<PaperG
   });
 
   // Clean up temp file
-  try { fs.unlinkSync(yamlPath); } catch { /* ignore */ }
+  try {
+    const fs = await import('fs');
+    fs.unlinkSync(yamlPath);
+  } catch { /* ignore */ }
 
+  return finalizePaperGeneration(config, topic, ieResult);
+}
+
+/**
+ * After NeuriCo finishes (success or partial), do the post-processing:
+ * summarize REPORT.md via LLM, validate required fields, and post the paper
+ * to Agent4Science via the agent's API key.
+ *
+ * Shared between the synchronous `runNeuricoFlow` and the non-blocking
+ * state machine in `tickPaperGeneration`.
+ */
+export async function finalizePaperGeneration(
+  config: ManagerAgentConfig,
+  topic: string,
+  ieResult: NeuricoResult,
+): Promise<PaperGenerationResult> {
   if (!ieResult.success) {
     return { success: false, error: ieResult.error || 'NeuriCo run failed' };
   }
@@ -650,25 +698,49 @@ export async function runNeuricoFlow(config: ManagerAgentConfig): Promise<PaperG
 // ============================================================================
 
 /**
- * Check if an agent is due for paper generation and run it if so.
- * Called by the event loop on each tick for NeuriCo agents.
+ * Per-agent paper generation tick.
+ *
+ * This is the non-blocking state machine called by the event loop:
+ *
+ *   1. If there's a `running` NeuriCo run in the DB for this agent:
+ *        - poll it. If the wrapper is still alive, return null (don't block
+ *          the rest of the event loop).
+ *        - if completed, harvest outputs, post to Agent4Science, mark
+ *          finished, record generation.
+ *        - if failed, mark finished, record generation, log audit.
+ *
+ *   2. Otherwise, if the agent is due for a new run AND has ≥5 memberships:
+ *        - pick topic, generate YAML, submit + launch detached.
+ *        - record the run in `neurico_runs` and return null. Subsequent
+ *          ticks will pick up where this one left off.
+ *
+ *   3. Otherwise, return null.
+ *
+ * The launched `./neurico run` subprocess is detached + redirected to a log
+ * file, so flamebird's event loop is never blocked on docker, and a crash
+ * of flamebird does not orphan the docker container (it just gets reparented
+ * to init; a future flamebird start will pick up the row in `neurico_runs`
+ * and continue polling).
  */
 export async function tickPaperGeneration(config: ManagerAgentConfig): Promise<PaperGenerationResult | null> {
   if (config.capability !== 'neurico') return null;
 
   const db = getDatabase();
-  const genConfig = db.getPaperGenerationConfig(config.agentId);
 
-  // Check if it's time to generate
-  if (genConfig.lastGenerationTime) {
-    const elapsed = Date.now() - genConfig.lastGenerationTime.getTime();
-    if (elapsed < genConfig.intervalMs) {
-      return null; // Not yet time
-    }
+  // ── (1) Adopt any run already in flight for this agent ──
+  const active = db.getActiveNeuricoRunForAgent(config.agentId);
+  if (active) {
+    return advanceActiveRun(config, active);
   }
 
-  // Check prerequisite: agent must have at least 5 sciencesub memberships
-  // (Agent4Science requires this before agents can publish papers)
+  // ── (2) Is it time to start a new run? ──
+  const genConfig = db.getPaperGenerationConfig(config.agentId);
+  if (genConfig.lastGenerationTime) {
+    const elapsed = Date.now() - genConfig.lastGenerationTime.getTime();
+    if (elapsed < genConfig.intervalMs) return null;
+  }
+
+  // Prerequisite: agent must have at least 5 sciencesub memberships
   const membershipCount = db.getMembershipCount(config.agentId);
   if (membershipCount < 5) {
     logger.info({
@@ -682,19 +754,138 @@ export async function tickPaperGeneration(config: ManagerAgentConfig): Promise<P
   logger.info({
     agentId: config.agentId,
     capability: config.capability,
-  }, 'Paper generation triggered');
-
-  let result: PaperGenerationResult;
+  }, 'Paper generation triggered — launching detached NeuriCo run');
 
   try {
-    result = await runNeuricoFlow(config);
+    await launchNewRunForAgent(config);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    logger.error({ error: msg, agentId: config.agentId }, 'Paper generation failed');
+    logger.error({ error: msg, agentId: config.agentId }, 'Failed to launch NeuriCo run');
+    // Mark a failed attempt so we don't retry every tick on a permanent failure.
+    db.recordPaperGeneration(config.agentId);
+    db.logAction(config.agentId, 'paper', null, 'paper', false, msg);
+    return { success: false, error: msg };
+  }
+
+  // The run is in flight; the next tick will pick it up via getActiveNeuricoRunForAgent.
+  return null;
+}
+
+/**
+ * Launch a fresh research idea: pick topic, generate YAML, submit + launch
+ * detached, record in DB.
+ */
+async function launchNewRunForAgent(config: ManagerAgentConfig): Promise<void> {
+  const iePath = config.neuricoPath || resolveNeuricoPath();
+  if (!iePath) {
+    throw new Error('NeuriCo not found. Install it: curl -fsSL https://raw.githubusercontent.com/ChicagoHAI/neurico/main/install.sh | bash');
+  }
+
+  const topic = await pickResearchTopic(config);
+  logger.info({ agentId: config.agentId, topic: topic.slice(0, 200) }, 'Topic selected');
+
+  const yamlPath = await writeIdeaYamlForTopic(iePath, topic, config);
+
+  const launchResult = await submitAndLaunchNeurico(iePath, {
+    source: yamlPath,
+    provider: config.neuricoProvider || 'claude',
+    autoRun: true,
+  });
+
+  // Clean up temp YAML file now that submit has registered it.
+  try {
+    const fs = await import('fs');
+    fs.unlinkSync(yamlPath);
+  } catch { /* ignore */ }
+
+  if (!launchResult.success) {
+    throw new Error(launchResult.error);
+  }
+
+  const launched = launchResult.launched;
+  getDatabase().recordNeuricoRunLaunch({
+    runId: launched.runId,
+    agentId: config.agentId,
+    ideaId: launched.ideaId,
+    workspaceDir: launched.workspaceDir,
+    wrapperPid: launched.wrapperPid || null,
+    logFile: launched.logFile,
+    topic,
+  });
+
+  logger.info({
+    agentId: config.agentId,
+    runId: launched.runId,
+    ideaId: launched.ideaId,
+    wrapperPid: launched.wrapperPid,
+  }, 'NeuriCo run launched — tick complete, will check status on next tick');
+}
+
+/**
+ * Advance an in-flight run by one tick: poll status, harvest + post on
+ * completion, log failure on failure.
+ */
+async function advanceActiveRun(
+  config: ManagerAgentConfig,
+  active: import('../db/database.js').NeuricoRunRow,
+): Promise<PaperGenerationResult | null> {
+  const iePath = config.neuricoPath || resolveNeuricoPath();
+  if (!iePath) {
+    // Without a neurico path we can't poll workspace state. Mark failed so
+    // we don't get stuck forever on this row.
+    const msg = 'NeuriCo path could not be resolved; abandoning in-flight run';
+    logger.error({ runId: active.run_id, agentId: config.agentId }, msg);
+    getDatabase().markNeuricoRunFinished(active.run_id, 'failed', null, msg);
+    return null;
+  }
+
+  const launched: LaunchedNeuricoRun = {
+    runId: active.run_id,
+    ideaId: active.idea_id ?? '',
+    wrapperPid: active.wrapper_pid ?? 0,
+    workspaceDir: active.workspace_dir,
+    logFile: active.log_file ?? '',
+  };
+
+  const status = pollNeuricoRun(launched);
+  if (status.state === 'running') {
+    logger.debug({ runId: active.run_id, agentId: config.agentId }, 'NeuriCo run still in flight');
+    return null;
+  }
+
+  const db = getDatabase();
+
+  if (status.state === 'failed') {
+    logger.warn({
+      agentId: config.agentId,
+      runId: active.run_id,
+      reason: status.reason,
+    }, 'NeuriCo run failed');
+    db.markNeuricoRunFinished(active.run_id, 'failed', null, status.reason);
+    db.recordPaperGeneration(config.agentId);
+    db.logAction(config.agentId, 'paper', null, 'paper', false, status.reason);
+    return { success: false, error: status.reason };
+  }
+
+  // status.state === 'completed' — harvest outputs and finalize.
+  logger.info({ agentId: config.agentId, runId: active.run_id }, 'NeuriCo run completed — harvesting outputs');
+  const ieResult = harvestNeuricoRun(launched, iePath);
+
+  let result: PaperGenerationResult;
+  try {
+    result = await finalizePaperGeneration(config, active.topic ?? '', ieResult);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error({ error: msg, agentId: config.agentId }, 'Finalize step threw');
     result = { success: false, error: msg };
   }
 
-  // Record the generation attempt (even if failed, to avoid rapid retries)
+  db.markNeuricoRunFinished(
+    active.run_id,
+    result.success ? 'completed' : 'failed',
+    null,
+    result.success ? null : (result.error ?? null),
+  );
   db.recordPaperGeneration(config.agentId);
 
   if (result.success) {
@@ -703,18 +894,12 @@ export async function tickPaperGeneration(config: ManagerAgentConfig): Promise<P
       title: result.title,
       paperId: result.agent4sciencePaperId,
     }, 'Paper published to Agent4Science');
-
-    // Log to audit
     db.logAction(config.agentId, 'paper', result.agent4sciencePaperId || null, 'paper', true, undefined, {
       title: result.title,
       githubUrl: result.githubUrl,
     });
   } else {
-    logger.warn({
-      agentId: config.agentId,
-      error: result.error,
-    }, 'Paper generation attempt failed');
-
+    logger.warn({ agentId: config.agentId, error: result.error }, 'Paper generation attempt failed');
     db.logAction(config.agentId, 'paper', null, 'paper', false, result.error);
   }
 
