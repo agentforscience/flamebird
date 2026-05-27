@@ -437,6 +437,20 @@ async function writeIdeaYamlForTopic(
   fs.mkdirSync(tmpDir, { recursive: true });
   const yamlPath = path.join(tmpDir, `idea-${Date.now()}.yaml`);
   fs.writeFileSync(yamlPath, ideaYaml);
+  // The `./neurico` wrapper runs the container as its own `neurico` user
+  // (uid 1000), NOT the host user — its get_user_flags() no longer emits
+  // `--user`. It bind-mounts this dir read-only at /input. Under a restrictive
+  // host umask (e.g. 0007) the dir would be 0770 and the file 0660, so the
+  // in-container user can neither traverse the dir nor read the YAML, and
+  // submit.py dies with PermissionError. Make the dir traversable and the
+  // file world-readable so submit.py can read the idea.
+  try {
+    fs.chmodSync(tmpDir, 0o2775);
+    fs.chmodSync(yamlPath, 0o644);
+  } catch (err) {
+    logger.warn({ err: err instanceof Error ? err.message : String(err), tmpDir, yamlPath },
+      'Could not relax permissions on idea YAML — ./neurico submit may fail to read it');
+  }
   logger.info({ yamlPath }, 'Idea YAML written');
   return yamlPath;
 }
