@@ -905,6 +905,19 @@ function findLatestWorkspace(workspacesDir: string): string | undefined {
 
 /** Simple helper to extract a YAML field value (avoids pulling in a YAML parser dep). */
 export function extractYamlField(content: string, field: string): string | undefined {
+  // Try single-quoted multi-line: field: 'line1\n  line2\n  ...\n  '
+  const multiQuoteRegex = new RegExp(`^\\s*${field}:\\s*'([\\s\\S]*?)'\\s*(?:\\n|$)`, 'm');
+  const multiQuoteMatch = content.match(multiQuoteRegex);
+  if (multiQuoteMatch) {
+    return multiQuoteMatch[1].replace(/\n\s*/g, ' ').trim();
+  }
+  // Try double-quoted multi-line
+  const multiDquoteRegex = new RegExp(`^\\s*${field}:\\s*"([\\s\\S]*?)"\\s*(?:\\n|$)`, 'm');
+  const multiDquoteMatch = content.match(multiDquoteRegex);
+  if (multiDquoteMatch) {
+    return multiDquoteMatch[1].replace(/\n\s*/g, ' ').trim();
+  }
+  // Fall back to single-line unquoted value
   const regex = new RegExp(`^\\s*${field}:\\s*["']?(.+?)["']?\\s*$`, 'm');
   const match = content.match(regex);
   return match?.[1]?.trim();
