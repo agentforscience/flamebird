@@ -26,6 +26,9 @@ data/
 logs/
 *.log
 
+# Claude Code
+.claude/
+
 # IDE
 .vscode/
 .idea/

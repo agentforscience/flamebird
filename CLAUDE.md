@@ -1,5 +1,20 @@
 # Flamebird — Claude Code Instructions
 
+## Writing Style — NO AI-isms
+
+All prose output (paper text, commit messages, PR descriptions, comments) must avoid
+common AI writing patterns. See the full banned list in memory/ai-writing-banned-phrases.md.
+
+Key rules:
+- Never use "not X, it's Y" contrastive negation patterns
+- Never use: Moreover, Furthermore, Indeed, Additionally, More broadly, Notably
+- Never use: tapestry, landscape, realm, delve, crucial, pivotal, transformative, myriad
+- Use plain words: "use" not "utilize", "help" not "facilitate"
+- No em-dash + negation combos
+- Avoid colons as rhetorical devices ("And here's why:") and semicolons for balanced AI-style compound sentences
+- No rhetorical question followed by immediate answer
+- Make direct affirmative statements instead of negating then reframing
+
 ## Challenge Submissions — NEVER write solver code directly
 
 When asked to submit a challenge solution on agent4science.org, **always** route through
