@@ -1116,15 +1116,19 @@ export class ProactiveEngine {
       this.lastSeenCommentCount.set(rootId, commentCount);
 
       try {
-        let comments: ReplyableComment[] = [];
+        let comments: ReplyableComment[] | undefined;
 
-        // Try thread endpoint first, fall back to comments endpoint
-        const threadResult = await client.getThread(rootId, apiKey);
-        if (threadResult.success && threadResult.data) {
-          const data = threadResult.data;
-          comments = Array.isArray(data) ? data : (data as { comments?: ReplyableComment[] }).comments ?? [];
-        } else {
-          // Fallback: fetch comments directly from paper/take/review/submission comments endpoint
+        // Thread endpoint only supports papers and takes; use type-specific comments for reviews/submissions
+        if (rootType === 'paper' || rootType === 'take') {
+          const threadResult = await client.getThread(rootId, apiKey);
+          if (threadResult.success && threadResult.data) {
+            const data = threadResult.data;
+            comments = Array.isArray(data) ? data : (data as { comments?: ReplyableComment[] }).comments ?? [];
+          }
+        }
+
+        if (!comments) {
+          // Thread endpoint unavailable or failed — use type-specific comments endpoint
           const fallbackResult = rootType === 'paper'
             ? await client.getPaperComments(rootId, apiKey)
             : rootType === 'review'
@@ -1136,10 +1140,9 @@ export class ProactiveEngine {
             const fbData = fallbackResult.data;
             comments = Array.isArray(fbData) ? fbData : (fbData as { comments?: ReplyableComment[] }).comments ?? [];
           } else {
-            logger.info({ ...agentLog(agentId), rootId, rootType, error: fallbackResult.error }, 'Both thread and comments fetch failed');
+            logger.info({ ...agentLog(agentId), rootId, rootType, error: fallbackResult.error }, 'Comments fetch failed');
             continue;
           }
-          logger.info({ ...agentLog(agentId), rootId: rootId.slice(-8), rootType, comments: comments.length }, 'Thread fetch failed, used comments fallback');
         }
 
         logger.info({
@@ -2291,13 +2294,31 @@ export class ProactiveEngine {
     const client = getAgent4ScienceClient();
 
     try {
-      const result = await client.getThread(rootId, apiKey);
+      // Thread endpoint only supports papers and takes
+      const threadSupported = _rootType === 'paper' || _rootType === 'take';
+      let allCommentsRaw: any[] | undefined;
 
-      if (!result.success || !result.data) {
-        return '';
+      if (threadSupported) {
+        const result = await client.getThread(rootId, apiKey);
+        if (result.success && result.data) {
+          allCommentsRaw = (result.data as any).comments;
+        }
       }
 
-      const allComments = (result.data as any).comments || [];
+      if (!allCommentsRaw) {
+        const fallbackResult = _rootType === 'paper'
+          ? await client.getPaperComments(rootId, apiKey)
+          : _rootType === 'review'
+            ? await client.getReviewComments(rootId, apiKey)
+            : _rootType === 'submission'
+              ? await client.getSubmissionComments(rootId, apiKey)
+              : await client.getTakeComments(rootId, apiKey);
+        if (!fallbackResult.success || !fallbackResult.data) return '';
+        const fbData = fallbackResult.data;
+        allCommentsRaw = Array.isArray(fbData) ? fbData : (fbData as any).comments ?? [];
+      }
+
+      const allComments = allCommentsRaw || [];
       if (allComments.length === 0) return '';
 
       // Find the target comment
