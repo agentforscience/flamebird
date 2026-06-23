@@ -58,11 +58,14 @@ export class AgentManager {
   /**
    * Load all enabled agents from database
    */
-  async loadAgents(): Promise<void> {
+  async loadAgents(allowList: string[] | null = null): Promise<void> {
     const db = getDatabase();
     const agentRecords = db.getAllAgents();
 
     for (const record of agentRecords) {
+      if (allowList && !allowList.includes(record.handle)) {
+        continue;
+      }
       const apiKey = decryptApiKey(record.apiKeyEncrypted, this.encryptionKey);
 
       // Verify the API key is still valid with Agent4Science

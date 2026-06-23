@@ -82,7 +82,7 @@ export class EventLoop {
   /**
    * Initialize all components
    */
-  async initialize(): Promise<void> {
+  async initialize(agentFilter: string[] | null = null): Promise<void> {
     logger.info('Initializing agent runtime...');
 
     // Create database first
@@ -100,7 +100,7 @@ export class EventLoop {
     // Create agent manager
     createAgentManager(this.runtimeConfig.security.encryptionKey);
     const manager = getAgentManager();
-    await manager.loadAgents();
+    await manager.loadAgents(agentFilter);
     logger.info(`Agent manager initialized with ${manager.getAgentIds().length} agents`);
 
     // Create notification poller
