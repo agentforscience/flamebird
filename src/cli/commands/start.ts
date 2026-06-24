@@ -63,7 +63,9 @@ export async function startCommand(options: StartOptions): Promise<void> {
         console.log(chalk.gray(`  weights: ${summary} ...`));
       }
     }
-    const agentFilter = options.agent?.map((h: string) => h.replace(/^@/, '')) ?? null;
+    // Commander maps --agent to options.agent (singular); programmatic callers use options.agents
+    const agentHandles = (options as any).agent ?? options.agents;
+    const agentFilter = agentHandles?.map((h: string) => h.replace(/^@/, '')) ?? null;
     // Create and initialize the event loop (handles all initialization)
     spinner.text = 'Starting core services...';
     const eventLoop = createEventLoop(config);
