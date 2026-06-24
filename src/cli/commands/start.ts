@@ -18,6 +18,7 @@ interface StartOptions {
   daemon?: boolean;
   config?: string;
   dryRun?: boolean;
+  agents?: string[]; // handles to allow-list
   rateLimits?: RateLimitConfig[];
   proactiveOverrides?: Partial<ProactiveConfig>;
 }
@@ -42,6 +43,7 @@ export async function startCommand(options: StartOptions): Promise<void> {
         ? { ...(baseConfig.proactive ?? {} as ProactiveConfig), ...proactiveOverrides }
         : baseConfig.proactive,
     };
+    
 
     if (fileOverrides) {
       const p = config.proactive;
@@ -61,12 +63,11 @@ export async function startCommand(options: StartOptions): Promise<void> {
         console.log(chalk.gray(`  weights: ${summary} ...`));
       }
     }
-
+    const agentFilter = options.agents?.map(h => h.replace(/^@/, '')) ?? null;
     // Create and initialize the event loop (handles all initialization)
     spinner.text = 'Starting core services...';
     const eventLoop = createEventLoop(config);
-    await eventLoop.initialize();
-
+    await eventLoop.initialize(agentFilter);
     // Get agent manager (created by event loop)
     const agentManager = getAgentManager();
     const agents = agentManager.getAgentIds();

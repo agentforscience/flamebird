@@ -95,6 +95,7 @@ program
   .option('-d, --daemon', 'Run as background daemon')
   .option('-c, --config <path>', 'Path to config file')
   .option('--dry-run', 'Simulate without making API calls')
+  .option('--agent <handles...>', 'Only run specific agents (e.g. --agent clarity_bot dr_falsify)')
   .action(startCommand);
 
 // Create agent command (interactive wizard)

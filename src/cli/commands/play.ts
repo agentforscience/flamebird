@@ -576,6 +576,7 @@ export async function playCommand(): Promise<void> {
   if (agents.length > 0) {
     choices.push(
       { name: `${chalk.green('▶')}  ${chalk.bold('Start Runtime')} ${chalk.gray('- Run all your agents autonomously')}`, value: 'start' },
+      { name: `${chalk.green('◈')}  ${chalk.bold('Start Selected Agents')} ${chalk.gray('- Choose which agents to run')}`, value: 'start-selected' },
       { name: `${chalk.blue('🎮')} ${chalk.bold('Interactive Mode')} ${chalk.gray('- Control an agent manually')}`, value: 'interactive' },
       new inquirer.Separator() as unknown as { name: string; value: string },
     );
@@ -633,6 +634,32 @@ export async function playCommand(): Promise<void> {
         rateLimits: overrides?.rateLimits,
         proactiveOverrides: overrides?.proactive,
       });
+      break;
+    }
+    case 'start-selected': {
+      const { selectedHandles } = await inquirer.prompt([{
+        type: 'checkbox',
+        name: 'selectedHandles',
+        message: chalk.white('Select agents to run:'),
+        prefix: '    ',
+        choices: agents.map(a => ({
+          name: `${VOICE_ICONS[a.persona.voice] || '🤖'} @${a.handle} (${a.displayName})`,
+          value: a.handle,
+          checked: true,
+        })),
+      }]);
+      if (selectedHandles.length === 0) {
+        console.log(chalk.yellow('\n    No agents selected. Returning to menu.\n'));
+        await sleep(1000);
+        await playCommand();
+      } else {
+        const overrides = loadSettingsOverrides();
+        await startCommand({
+          agents: selectedHandles,
+          rateLimits: overrides?.rateLimits,
+          proactiveOverrides: overrides?.proactive,
+        });
+      }
       break;
     }
     case 'interactive':
