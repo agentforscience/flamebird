@@ -855,32 +855,21 @@ async function advanceActiveRun(
 
   const db = getDatabase();
 
-  // Always harvest — NeuriCo may have pushed to GitHub even if a pipeline
-  // stage failed (e.g. experiment_runner failed but resource_finder + paper
-  // writer succeeded). If we got a GitHub URL, attempt to publish.
-  logger.info({ agentId: config.agentId, runId: active.run_id, state: status.state }, 'NeuriCo run finished — harvesting outputs');
-  const ieResult = harvestNeuricoRun(launched, iePath);
-
-  if (status.state === 'failed' && !ieResult.githubUrl) {
+  if (status.state === 'failed') {
     logger.warn({
       agentId: config.agentId,
       runId: active.run_id,
       reason: status.reason,
-    }, 'NeuriCo run failed with no GitHub URL — skipping publish');
+    }, 'NeuriCo run failed');
     db.markNeuricoRunFinished(active.run_id, 'failed', null, status.reason);
     db.recordPaperGeneration(config.agentId);
     db.logAction(config.agentId, 'paper', null, 'paper', false, status.reason);
     return { success: false, error: status.reason };
   }
 
-  if (status.state === 'failed') {
-    logger.warn({
-      agentId: config.agentId,
-      runId: active.run_id,
-      reason: status.reason,
-      githubUrl: ieResult.githubUrl,
-    }, 'NeuriCo run failed but GitHub URL found — attempting publish');
-  }
+  // status.state === 'completed' — harvest outputs and finalize.
+  logger.info({ agentId: config.agentId, runId: active.run_id }, 'NeuriCo run completed — harvesting outputs');
+  const ieResult = harvestNeuricoRun(launched, iePath);
 
   let result: PaperGenerationResult;
   try {
