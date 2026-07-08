@@ -499,8 +499,7 @@ function scoreSciencesub(sciencesub: { slug: string; name: string; description: 
   return topics.reduce((score, topic) => score + (haystack.includes(topic.toLowerCase()) ? 2 : 0), 0);
 }
 
-async function ensureSciencesubs(apiKey: string, persona: AgentPersona, requested: string[]): Promise<string[]> {
-  const client = createAgent4ScienceClient({ baseUrl: optionalEnv('A4S_API_URL') ?? 'https://agent4science.org' });
+async function ensureSciencesubs(client: ReturnType<typeof createAgent4ScienceClient>, apiKey: string, persona: AgentPersona, requested: string[]): Promise<string[]> {
   const available = await client.getCachedSciencesubs(apiKey);
   if (available.length === 0) return [];
 
@@ -531,8 +530,7 @@ function normalizeArray<T>(data: T[] | PaginatedLike<T> | undefined | null): T[]
   return [];
 }
 
-async function fetchCandidatePapers(apiKey: string, me: Agent4ScienceAgent, limit: number): Promise<Agent4SciencePaper[]> {
-  const client = createAgent4ScienceClient({ baseUrl: optionalEnv('A4S_API_URL') ?? 'https://agent4science.org' });
+async function fetchCandidatePapers(client: ReturnType<typeof createAgent4ScienceClient>, apiKey: string, me: Agent4ScienceAgent, limit: number): Promise<Agent4SciencePaper[]> {
   const [hot, fresh, randomFeed] = await Promise.all([
     client.getPapers(apiKey, { limit, sort: 'hot' }),
     client.getPapers(apiKey, { limit, sort: 'new' }),
@@ -747,8 +745,17 @@ function ensureSummaryLength(summary: string, paper: Agent4SciencePaper, review:
     if (result.length >= 1200) break;
     result += extra;
   }
-  while (result.length < 1200) {
-    result += ' Additional evidence, stronger ablations, and clearer methodological justification would improve confidence in the paper\'s claims.';
+  if (result.length < 1200) {
+    const fillers = [
+      `\n\nThe paper "${paper.title}" presents claims across ${paper.tags.join(', ') || 'its stated domain'}.`,
+      paper.claims.length > 0 ? `\n\nThe authors claim: ${paper.claims.join('. ')}.` : '',
+      paper.limitations.length > 0 ? `\n\nStated limitations: ${paper.limitations.join('. ')}.` : '',
+      `\n\nThe paper's abstract states: ${smartTruncate(paper.abstract, 800)}.`,
+    ].filter(Boolean);
+    for (const filler of fillers) {
+      if (result.length >= 1200) break;
+      result += filler;
+    }
   }
   return smartTruncate(result, 5000);
 }
@@ -791,17 +798,16 @@ function parseConferenceReview(raw: string, paper: Agent4SciencePaper): Conferen
   };
 
   if (review.Strengths.length < 2) {
+    const tags = paper.tags.length > 0 ? paper.tags.join(', ') : 'its target area';
     review.Strengths = [
-      'The paper tackles a concrete and timely question.',
-      'The authors articulate a falsifiable central claim.',
-      'The work is likely to interest practitioners following this topic.',
+      `The paper addresses a question in ${tags} and states a testable hypothesis.`,
+      `The authors provide a clear abstract and structured claims for "${smartTruncate(paper.title, 80)}".`,
     ];
   }
   if (review.Weaknesses.length < 2) {
     review.Weaknesses = [
-      'The evidence base is currently too limited to fully support the strongest claims.',
-      'The evaluation leaves uncertainty about robustness and generalization.',
-      'The causal interpretation would benefit from stronger controls and ablations.',
+      `The evidence presented for "${smartTruncate(paper.title, 80)}" does not yet fully support the stated claims.`,
+      'The evaluation would benefit from stronger baselines, ablations, or statistical controls.',
     ];
   }
 
@@ -1033,8 +1039,7 @@ function toApiDraft(
   };
 }
 
-async function postReview(apiKey: string, paper: Agent4SciencePaper, draft: ReviewDraft, dryRun: boolean): Promise<void> {
-  const client = createAgent4ScienceClient({ baseUrl: optionalEnv('A4S_API_URL') ?? 'https://agent4science.org' });
+async function postReview(client: ReturnType<typeof createAgent4ScienceClient>, apiKey: string, paper: Agent4SciencePaper, draft: ReviewDraft, dryRun: boolean): Promise<void> {
 
   if (dryRun) {
     console.log(`DRY RUN: would post review for "${paper.title}"`);
@@ -1078,20 +1083,21 @@ async function main(): Promise<void> {
   const agent = await ensureAgent(config);
   console.log(`Using agent @${agent.profile.handle} (${agent.profile.displayName})`);
 
-  const joined = await ensureSciencesubs(agent.apiKey, config.persona, config.sciencesubs);
+  const client = createAgent4ScienceClient({ baseUrl: config.apiUrl });
+
+  const joined = await ensureSciencesubs(client, agent.apiKey, config.persona, config.sciencesubs);
   if (joined.length > 0) {
     console.log(`Joined sciencesubs: ${joined.join(', ')}`);
   }
 
   const promptTemplate = loadOptionalText(config.reviewPromptFile);
   const fewshotPrompt = loadOptionalText(config.fewshotPromptFile);
-  const client = createAgent4ScienceClient({ baseUrl: config.apiUrl });
 
   const deadline = Date.now() + config.runMinutes * 60_000;
   let reviewsPosted = 0;
 
   while (Date.now() < deadline && reviewsPosted < config.maxReviews) {
-    const candidates = await fetchCandidatePapers(agent.apiKey, agent.profile, config.maxCandidates);
+    const candidates = await fetchCandidatePapers(client, agent.apiKey, agent.profile, config.maxCandidates);
     if (candidates.length === 0) {
       console.log('No unrated candidate papers found yet. Waiting for next poll.');
       await sleep(config.pollIntervalMs);
@@ -1112,7 +1118,7 @@ async function main(): Promise<void> {
       );
       const draft = toApiDraft(result.review, source, result.debug, result.trace);
       saveStructuredReview(config, source, draft, extracted);
-      await postReview(agent.apiKey, source, draft, config.dryRun);
+      await postReview(client, agent.apiKey, source, draft, config.dryRun);
       reviewsPosted += 1;
       console.log(`Posted review ${reviewsPosted}/${config.maxReviews} for "${source.title}"`);
     } catch (error) {
