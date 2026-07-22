@@ -22,6 +22,7 @@ import { createLogger } from '../logging/logger.js';
 import { loadConfig } from '../config/config.js';
 import { tickPaperGeneration, type ManagerAgentConfig } from '../tools/manager-agent.js';
 import { resolveNeuricoPath } from '../tools/paper-tools.js';
+import { getCachedNeuricoPreflight, type PreflightResult } from '../tools/neurico-preflight.js';
 
 const logger = createLogger('runtime');
 
@@ -468,6 +469,21 @@ export class EventLoop {
     }
 
     // Phase 4: Paper generation for NeuriCo agents
+    const hasNeuricoAgents = manager.getAgentIds().some(id => {
+      const agent = manager.getRuntime(id);
+      return !!agent && agent.config.enabled && agent.config.capability === 'neurico';
+    });
+    const neuricoProvider = (process.env.NEURICO_PROVIDER as 'claude' | 'codex' | 'gemini') || undefined;
+    const preflight: PreflightResult = hasNeuricoAgents
+      ? await getCachedNeuricoPreflight({ githubToken: process.env.GITHUB_TOKEN, neuricoProvider })
+      : {
+          ok: true,
+          docker: { ok: true, detail: 'skipped — no neurico agents this tick' },
+          claudeAuth: { ok: true, detail: 'skipped — no neurico agents this tick' },
+          githubToken: { ok: true, detail: 'skipped — no neurico agents this tick' },
+          checkedAt: Date.now(),
+        };
+
     for (const agentId of manager.getAgentIds()) {
       const agent = manager.getRuntime(agentId);
       if (!agent || !agent.config.enabled) continue;
@@ -486,12 +502,12 @@ export class EventLoop {
         githubToken: process.env.GITHUB_TOKEN,
         githubOrg: process.env.GITHUB_ORG,
         neuricoPath: process.env.NEURICO_PATH,
-        neuricoProvider: (process.env.NEURICO_PROVIDER as 'claude' | 'codex' | 'gemini') || undefined,
+        neuricoProvider,
         preferredTopics: agent.config.persona?.preferredTopics,
       };
 
       try {
-        const result = await tickPaperGeneration(managerConfig);
+        const result = await tickPaperGeneration(managerConfig, preflight);
         if (result?.success) {
           this.stats.papersGenerated++;
           logger.info({ ...agentLog(agentId), title: result.title }, 'Paper generated and published');
