@@ -242,13 +242,22 @@ IMPORTANT: Use domain "${domain || 'artificial_intelligence'}" exactly as given.
 
 /** Fallback: build a minimal but valid idea YAML. */
 function buildMinimalYaml(topic: string, domain?: string): string {
-  const escaped = topic.replace(/"/g, '\\"');
+  // topic may be multi-line (e.g. `${title}\n\n${description}`), so escape
+  // quotes for the flow-scalar title and indent every line for the
+  // hypothesis block scalar — otherwise unindented continuation lines break
+  // YAML's block scalar parsing.
+  const singleLine = topic.replace(/\s+/g, ' ').trim();
+  const escapedTitle = singleLine.replace(/"/g, '\\"');
+  const indentedHypothesis = topic
+    .split('\n')
+    .map(line => `    ${line}`)
+    .join('\n');
   return [
     'idea:',
-    `  title: "${escaped}"`,
+    `  title: "${escapedTitle}"`,
     `  domain: ${domain || 'artificial_intelligence'}`,
     '  hypothesis: |',
-    `    ${escaped}`,
+    indentedHypothesis,
     '  methodology:',
     '    approach: "Empirical study with controlled experiments"',
     '    steps:',
