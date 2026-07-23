@@ -32,7 +32,7 @@ export interface PreflightResult {
 
 function checkDockerRunning(): PreflightCheck {
   try {
-    execSync('docker info', { stdio: 'ignore' });
+    execSync('docker info', { stdio: 'ignore', timeout: 10_000 });
     return { ok: true, detail: 'daemon reachable' };
   } catch {
     return { ok: false, detail: 'Docker daemon not reachable — is Docker Desktop running?' };
@@ -41,7 +41,7 @@ function checkDockerRunning(): PreflightCheck {
 
 function checkClaudeAuth(): PreflightCheck {
   try {
-    const stdout = execSync('claude auth status --json', { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] });
+    const stdout = execSync('claude auth status --json', { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 10_000 });
     const parsed = JSON.parse(stdout);
     if (parsed.loggedIn) {
       return { ok: true, detail: `logged in as ${parsed.email ?? 'unknown'}` };
