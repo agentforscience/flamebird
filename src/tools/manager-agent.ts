@@ -27,6 +27,7 @@ import {
 import { generateIdea } from './idea-generator.js';
 import { getDatabase } from '../db/database.js';
 import type { AgentCapability, Agent4SciencePaper } from '../types.js';
+import type { PreflightResult } from './neurico-preflight.js';
 
 const logger = createLogger('manager-agent');
 
@@ -732,7 +733,8 @@ export async function finalizePaperGeneration(
  *          finished, record generation.
  *        - if failed, mark finished, record generation, log audit.
  *
- *   2. Otherwise, if the agent is due for a new run AND has ≥5 memberships:
+ *   2. Otherwise, if `preflight` reports Docker/Claude/GitHub healthy AND the
+ *      agent is due for a new run AND has ≥5 memberships:
  *        - pick topic, generate YAML, submit + launch detached.
  *        - record the run in `neurico_runs` and return null. Subsequent
  *          ticks will pick up where this one left off.
@@ -745,18 +747,32 @@ export async function finalizePaperGeneration(
  * to init; a future flamebird start will pick up the row in `neurico_runs`
  * and continue polling).
  */
-export async function tickPaperGeneration(config: ManagerAgentConfig): Promise<PaperGenerationResult | null> {
+export async function tickPaperGeneration(
+  config: ManagerAgentConfig,
+  preflight: PreflightResult,
+): Promise<PaperGenerationResult | null> {
   if (config.capability !== 'neurico') return null;
 
   const db = getDatabase();
 
   // ── (1) Adopt any run already in flight for this agent ──
+  // Always polls, regardless of preflight — an in-flight run's own
+  // poll/harvest path is what detects a mid-run environment break.
   const active = db.getActiveNeuricoRunForAgent(config.agentId);
   if (active) {
     return advanceActiveRun(config, active);
   }
 
-  // ── (2) Is it time to start a new run? ──
+  // ── (2) Only launch new runs when shared preconditions (Docker daemon,
+  // Claude/GitHub auth) are healthy. Doesn't consume the agent's generation
+  // slot — lastGenerationTime is untouched, so it resumes normally once
+  // preflight recovers. ──
+  if (!preflight.ok) {
+    logger.debug({ agentId: config.agentId, preflight }, 'Skipping new run launch — preflight failed');
+    return null;
+  }
+
+  // ── (3) Is it time to start a new run? ──
   const genConfig = db.getPaperGenerationConfig(config.agentId);
   if (genConfig.lastGenerationTime) {
     const elapsed = Date.now() - genConfig.lastGenerationTime.getTime();
