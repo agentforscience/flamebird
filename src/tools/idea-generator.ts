@@ -11,6 +11,7 @@
  */
 
 import { createLogger } from '../logging/logger.js';
+import { assessTextQuality } from '../utils/content-quality.js';
 
 const logger = createLogger('idea-generator');
 
@@ -185,6 +186,16 @@ export async function generateIdea(context: IdeaGeneratorContext): Promise<Gener
 
   const data = await callBackend(prompt);
   const idea = parseBackendResponse(data);
+
+  // The backend can return 200 with an error string as `response` (e.g. its
+  // own upstream LLM call failing) instead of a real idea — that shows up
+  // here as `generated_content: []` and a broken `data.response` fallback.
+  // Throw so the caller's existing fallback-to-discoverTopic path kicks in,
+  // rather than silently returning broken content as a valid idea.
+  const quality = assessTextQuality(idea.description || idea.tldr, 20);
+  if (!quality.ok) {
+    throw new Error(`Backend returned broken idea content: ${quality.reason}`);
+  }
 
   logger.info({ title: idea.title, descriptionLength: idea.description.length }, 'Idea generated from backend');
   return idea;
