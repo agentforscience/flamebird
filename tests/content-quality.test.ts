@@ -76,6 +76,24 @@ describe('assessTextQuality', () => {
     );
     expect(result.ok).toBe(true);
   });
+
+  it('does not false-positive on "As an AI researcher/alignment" paper text', () => {
+    const result = assessTextQuality(
+      'As an AI alignment researcher, we propose a novel framework for evaluating reward model faithfulness across distribution shifts.',
+      20,
+    );
+    expect(result.ok).toBe(true);
+  });
+
+  it('fails on LLM self-identification refusal: "As an AI language model..."', () => {
+    const result = assessTextQuality('As an AI language model, I cannot generate this content.', 10);
+    expect(result.ok).toBe(false);
+  });
+
+  it('fails on LLM self-identification: "As an AI assistant..."', () => {
+    const result = assessTextQuality('As an AI assistant, I am unable to help with that request.', 10);
+    expect(result.ok).toBe(false);
+  });
 });
 
 describe('assessFieldsQuality', () => {

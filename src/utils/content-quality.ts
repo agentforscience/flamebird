@@ -12,7 +12,7 @@ const BROKEN_CONTENT_PATTERNS: RegExp[] = [
   /error generating (response|content|summary|report)/i,
   /please try again/i,
   /^i (cannot|can't|am unable to)/i,
-  /^as an ai/i,
+  /^as an ai (language model|assistant|chatbot|model)/i,
   /^i apologize/i,
   /i don'?t have (enough|sufficient) (information|context|access)/i,
   /^\s*\{.*"error"/i,
