@@ -14,6 +14,7 @@ import type {
 } from '../types.js';
 import { getAgent4ScienceClient } from '../api/agent4science-client.js';
 import { smartTruncate } from '../utils/truncate.js';
+import { assessTextQuality } from '../utils/content-quality.js';
 import { getAgentManager } from '../agents/agent-manager.js';
 import { getDatabase } from '../db/database.js';
 import { getRateLimiter } from '../rate-limit/rate-limiter.js';
@@ -230,6 +231,13 @@ export class ActionExecutor {
     const db = getDatabase();
 
     try {
+      // Quality gate first — a blocked action shouldn't spend a real rate-limit
+      // slot on an API call that's never going to happen.
+      const qualityIssue = this.assessActionQuality(action);
+      if (qualityIssue) {
+        throw new Error(`Content quality gate failed: ${qualityIssue}`);
+      }
+
       // Consume rate limit token
       if (!rateLimiter.tryConsume(action.agentId, action.type)) {
         throw new Error('Rate limit exceeded');
@@ -292,7 +300,9 @@ export class ActionExecutor {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
 
       // Don't retry on permanent errors (resource deleted, not found, policy violations, etc.)
-      const isPermanent = /not found|you follow|your own|duplicate|self.review|self.take/i.test(errorMessage);
+      // Quality gate failures are permanent too — the payload doesn't get
+      // regenerated between retries, so retrying just resends the same broken content.
+      const isPermanent = /not found|you follow|your own|duplicate|self.review|self.take|content quality gate/i.test(errorMessage);
       const shouldRetry = !isPermanent && action.attempts < action.maxAttempts;
 
       if (shouldRetry) {
@@ -322,6 +332,41 @@ export class ActionExecutor {
         actionId: action.id,
         error: errorMessage,
       };
+    }
+  }
+
+  /**
+   * Content quality gate: checks the actual text of an action's payload
+   * right before posting. Returns a failure reason, or null if it passes
+   * (or the action type carries no free text, e.g. vote/follow).
+   */
+  private assessActionQuality(action: QueuedAction): string | null {
+    switch (action.type) {
+      case 'comment': {
+        const { body } = action.payload as { body?: string };
+        const result = assessTextQuality(body, 20);
+        return result.ok ? null : result.reason!;
+      }
+      case 'take': {
+        const p = action.payload as { hotTake?: string; summary?: string[]; critique?: string[] };
+        const combined = [p.hotTake, ...(p.summary ?? []), ...(p.critique ?? [])].filter(Boolean).join(' ');
+        const result = assessTextQuality(combined, 40);
+        return result.ok ? null : result.reason!;
+      }
+      case 'review': {
+        const p = action.payload as { summary?: string; strengths?: string[]; weaknesses?: string[] };
+        const combined = [p.summary, ...(p.strengths ?? []), ...(p.weaknesses ?? [])].filter(Boolean).join(' ');
+        const result = assessTextQuality(combined, 40);
+        return result.ok ? null : result.reason!;
+      }
+      case 'submission': {
+        const p = action.payload as { title?: string; body?: string; approach?: string };
+        const combined = [p.title, p.body, p.approach].filter(Boolean).join(' ');
+        const result = assessTextQuality(combined, 40);
+        return result.ok ? null : result.reason!;
+      }
+      default:
+        return null;
     }
   }
 

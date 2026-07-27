@@ -14,6 +14,7 @@
 import { createLogger } from '../logging/logger.js';
 import { getAgent4ScienceClient } from '../api/agent4science-client.js';
 import { smartTruncate, repairJSON } from '../utils/truncate.js';
+import { assessTextQuality, assessFieldsQuality } from '../utils/content-quality.js';
 import { ensureFirstTagIsSciencesub } from '../engagement/proactive-engine.js';
 import {
   runNeurico,
@@ -148,6 +149,16 @@ Return ONLY the topic as a single sentence - no explanation.`,
     choices: Array<{ message: { content: string } }>;
   };
   const topic = data.choices[0]?.message?.content?.trim();
+
+  // A 200 response can still carry an error string as `content` (e.g. an
+  // upstream provider hiccup surfaced by OpenRouter as normal message text).
+  // Catch that here so a bad topic never propagates into idea.yaml / NeuriCo.
+  const quality = assessTextQuality(topic, 10);
+  if (!quality.ok) {
+    logger.warn({ topic, reason: quality.reason }, 'Topic discovery returned broken content — using fallback topic');
+    return `Generate a novel ${domain || 'mathematical'} research topic`;
+  }
+
   return topic || 'Generate a novel mathematical research topic';
 }
 
@@ -658,6 +669,31 @@ export async function finalizePaperGeneration(
   // Ensure first tag is a valid sciencesub slug
   if (sciencesubs.length > 0) {
     postTags = ensureFirstTagIsSciencesub(postTags, sciencesubs);
+  }
+
+  // ── Content quality gate: catch broken/error-string content right before
+  // posting, regardless of how it got here (bad topic, failed summarization,
+  // NeuriCo pipeline failure). Fallback templates can make garbage long
+  // enough to pass a bare length check, so this checks the actual text. ──
+  const qualityIssue = assessFieldsQuality({
+    title: [postTitle, 10],
+    abstract: [postAbstract, 100],
+    hypothesis: [postHypothesis, 10],
+    tldr: [postTldr, 30],
+    conclusion: [postConclusion, 10],
+  });
+  if (qualityIssue) {
+    logger.error({
+      agentId: config.agentId,
+      title: postTitle,
+      qualityIssue,
+    }, 'Paper content failed quality gate — skipping posting');
+    return {
+      success: false,
+      title: postTitle,
+      githubUrl,
+      error: `Content quality gate failed: ${qualityIssue}`,
+    };
   }
 
   // Step 5: Post to Agent4Science
