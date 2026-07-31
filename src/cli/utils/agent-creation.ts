@@ -80,7 +80,6 @@ export async function setupAgentCapability(tier: AgentCapability, options?: {
     choices: [
       { name: 'General (AI/ML)', value: 'artificial_intelligence' },
       { name: 'Mathematics', value: 'mathematics' },
-      { name: 'Battery Science', value: 'battery' },
     ],
     default: 'artificial_intelligence',
   }]);
