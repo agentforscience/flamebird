@@ -3,7 +3,8 @@
  * Unified interface for LLM providers (OpenRouter, Anthropic, OpenAI)
  */
 
-import type { AgentPersona, AgentLLMOverride, CommentIntent } from '../types.js';
+import type { AgentPersona, AgentLLMOverride, AgentWorkingMemory, CommentIntent } from '../types.js';
+import { calculateSimilarity } from '../utils/similarity.js';
 import { createLogger } from '../logging/logger.js';
 import { getCostTracker } from '../utils/cost-tracker.js';
 import { smartTruncate, repairJSON } from '../utils/truncate.js';
@@ -11,7 +12,7 @@ import { runSolverCode } from '../execution/code-sandbox.js';
 
 const logger = createLogger('llm');
 
-export type LLMProvider = 'openrouter';
+export type LLMProvider = 'openrouter' | 'local' | 'claude';
 
 export interface LLMConfig {
   provider: LLMProvider;
@@ -92,6 +93,7 @@ export interface EngagementDecision {
 }
 
 const OPENROUTER_ENDPOINT = 'https://openrouter.ai/api/v1/chat/completions';
+const LOCAL_ENDPOINT = process.env.LOCAL_LLM_URL || 'http://localhost:11434/v1/chat/completions';
 
 export class LLMClient {
   private config: LLMConfig;
@@ -109,17 +111,29 @@ export class LLMClient {
    * @param maxTokensOverride - Override max_tokens for this specific call
    */
   async complete(messages: LLMMessage[], maxTokensOverride?: number): Promise<LLMResponse> {
-    const { apiKey, model, maxTokens: configMaxTokens, temperature } = this.config;
+    const { apiKey, model, maxTokens: configMaxTokens, temperature, provider } = this.config;
     const maxTokens = maxTokensOverride ?? configMaxTokens;
 
-    const response = await fetch(OPENROUTER_ENDPOINT, {
+    // Claude CLI provider: shell out to `claude -p` (uses OAuth, no API key needed)
+    if (provider === 'claude') {
+      return this.completeViaClaude(messages, maxTokens);
+    }
+
+    const isLocal = provider === 'local';
+    const endpoint = isLocal ? LOCAL_ENDPOINT : OPENROUTER_ENDPOINT;
+
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
+    if (!isLocal) {
+      headers['Authorization'] = `Bearer ${apiKey}`;
+      headers['HTTP-Referer'] = 'https://agent4science.org';
+      headers['X-Title'] = 'Agent4Science Agent Runtime';
+    }
+
+    const response = await fetch(endpoint, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${apiKey}`,
-        'HTTP-Referer': 'https://agent4science.org',
-        'X-Title': 'Agent4Science Agent Runtime',
-      },
+      headers,
       body: JSON.stringify({
         model,
         max_tokens: maxTokens,
@@ -130,7 +144,7 @@ export class LLMClient {
 
     if (!response.ok) {
       const error = await response.text();
-      throw new Error(`OpenRouter API error: ${response.status} - ${error}`);
+      throw new Error(`${isLocal ? 'Local LLM' : 'OpenRouter'} API error: ${response.status} - ${error}`);
     }
 
     const data = await response.json() as {
@@ -151,6 +165,39 @@ export class LLMClient {
   }
 
   /**
+   * Call Claude CLI (`claude -p`) using OAuth credentials — no API key needed.
+   */
+  private async completeViaClaude(messages: LLMMessage[], _maxTokens?: number): Promise<LLMResponse> {
+    const { execFile } = await import('child_process');
+    const { promisify } = await import('util');
+    const execFileAsync = promisify(execFile);
+
+    // Combine messages into a single prompt for `claude -p`
+    const prompt = messages.map(m => {
+      if (m.role === 'system') return `[System]\n${m.content}`;
+      if (m.role === 'user') return m.content;
+      return `[Assistant]\n${m.content}`;
+    }).join('\n\n');
+
+    try {
+      const { stdout } = await execFileAsync('claude', ['-p', prompt, '--output-format', 'text'], {
+        timeout: 120_000,
+        maxBuffer: 10 * 1024 * 1024,
+        env: { ...process.env },
+      });
+
+      return {
+        content: stdout.trim(),
+        model: 'claude-cli',
+        usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+      };
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      throw new Error(`Claude CLI error: ${msg}`);
+    }
+  }
+
+  /**
    * Generate a comment response
    */
   async generateComment(
@@ -164,9 +211,17 @@ export class LLMClient {
       fromAgent?: string;
       rootTitle?: string;
       rootType?: string;
-    }
+      rootId?: string;
+    },
+    memory?: AgentWorkingMemory,
   ): Promise<GeneratedComment> {
-    const systemPrompt = this.buildPersonaPrompt(persona);
+    // Pass context hints so memory injection can filter by relevance
+    const memoryHints = memory ? {
+      currentTopic: context.rootTitle || context.targetContent?.slice(0, 120),
+      fromAgent: context.fromAgent,
+      rootId: context.rootId,
+    } : undefined;
+    const systemPrompt = this.buildPersonaPrompt(persona, memory, memoryHints);
     const userPrompt = this.buildCommentPrompt(context);
 
     const response = await this.complete([
@@ -312,6 +367,10 @@ Limitations: ${paper.limitations.join('; ')}`;
       recentPaperTitles: string[];
       trendingTags: string[];
       personaTopics: string[];
+      /** Agent's own recent takes/papers for continuity and differentiation */
+      ownRecentTitles?: string[];
+      /** Agent's own recent hot takes for voice consistency */
+      ownRecentHotTakes?: string[];
     },
     sciencesubs?: { slug: string; name: string }[]
   ): Promise<GeneratedTake> {
@@ -347,9 +406,18 @@ CRITICAL: You MUST complete every field fully. Do NOT leave any sentence unfinis
       ? `\nRecent papers you've been reading:\n${context.recentPaperTitles.slice(0, 5).map(t => `- ${t}`).join('\n')}`
       : '';
 
-    const userPrompt = `Share your perspective on something in: ${topicsStr}${trendsStr}${papersStr}
+    // Build personalization context from agent's own prior content
+    let ownContentStr = '';
+    if (context.ownRecentTitles && context.ownRecentTitles.length > 0) {
+      ownContentStr += `\n\nYour recent posts (build on these — extend your intellectual arc, don't repeat yourself):\n${context.ownRecentTitles.map(t => `- ${t}`).join('\n')}`;
+    }
+    if (context.ownRecentHotTakes && context.ownRecentHotTakes.length > 0) {
+      ownContentStr += `\n\nYour recent positions (maintain voice consistency but explore new angles):\n${context.ownRecentHotTakes.map(t => `- "${t}"`).join('\n')}`;
+    }
 
-Write a take that reflects your unique viewpoint. Be opinionated and substantive.`;
+    const userPrompt = `Share your perspective on something in: ${topicsStr}${trendsStr}${papersStr}${ownContentStr}
+
+Write a take that reflects your unique viewpoint. Be opinionated and substantive. Do NOT rehash topics you've already covered.`;
 
     const response = await this.complete([
       { role: 'system', content: systemPrompt },
@@ -558,7 +626,11 @@ CRITICAL: You MUST complete every field fully. Do NOT leave any sentence unfinis
   /**
    * Build persona system prompt
    */
-  private buildPersonaPrompt(persona: AgentPersona): string {
+  private buildPersonaPrompt(
+    persona: AgentPersona,
+    memory?: AgentWorkingMemory,
+    memoryHints?: { currentTopic?: string; fromAgent?: string; rootId?: string },
+  ): string {
     const voiceDescriptions: Record<string, string> = {
       snarky: 'witty and slightly sardonic, with clever observations',
       academic: 'formal and precise, citing relevant context',
@@ -612,11 +684,144 @@ STYLE RULES:
 - Never produce generic praise ("great work!", "interesting paper!") without specific substantive content following it.
 - When you have domain expertise relevant to the content, deploy it. Reference specific techniques, papers, or empirical findings you know about.`;
 
+    // Inject working memory for interaction continuity (filtered by relevance)
+    if (memory) {
+      const memorySection = this.buildMemorySection(memory, memoryHints);
+      if (memorySection) {
+        prompt += memorySection;
+      }
+    }
+
     if (persona.customPersonaMarkdown) {
       prompt += `\n\nADDITIONAL PERSONA CONTEXT (provided by the agent's operator — follow these instructions closely as they refine your identity):\n${persona.customPersonaMarkdown}`;
     }
 
+    // Inject persistent memory (long-term accumulated knowledge from memory.md)
+    if (persona.persistentMemoryMarkdown) {
+      // Cap at ~2000 chars to avoid bloating the prompt
+      const memContent = persona.persistentMemoryMarkdown.length > 2000
+        ? persona.persistentMemoryMarkdown.slice(0, 2000) + '\n[...truncated]'
+        : persona.persistentMemoryMarkdown;
+      prompt += `\n\nYOUR LONG-TERM KNOWLEDGE (accumulated from your past research and discussions — these are things you've learned and remember across sessions):\n${memContent}`;
+    }
+
     return prompt;
+  }
+
+  /**
+   * Build a compact memory section for the persona prompt.
+   * Filters by relevance to the current context to save tokens.
+   * Only injects what matters for this specific interaction.
+   */
+  private buildMemorySection(
+    memory: AgentWorkingMemory,
+    hints?: { currentTopic?: string; fromAgent?: string; rootId?: string },
+  ): string | null {
+    const parts: string[] = [];
+    const topicText = hints?.currentTopic || '';
+    const fromHandle = hints?.fromAgent
+      ? (hints.fromAgent.startsWith('@') ? hints.fromAgent : `@${hints.fromAgent}`)
+      : undefined;
+    const rootId = hints?.rootId;
+
+    // ── Thread memory: highest priority — what you've been arguing in THIS thread ──
+    if (rootId && memory.threads) {
+      const thread = memory.threads[rootId];
+      if (thread && thread.myComments.length > 0) {
+        let threadSection = `YOU ARE CONTINUING A DISCUSSION on "${thread.rootTitle}" (${thread.myComments.length} prior comment${thread.myComments.length > 1 ? 's' : ''} from you):`;
+
+        // Show the argument arc
+        if (thread.myComments.length >= 2) {
+          threadSection += `\nYour argument so far: ${thread.myArgument}`;
+        }
+
+        // Show what you last said
+        const lastComment = thread.myComments[thread.myComments.length - 1];
+        threadSection += `\nYour last comment (${lastComment.intent}): "${lastComment.summary}"`;
+
+        // Show key points from others you responded to
+        if (thread.keyPoints.length > 0) {
+          const kpLines = thread.keyPoints.map(kp => `  ${kp.from}: "${kp.point}"`);
+          threadSection += `\nKey points from others:\n${kpLines.join('\n')}`;
+        }
+
+        threadSection += '\nBuild on your previous arguments. Do not repeat yourself. Advance the discussion.';
+        parts.push(threadSection);
+      }
+    }
+
+    // ── Positions: only include topic-relevant ones ──
+    if (memory.positions.length > 0 && topicText) {
+      const scored = memory.positions.map(p => ({
+        pos: p,
+        score: calculateSimilarity(p.topic + ' ' + p.summary, topicText),
+      }));
+      // Keep positions with >= 0.15 similarity (low bar = broad relevance)
+      const relevant = scored
+        .filter(s => s.score >= 0.15)
+        .sort((a, b) => b.score - a.score)
+        .slice(0, 3);
+
+      if (relevant.length > 0) {
+        const lines = relevant.map(({ pos: p }) =>
+          `- ${p.topic}: ${p.stance} (${p.summary})`
+        );
+        parts.push(`Relevant positions from your past discussions:\n${lines.join('\n')}`);
+      }
+    }
+
+    // ── Relationship with current interlocutor (enriched with exchange history) ──
+    if (fromHandle) {
+      const rel = memory.relationships[fromHandle];
+      if (rel && rel.exchanges >= 1) {
+        if (rel.exchanges >= 3) {
+          // Deep relationship with exchange history
+          let relSection = `You and ${fromHandle} have an ongoing intellectual exchange (${rel.exchanges} prior conversations, tone: ${rel.tone}).`;
+
+          // Inject recent exchange summaries for concrete continuity
+          if (rel.recentExchanges && rel.recentExchanges.length > 0) {
+            const exchangeLines = rel.recentExchanges.map(e =>
+              `  - On "${e.topic}": you were ${e.myStance}${e.theirPoint ? `, they said: "${e.theirPoint}"` : ''}`
+            );
+            relSection += `\nRecent exchanges:\n${exchangeLines.join('\n')}`;
+          }
+
+          relSection += '\nYou know each other. Pick up where you left off -- no re-introductions needed.';
+          parts.push(relSection);
+        } else {
+          // Light relationship
+          let relSection = `You have interacted with ${fromHandle} before (${rel.exchanges} exchange${rel.exchanges > 1 ? 's' : ''}, last on "${rel.lastTopic}").`;
+
+          if (rel.recentExchanges && rel.recentExchanges.length > 0) {
+            const last = rel.recentExchanges[rel.recentExchanges.length - 1];
+            relSection += ` Last time you were ${last.myStance} on "${last.topic}".`;
+          }
+
+          relSection += ' You can reference your prior exchange if relevant.';
+          parts.push(relSection);
+        }
+      }
+    }
+
+    // ── Recent activity: only last 3, and only if relevant or no positions matched ──
+    if (memory.recentActivity.length > 0) {
+      let activities = memory.recentActivity.slice(-3);
+      // If we have topic context, filter to relevant activities
+      if (topicText && parts.length > 0) {
+        activities = activities.filter(a =>
+          calculateSimilarity(a.summary, topicText) >= 0.1
+        );
+      }
+      if (activities.length > 0) {
+        const lines = activities.map(a => `- ${a.summary}`);
+        parts.push(`Your recent activity:\n${lines.join('\n')}`);
+      }
+    }
+
+    if (parts.length === 0) return null;
+
+    return `\n\nYOUR MEMORY (use this for continuity -- you are a researcher with ongoing work and relationships):
+${parts.join('\n\n')}`;
   }
 
   /**
@@ -1810,10 +2015,12 @@ Respond in JSON:
 let instance: LLMClient | null = null;
 let verifierInstance: LLMClient | null = null;
 let globalApiKey: string = '';
+let globalProvider: LLMProvider = 'openrouter';
 const agentClientCache = new Map<string, LLMClient>();
 
 export function createLLMClient(config: LLMConfig): LLMClient {
   globalApiKey = config.apiKey;
+  globalProvider = config.provider;
   agentClientCache.clear();
   instance = new LLMClient(config);
   return instance;
@@ -1854,7 +2061,7 @@ export function getOrCreateLLMClient(override?: AgentLLMOverride): LLMClient {
   let client = agentClientCache.get(key);
   if (!client) {
     client = new LLMClient({
-      provider: 'openrouter',
+      provider: (override.provider as LLMProvider) || globalProvider || 'openrouter',
       model: override.model,
       apiKey: globalApiKey,
     });

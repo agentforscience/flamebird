@@ -49,6 +49,8 @@ export interface ManagerAgentConfig {
   llmApiKey: string;
   /** LLM model */
   llmModel?: string;
+  /** LLM provider ('openrouter' or 'local') */
+  llmProvider?: 'openrouter' | 'local' | 'claude';
   /** GitHub Personal Access Token (needed for NeuriCo) */
   githubToken?: string;
   /** GitHub org name */
@@ -81,6 +83,7 @@ async function discoverTopic(
   llmApiKey: string,
   llmModel?: string,
   domain?: string,
+  llmProvider?: 'openrouter' | 'local' | 'claude',
 ): Promise<string> {
   const client = getAgent4ScienceClient();
 
@@ -104,15 +107,19 @@ async function discoverTopic(
   ].join('\n');
 
   // Use LLM to generate a novel research topic
-  const baseUrl = 'https://openrouter.ai/api/v1';
-  const model = llmModel || 'anthropic/claude-sonnet-4.5';
+  const isLocal = llmProvider === 'local';
+  const baseUrl = isLocal
+    ? (process.env.LOCAL_LLM_URL || 'http://localhost:11434/v1').replace(/\/chat\/completions$/, '')
+    : 'https://openrouter.ai/api/v1';
+  const model = llmModel || (isLocal ? 'mistral:7b' : 'anthropic/claude-sonnet-4.5');
 
+  const topicHeaders: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (!isLocal) {
+    topicHeaders['Authorization'] = `Bearer ${llmApiKey}`;
+  }
   const response = await fetch(`${baseUrl}/chat/completions`, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${llmApiKey}`,
-    },
+    headers: topicHeaders,
     body: JSON.stringify({
       model,
       messages: [
@@ -176,17 +183,22 @@ async function generateIdeaYaml(
   llmApiKey: string,
   llmModel?: string,
   domain?: string,
+  llmProvider?: 'openrouter' | 'local' | 'claude',
 ): Promise<string> {
-  const baseUrl = 'https://openrouter.ai/api/v1';
-  const model = llmModel || 'anthropic/claude-sonnet-4.5';
+  const isLocal = llmProvider === 'local';
+  const baseUrl = isLocal
+    ? (process.env.LOCAL_LLM_URL || 'http://localhost:11434/v1').replace(/\/chat\/completions$/, '')
+    : 'https://openrouter.ai/api/v1';
+  const model = llmModel || (isLocal ? 'mistral:7b' : 'anthropic/claude-sonnet-4.5');
 
   try {
+    const yamlHeaders: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (!isLocal) {
+      yamlHeaders['Authorization'] = `Bearer ${llmApiKey}`;
+    }
     const response = await fetch(`${baseUrl}/chat/completions`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${llmApiKey}`,
-      },
+      headers: yamlHeaders,
       body: JSON.stringify({
         model,
         messages: [
@@ -214,7 +226,7 @@ idea:
       - "Metric 2"
   constraints:
     compute: cpu_only
-    time_limit: 3600
+    time_limit: 21600
   metadata:
     tags:
       - "tag1"
@@ -282,7 +294,7 @@ function buildMinimalYaml(topic: string, domain?: string): string {
     '      - "Statistical significance"',
     '  constraints:',
     '    compute: cpu_only',
-    '    time_limit: 3600',
+    '    time_limit: 21600',
   ].join('\n');
 }
 
@@ -302,14 +314,85 @@ interface ReportSummary {
   limitations: string[];
 }
 
+async function summarizeReportViaClaude(
+  reportContent: string,
+  sciencesubs?: { slug: string; name: string }[],
+): Promise<ReportSummary | null> {
+  const { execFile } = await import('child_process');
+  const { promisify } = await import('util');
+  const execFileAsync = promisify(execFile);
+
+  let tagsInstruction = '"tags": An array of 3-6 lowercase tags';
+  if (sciencesubs && sciencesubs.length > 0) {
+    const slugList = sciencesubs.map(s => s.slug).join(', ');
+    tagsInstruction = `"tags": An array of 3-6 tags. The FIRST tag MUST be one of: ${slugList}`;
+  }
+
+  // Truncate report for claude -p (keep it reasonable)
+  const truncated = reportContent.length > 80000
+    ? reportContent.slice(0, 80000) + '\n\n[Report truncated]'
+    : reportContent;
+
+  const prompt = `You are summarizing a research report for a science platform post. Read the report below and output ONLY valid JSON (no markdown fences) with these fields:
+- "title": paper title (max 200 chars)
+- "tldr": one-sentence summary of key finding (min 30, max 1000 chars)
+- "abstract": thorough summary, 3-5 paragraphs with specific numbers (300-800 words, max 5000 chars)
+- "hypothesis": main research question (1-3 sentences, max 3000 chars)
+- "experimentPlan": methodology description (2-4 sentences)
+- "conclusion": main conclusions and implications (2-4 sentences, min 80 chars, max 3000 chars)
+- ${tagsInstruction}
+- "claims": array of 3-10 specific findings with numbers
+- "limitations": array of 1-5 limitations
+
+Be faithful to the report. Preserve specific numbers, statistics, p-values. Complete every sentence.
+
+REPORT:
+${truncated}`;
+
+  try {
+    const { stdout } = await execFileAsync('claude', ['-p', prompt, '--output-format', 'text'], {
+      timeout: 180_000,
+      maxBuffer: 10 * 1024 * 1024,
+      env: { ...process.env },
+    });
+
+    let jsonContent = stdout.trim().replace(/^```(?:json)?\s*\n?/, '').replace(/\n?\s*```$/, '');
+    const parsed = JSON.parse(jsonContent);
+    return {
+      title: parsed.title || '',
+      tldr: parsed.tldr || '',
+      abstract: parsed.abstract || '',
+      hypothesis: parsed.hypothesis || '',
+      experimentPlan: parsed.experimentPlan || '',
+      conclusion: parsed.conclusion || '',
+      tags: Array.isArray(parsed.tags) ? parsed.tags : [],
+      claims: Array.isArray(parsed.claims) ? parsed.claims : [],
+      limitations: Array.isArray(parsed.limitations) ? parsed.limitations : [],
+    };
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.warn({ error: msg }, 'Claude CLI summarization failed');
+    return null;
+  }
+}
+
 async function summarizeReportForPost(
   reportContent: string,
   llmApiKey: string,
   llmModel?: string,
   sciencesubs?: { slug: string; name: string }[],
+  llmProvider?: 'openrouter' | 'local' | 'claude',
 ): Promise<ReportSummary | null> {
-  const baseUrl = 'https://openrouter.ai/api/v1';
-  const model = llmModel || 'anthropic/claude-sonnet-4.5';
+  // Claude CLI provider: use `claude -p` instead of HTTP API
+  if (llmProvider === 'claude') {
+    return summarizeReportViaClaude(reportContent, sciencesubs);
+  }
+
+  const isLocal = llmProvider === 'local';
+  const baseUrl = isLocal
+    ? (process.env.LOCAL_LLM_URL || 'http://localhost:11434/v1').replace(/\/chat\/completions$/, '')
+    : 'https://openrouter.ai/api/v1';
+  const model = llmModel || (isLocal ? 'mistral:7b' : 'anthropic/claude-sonnet-4.5');
 
   let tagsInstruction = '- "tags": An array of 3-6 lowercase tags relevant to the research (e.g., "machine-learning", "mathematics", "nlp", "computer-vision")';
   if (sciencesubs && sciencesubs.length > 0) {
@@ -318,12 +401,13 @@ async function summarizeReportForPost(
   }
 
   try {
+    const summarizeHeaders: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (!isLocal) {
+      summarizeHeaders['Authorization'] = `Bearer ${llmApiKey}`;
+    }
     const response = await fetch(`${baseUrl}/chat/completions`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${llmApiKey}`,
-      },
+      headers: summarizeHeaders,
       body: JSON.stringify({
         model,
         messages: [
@@ -436,7 +520,7 @@ async function pickResearchTopic(config: ManagerAgentConfig): Promise<string> {
       { error: err instanceof Error ? err.message : String(err) },
       'HypogenicAI backend failed, falling back to LLM-based topic discovery',
     );
-    return discoverTopic(config.apiKey, config.llmApiKey, config.llmModel, config.researchDomain);
+    return discoverTopic(config.apiKey, config.llmApiKey, config.llmModel, config.researchDomain, config.llmProvider);
   }
 }
 
@@ -451,7 +535,7 @@ async function writeIdeaYamlForTopic(
   config: ManagerAgentConfig,
 ): Promise<string> {
   logger.info('Generating structured idea YAML');
-  const ideaYaml = await generateIdeaYaml(topic, config.llmApiKey, config.llmModel, config.researchDomain);
+  const ideaYaml = await generateIdeaYaml(topic, config.llmApiKey, config.llmModel, config.researchDomain, config.llmProvider);
   const fs = await import('fs');
   const path = await import('path');
   const tmpDir = path.join(neuricoPath, '.tmp-ideas');
@@ -548,15 +632,10 @@ export async function finalizePaperGeneration(
   }
 
   if (!ieResult.githubUrl) {
-    logger.error({
+    logger.warn({
       agentId: config.agentId,
       title: ieResult.title,
-    }, 'NeuriCo run produced no GitHub URL — skipping paper posting');
-    return {
-      success: false,
-      title: ieResult.title,
-      error: 'NeuriCo completed but no GitHub URL was found. The repo may not have been created.',
-    };
+    }, 'NeuriCo run produced no GitHub URL — will post without repo link');
   }
 
   // Step 4: Summarize REPORT.md via LLM for a quality post
@@ -584,14 +663,39 @@ export async function finalizePaperGeneration(
   // If abstract is the full REPORT.md (long), use LLM to summarize
   if (postAbstract.length > 500) {
     logger.info('Summarizing research report via LLM for Agent4Science post');
+    // Truncate for small-context models (e.g. mistral:7b ≈ 8K tokens ≈ 24K chars)
+    const maxInputChars = config.llmProvider === 'local' ? 20000 : 100000;
+    const summarizeInput = postAbstract.length > maxInputChars
+      ? postAbstract.slice(0, maxInputChars) + '\n\n[Report truncated for summarization]'
+      : postAbstract;
     const summary = await summarizeReportForPost(
-      postAbstract,
+      summarizeInput,
       config.llmApiKey,
       config.llmModel,
       sciencesubs,
+      config.llmProvider,
     );
     if (!summary) {
-      logger.warn({ agentId: config.agentId, reportLength: postAbstract.length }, 'LLM summarization returned null — posting will use raw report content with fallback fields');
+      logger.warn({ agentId: config.agentId, reportLength: postAbstract.length }, 'LLM summarization returned null — extracting sections from report directly');
+      // Fallback: extract sections from the raw REPORT.md directly
+      const extractSection = (heading: string): string => {
+        // Match numbered headings like "## 7. Conclusions and Next Steps" or plain "## Conclusions"
+        // Use \n## lookahead (no $) to avoid multiline $ matching end-of-line with lazy quantifier
+        const re = new RegExp(`^##\\s+(?:\\d+\\.\\s+)?${heading}[^\\n]*\\n([\\s\\S]+?)(?=\\n## )`, 'im');
+        const m = postAbstract.match(re);
+        return m?.[1]?.trim() || '';
+      };
+      const rawConclusion = extractSection('Conclusion') || extractSection('Conclusions');
+      const rawSummary = extractSection('Executive Summary');
+      const rawGoal = extractSection('Goal') || extractSection('Research Question');
+      const rawResults = extractSection('Key Findings') || extractSection('Results');
+      if (rawConclusion) postConclusion = smartTruncate(rawConclusion, 3000);
+      if (rawSummary) postAbstract = smartTruncate(rawSummary, 5000);
+      if (rawGoal) postHypothesis = smartTruncate(rawGoal, 3000);
+      if (rawResults && postClaims.length <= 1) {
+        const claimLines = rawResults.split('\n').filter(l => l.trim().startsWith('-') || l.trim().startsWith('*'));
+        if (claimLines.length > 0) postClaims = claimLines.slice(0, 10).map(l => l.replace(/^[\s*-]+/, '').trim());
+      }
     }
     if (summary) {
       // Prefer the deterministic title from REPORT.md over LLM-generated title
@@ -652,19 +756,9 @@ export async function finalizePaperGeneration(
     postTags = [config.preferredTopics?.[0] || config.researchDomain || 'research'];
   }
 
-  // Ensure required URLs are present
+  // URLs are optional — GitHub repo creation may fail (e.g. expired token)
   const githubUrl = ieResult.githubUrl || '';
   const pdfUrl = ieResult.pdfUrl || (githubUrl ? `${githubUrl}/blob/main/paper_draft/main.pdf` : '');
-
-  if (!githubUrl.startsWith('https://') || !pdfUrl.startsWith('https://')) {
-    logger.error({ githubUrl, pdfUrl, title: postTitle }, 'Paper posting skipped: missing required URLs after successful NeuriCo run');
-    return {
-      success: false,
-      title: postTitle,
-      githubUrl,
-      error: `Research completed but missing required URLs. githubUrl=${githubUrl}, pdfUrl=${pdfUrl}`,
-    };
-  }
 
   // Ensure first tag is a valid sciencesub slug
   if (sciencesubs.length > 0) {
@@ -680,7 +774,7 @@ export async function finalizePaperGeneration(
     abstract: [postAbstract, 100],
     hypothesis: [postHypothesis, 10],
     tldr: [postTldr, 30],
-    conclusion: [postConclusion, 10],
+    conclusion: [postConclusion, 80],
   });
   if (qualityIssue) {
     logger.error({
@@ -930,23 +1024,9 @@ async function advanceActiveRun(
 
   const db = getDatabase();
 
-  // Always harvest — NeuriCo may have pushed to GitHub even if a pipeline
-  // stage failed (e.g. experiment_runner failed but resource_finder + paper
-  // writer succeeded). If we got a GitHub URL, attempt to publish.
+  // Harvest outputs for logging/diagnostics regardless of state.
   logger.info({ agentId: config.agentId, runId: active.run_id, state: status.state }, 'NeuriCo run finished — harvesting outputs');
   const ieResult = harvestNeuricoRun(launched, iePath);
-
-  if (status.state === 'failed' && !ieResult.githubUrl) {
-    logger.warn({
-      agentId: config.agentId,
-      runId: active.run_id,
-      reason: status.reason,
-    }, 'NeuriCo run failed with no GitHub URL — skipping publish');
-    db.markNeuricoRunFinished(active.run_id, 'failed', null, status.reason);
-    db.recordPaperGeneration(config.agentId);
-    db.logAction(config.agentId, 'paper', null, 'paper', false, status.reason);
-    return { success: false, error: status.reason };
-  }
 
   if (status.state === 'failed') {
     logger.warn({
@@ -954,7 +1034,11 @@ async function advanceActiveRun(
       runId: active.run_id,
       reason: status.reason,
       githubUrl: ieResult.githubUrl,
-    }, 'NeuriCo run failed but GitHub URL found — attempting publish');
+    }, 'NeuriCo run failed — skipping publish (failed runs must not be posted)');
+    db.markNeuricoRunFinished(active.run_id, 'failed', null, status.reason);
+    db.recordPaperGeneration(config.agentId);
+    db.logAction(config.agentId, 'paper', null, 'paper', false, status.reason);
+    return { success: false, error: status.reason };
   }
 
   let result: PaperGenerationResult;

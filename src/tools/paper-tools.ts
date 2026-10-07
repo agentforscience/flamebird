@@ -37,6 +37,8 @@ export interface NeuricoParams {
   writePaper?: boolean;
   /** Skip GitHub publishing */
   noGithub?: boolean;
+  /** Per-stage timeout in seconds (default: 10800 = 3 hours) */
+  timeoutSeconds?: number;
 }
 
 export interface NeuricoResult {
@@ -202,11 +204,13 @@ export function launchNeuricoRunDetached(
     writePaper?: boolean;
     noGithub?: boolean;
     runId?: string;
+    timeoutSeconds?: number;
   } = {},
 ): LaunchedNeuricoRun {
   const provider = opts.provider ?? 'claude';
   const writePaper = opts.writePaper ?? true;
   const noGithub = opts.noGithub ?? false;
+  const timeoutSeconds = opts.timeoutSeconds ?? 10800;
   const runId = opts.runId ?? `${ideaId}-${Date.now()}`;
 
   const wrapper = neuricoWrapperPath(neuricoPath);
@@ -217,7 +221,7 @@ export function launchNeuricoRunDetached(
   const logFile = path.join(logsDir, `neurico-run-${runId}.log`);
   const logFd = fs.openSync(logFile, 'a');
 
-  const args = ['run', ideaId, '--provider', provider, '--full-permissions'];
+  const args = ['run', ideaId, '--provider', provider, '--full-permissions', '--timeout', String(timeoutSeconds)];
   if (writePaper) args.push('--write-paper');
   if (noGithub) args.push('--no-github');
 
@@ -303,7 +307,23 @@ export function pollNeuricoRun(run: LaunchedNeuricoRun): NeuricoRunStatus {
     return { state: 'running', pidAlive: true };
   }
 
-  const workspace = findWorkspaceForIdeaId(run.workspaceDir, run.ideaId);
+  // Try ideaId match first, then log-based discovery, then most-recent fallback.
+  // NeuriCo workspace slugs don't contain the ideaId, so the first match often fails.
+  let workspace = findWorkspaceForIdeaId(run.workspaceDir, run.ideaId);
+  if (!workspace) {
+    // Try to find workspace from the log file (same way harvestNeuricoRun does)
+    try {
+      const log = fs.readFileSync(run.logFile, 'utf-8');
+      const locMatch = log.match(/Location:\s*\/workspaces\/([^\s\n]+)/);
+      if (locMatch) {
+        const candidate = path.join(run.workspaceDir, locMatch[1]);
+        if (fs.existsSync(candidate)) workspace = candidate;
+      }
+    } catch { /* ignore */ }
+  }
+  if (!workspace) {
+    workspace = findLatestWorkspace(run.workspaceDir) ?? null;
+  }
   if (!workspace) {
     return { state: 'failed', reason: 'Wrapper exited before workspace was created' };
   }
@@ -450,6 +470,7 @@ export async function submitAndLaunchNeurico(
   logger.info({ ideaId: result.ideaId }, 'Idea submitted, launching run');
   const launched = launchNeuricoRunDetached(neuricoPath, result.ideaId, {
     provider: result.provider, writePaper: result.writePaper, noGithub: result.noGithub,
+    timeoutSeconds: params.timeoutSeconds,
   });
   return { success: true, launched };
 }
@@ -611,6 +632,7 @@ export function parseNeuricoOutput(stdout: string, basePath: string, ideaId?: st
   let tags: string[] | undefined;
   let githubUrl: string | undefined;
   let references: Array<{ authors: string; year: string; title: string; venue?: string; arxivId?: string }> | undefined;
+  let hasReport = false; // true only if REPORT.md was found with real content
 
   if (hostWorkDir && fs.existsSync(hostWorkDir)) {
     logger.info({ hostWorkDir }, 'Reading workspace files');
@@ -657,6 +679,7 @@ export function parseNeuricoOutput(stdout: string, basePath: string, ideaId?: st
         if (report.trim().length > 0) {
           // Use the full report as abstract — the manager agent will LLM-summarize it
           abstract = report;
+          hasReport = true;
           logger.info({ length: report.length }, 'Found REPORT.md');
 
           // Extract title from the first `# Title` heading (more accurate than idea.yaml)
@@ -755,6 +778,24 @@ export function parseNeuricoOutput(stdout: string, basePath: string, ideaId?: st
 
   const finalTags = tags || (domain ? [domain] : undefined);
   const finalRefs = references && references.length > 0 ? references : undefined;
+
+  // A workspace/GitHub URL existing is not enough — REPORT.md with real
+  // content is required. Without it the "paper" is just the raw idea
+  // hypothesis, which is the INPUT to the research, not output.
+  if (!hasReport) {
+    logger.warn({
+      title,
+      githubUrl,
+      abstractLength: abstract?.length,
+    }, 'NeuriCo output parsed but no REPORT.md found — marking as failed');
+    return {
+      success: false,
+      error: 'No REPORT.md found in workspace. The research pipeline likely failed before producing output.',
+      workDir: hostWorkDir,
+      githubUrl: githubUrl || undefined,
+      title,
+    };
+  }
 
   logger.info({
     title,

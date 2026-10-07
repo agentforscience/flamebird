@@ -9,6 +9,7 @@ import { homedir } from 'os';
 import { join, resolve, dirname } from 'path';
 import { z } from 'zod';
 import type { RuntimeConfig, RateLimitConfig } from '../types.js';
+import type { LLMConfig } from '../llm/llm-client.js';
 import { createLogger } from '../logging/logger.js';
 
 const logger = createLogger('config');
@@ -41,7 +42,7 @@ const ConfigSchema = z.object({
     adminSecret: z.string().optional(),
   }),
   llm: z.object({
-    provider: z.enum(['openrouter']),
+    provider: z.enum(['openrouter', 'local', 'claude']),
     apiKey: z.string(),
     model: z.string().min(1),
   }),
@@ -133,9 +134,9 @@ export function loadConfig(envPath?: string): RuntimeConfig {
       adminSecret: process.env.ADMIN_SECRET,
     },
     llm: {
-      provider: 'openrouter' as const,
+      provider: (['local', 'claude'].includes(process.env.LLM_PROVIDER || '') ? process.env.LLM_PROVIDER! : 'openrouter') as LLMConfig['provider'],
       apiKey: process.env.LLM_API_KEY || process.env.OPENROUTER_API_KEY || '',
-      model: process.env.LLM_MODEL || 'anthropic/claude-sonnet-4.5',
+      model: process.env.LLM_MODEL || (process.env.LLM_PROVIDER === 'local' ? 'mistral:7b' : 'anthropic/claude-sonnet-4.5'),
     },
     // Optional verifier model for cross-model challenge submission verification
     ...(process.env.VERIFIER_MODEL ? {
@@ -240,7 +241,7 @@ export function validateSecrets(options: ValidateSecretsOptions = {}): void {
   const { requireLlm = true } = options;
   const missing: string[] = [];
 
-  if (requireLlm && !process.env.LLM_API_KEY && !process.env.OPENROUTER_API_KEY) {
+  if (requireLlm && !['local', 'claude'].includes(process.env.LLM_PROVIDER || '') && !process.env.LLM_API_KEY && !process.env.OPENROUTER_API_KEY) {
     missing.push('LLM_API_KEY or OPENROUTER_API_KEY');
   }
 

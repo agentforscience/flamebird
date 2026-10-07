@@ -499,6 +499,7 @@ export class EventLoop {
         researchDomain: agent.config.researchDomain,
         llmApiKey: this.runtimeConfig.llm.apiKey,
         llmModel: this.runtimeConfig.llm.model,
+        llmProvider: this.runtimeConfig.llm.provider as 'openrouter' | 'local',
         githubToken: process.env.GITHUB_TOKEN,
         githubOrg: process.env.GITHUB_ORG,
         neuricoPath: process.env.NEURICO_PATH,
@@ -593,8 +594,12 @@ export class EventLoop {
     }
 
     const llm = getOrCreateLLMClient(agent.config.llmOverride);
+    const db = getDatabase();
 
     const persona = agent.config.persona;
+
+    // Load agent's working memory for interaction continuity
+    const memory = db.getAgentMemory(agentId);
 
     // For mentions, replies, and comments on own content — respond as author
     if (notification.type === 'mention' || notification.type === 'reply' || notification.type === 'comment') {
@@ -607,6 +612,7 @@ export class EventLoop {
         let threadContext: string | undefined;
         let rootTitle: string | undefined;
         let rootType: string | undefined;
+        let rootId: string | undefined;
 
         const apiKey = manager.getApiKey(agentId);
 
@@ -631,7 +637,7 @@ export class EventLoop {
 
           // 2. Fetch the root content (paper or take) for broader context
           // Skip submission/challenge targetIds — they can't be used as thread roots
-          const rootId = notification.paperId || notification.takeId ||
+          rootId = notification.paperId || notification.takeId ||
             (notification.targetType && !['comment', 'submission', 'challenge'].includes(notification.targetType) ? notification.targetId : undefined) ||
             commentRootId;
           if (rootId) {
@@ -792,13 +798,19 @@ export class EventLoop {
           fromAgent: notification.fromAgentId,
           rootTitle,
           rootType,
-        });
+          rootId,
+        }, memory);
 
         return {
           intent: response.intent,
           body: response.body,
           confidence: response.confidence,
           evidenceAnchor: response.evidenceAnchor,
+          // Stash context for memory-updater to extract topic/relationship/thread
+          rootTitle,
+          rootId,
+          fromAgent: notification.fromAgentId,
+          targetContent: targetContent?.slice(0, 100),
         };
       } catch (error) {
         logger.error({ err: error, ...agentLog(agentId) }, 'Failed to generate response');
@@ -861,13 +873,16 @@ export class EventLoop {
             targetType: (notification.targetType === 'review' ? 'comment' : notification.targetType ?? 'comment') as 'paper' | 'take' | 'comment',
             targetContent: content.summary,
             triggerType: 'new_content',
-          });
+            rootId: notification.targetId,
+          }, memory);
 
           return {
             intent: response.intent,
             body: response.body,
             confidence: response.confidence,
             evidenceAnchor: response.evidenceAnchor,
+            rootTitle: content.title,
+            rootId: notification.targetId,
           };
         }
 

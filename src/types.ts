@@ -40,6 +40,8 @@ export interface AgentPersona {
   catchphrases: string[];
   /** Optional custom persona markdown loaded from ~/.flamebird/agents/{handle}/persona.md at runtime. Not persisted to DB. */
   customPersonaMarkdown?: string;
+  /** Persistent memory loaded from ~/.flamebird/agents/{handle}/memory.md at runtime. Grows over time as agent learns. */
+  persistentMemoryMarkdown?: string;
 }
 
 /** What an agent can do — drives runtime behavior. */
@@ -47,7 +49,7 @@ export type AgentCapability = 'base' | 'neurico';
 
 /** Per-agent LLM override. When set, this agent uses its own model instead of the global default. */
 export interface AgentLLMOverride {
-  provider: 'openrouter';
+  provider: 'openrouter' | 'local';
   model: string;
 }
 
@@ -318,6 +320,65 @@ export interface Agent4ScienceNotification {
 }
 
 // ============================================================================
+// Agent Working Memory
+// ============================================================================
+
+/** A position the agent has taken on a topic, with provenance. */
+export interface AgentMemoryPosition {
+  topic: string;
+  stance: string;
+  summary: string;
+  /** ID of the comment/take/review where this position was stated. */
+  sourceContentId: string;
+  confidence: number;
+  updatedAt: string;
+}
+
+/** Compact record of past exchanges with another agent. */
+export interface AgentMemoryRelationship {
+  exchanges: number;
+  tone: string;
+  lastTopic: string;
+  lastAt: string;
+  /** Last few exchange summaries for continuity (max 3). */
+  recentExchanges?: Array<{ topic: string; myStance: string; theirPoint?: string; at: string }>;
+}
+
+/** Per-thread memory: what the agent said and argued in a specific discussion thread. */
+export interface AgentThreadMemory {
+  rootId: string;
+  rootTitle: string;
+  /** Summary of the agent's overall argument in this thread. */
+  myArgument: string;
+  /** The agent's comments in this thread (most recent last). */
+  myComments: Array<{ intent: string; summary: string; at: string }>;
+  /** Key points from others that the agent responded to. */
+  keyPoints: Array<{ from: string; point: string }>;
+  lastAt: string;
+}
+
+/** A recent activity entry with provenance. */
+export interface AgentMemoryActivity {
+  summary: string;
+  /** ID of the action/content that produced this activity. */
+  sourceContentId: string;
+  at: string;
+}
+
+/**
+ * Lightweight working memory for an agent.
+ * Stored as a single JSON blob in SQLite (~3KB max).
+ * Injected into the persona prompt to give interaction continuity.
+ */
+export interface AgentWorkingMemory {
+  positions: AgentMemoryPosition[];
+  relationships: Record<string, AgentMemoryRelationship>;
+  recentActivity: AgentMemoryActivity[];
+  /** Per-thread argument tracking for deep conversation continuity (max 5 threads). */
+  threads?: Record<string, AgentThreadMemory>;
+}
+
+// ============================================================================
 // Action Types
 // ============================================================================
 
@@ -419,7 +480,7 @@ export interface RuntimeConfig {
     adminSecret?: string;
   };
   llm: {
-    provider: 'openrouter';
+    provider: 'openrouter' | 'local' | 'claude';
     apiKey: string;
     model: string;
   };
@@ -427,7 +488,7 @@ export interface RuntimeConfig {
    *  When set, verification uses this model instead of the primary — cross-model
    *  verification catches errors that self-verification misses. */
   verifier?: {
-    provider: 'openrouter';
+    provider: 'openrouter' | 'local' | 'claude';
     apiKey: string;
     model: string;
   };

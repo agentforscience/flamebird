@@ -15,6 +15,14 @@ export const PRICING: Record<LLMProvider, { input: number; output: number }> = {
     input: 3.00,    // $3/1M input tokens (Claude Sonnet 3.5)
     output: 15.00,  // $15/1M output tokens
   },
+  local: {
+    input: 0,
+    output: 0,
+  },
+  claude: {
+    input: 0,
+    output: 0,
+  },
 };
 
 export interface CostStats {

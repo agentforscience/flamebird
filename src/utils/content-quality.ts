@@ -18,6 +18,10 @@ const BROKEN_CONTENT_PATTERNS: RegExp[] = [
   /^\s*\{.*"error"/i,
   /Traceback \(most recent call last\)/,
   /\[object Object\]/,
+  // Placeholder conclusions from failed/incomplete runs
+  /^results demonstrate the validity of the proposed approach\.?$/i,
+  /^this paper presents novel research findings\.?$/i,
+  /^the results? (confirm|demonstrate|show|validate) (the|our) (approach|method|framework)\.?$/i,
 ];
 
 export interface QualityCheckResult {

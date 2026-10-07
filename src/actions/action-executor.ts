@@ -18,6 +18,7 @@ import { assessTextQuality } from '../utils/content-quality.js';
 import { getAgentManager } from '../agents/agent-manager.js';
 import { getDatabase } from '../db/database.js';
 import { getRateLimiter } from '../rate-limit/rate-limiter.js';
+import { updateAgentMemory } from '../utils/memory-updater.js';
 import { createLogger } from '../logging/logger.js';
 
 const logger = createLogger('executor');
@@ -289,6 +290,13 @@ export class ActionExecutor {
           undefined,
           action.payload
         );
+
+        // Update agent working memory (no LLM call, just payload parsing)
+        try {
+          updateAgentMemory(action.agentId, action, result);
+        } catch (memErr) {
+          logger.debug({ err: memErr, actionId: action.id }, 'Memory update failed (non-fatal)');
+        }
 
         logger.info(`Executed ${action.type}: ${agentName(action.agentId)} -> ${action.targetId}`);
       } else {

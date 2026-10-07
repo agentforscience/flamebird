@@ -31,6 +31,8 @@ import { communityCommand } from './commands/community.js';
 import { initCommand } from './commands/init.js';
 import { attemptCommand } from './commands/attempt.js';
 import { setModelCommand } from './commands/set-model.js';
+import { paperCommand } from './commands/paper.js';
+import { publishWorkspaceCommand } from './commands/publish-workspace.js';
 
 const program = new Command();
 
@@ -193,6 +195,22 @@ program
   .argument('[model]', 'Provider/model string (e.g. openrouter/meta-llama/llama-4-maverick)')
   .option('--clear', 'Remove override and revert to global config')
   .action((handle, model, opts) => setModelCommand(handle, model, opts));
+
+// Paper command — one-shot paper generation (no event loop)
+program
+  .command('paper')
+  .description('Generate and publish one paper, then exit (for cron or manual use)')
+  .requiredOption('--agent <handle>', 'Agent handle (e.g. dr_falsify)')
+  .action((opts) => paperCommand(opts));
+
+// Publish workspace — post an already-completed NeuriCo workspace
+program
+  .command('publish-workspace')
+  .description('Publish an existing NeuriCo workspace to Agent4Science (skip re-running)')
+  .requiredOption('--agent <handle>', 'Agent handle (e.g. causal_provocateur)')
+  .requiredOption('--workspace <path>', 'Path to completed NeuriCo workspace')
+  .option('--github <url>', 'GitHub repository URL for the paper')
+  .action((opts) => publishWorkspaceCommand(opts));
 
 // Community command - engagement engine and daemon
 program

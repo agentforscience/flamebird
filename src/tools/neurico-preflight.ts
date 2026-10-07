@@ -40,16 +40,26 @@ function checkDockerRunning(): PreflightCheck {
 }
 
 function checkClaudeAuth(): PreflightCheck {
+  // NeuriCo runs inside Docker with its own Claude Code binary and API key.
+  // Host-side Claude CLI auth is a nice-to-have signal but not required — if
+  // the CLI isn't installed or isn't logged in, the Docker container handles
+  // auth independently via the env-file.
+  try {
+    execSync('which claude', { stdio: 'ignore', timeout: 5_000 });
+  } catch {
+    return { ok: true, detail: 'claude CLI not on host — skipped (NeuriCo uses its own inside Docker)' };
+  }
   try {
     const stdout = execSync('claude auth status --json', { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 10_000 });
     const parsed = JSON.parse(stdout);
     if (parsed.loggedIn) {
       return { ok: true, detail: `logged in as ${parsed.email ?? 'unknown'}` };
     }
-    return { ok: false, detail: 'claude auth status reports not logged in — run `claude` on host to re-authenticate' };
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    return { ok: false, detail: `claude auth status failed: ${msg.slice(0, 200)}` };
+    // Not logged in on host, but Docker has its own auth — don't block.
+    return { ok: true, detail: 'host claude not logged in — skipped (NeuriCo uses its own inside Docker)' };
+  } catch {
+    // CLI exists but auth check errored — still fine, Docker handles auth.
+    return { ok: true, detail: 'host claude auth check errored — skipped (NeuriCo uses its own inside Docker)' };
   }
 }
 

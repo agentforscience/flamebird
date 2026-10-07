@@ -6,6 +6,7 @@
 
 import type {
   AgentPersona,
+  AgentWorkingMemory,
   Agent4SciencePaper,
   Agent4ScienceTake,
   Agent4ScienceReview,
@@ -21,6 +22,7 @@ import { getDatabase } from '../db/database.js';
 import { getRateLimiter } from '../rate-limit/rate-limiter.js';
 import { createLogger } from '../logging/logger.js';
 import { isTooSimilarToRecent } from '../utils/similarity.js';
+import { assessTextQuality } from '../utils/content-quality.js';
 
 const logger = createLogger('proactive');
 
@@ -352,6 +354,11 @@ export class ProactiveEngine {
     } catch {
       return getLLMClient();
     }
+  }
+
+  /** Load agent working memory (single synchronous SQLite row read). */
+  private memoryFor(agentId: string): AgentWorkingMemory {
+    return getDatabase().getAgentMemory(agentId);
   }
 
   /**
@@ -1657,7 +1664,8 @@ export class ProactiveEngine {
           threadContext: threadContext || undefined,
           triggerType: 'reply',
           fromAgent: target.commentAuthorId,
-        });
+          rootId: target.rootId,
+        }, this.memoryFor(agentId));
       }
     } else {
       generated = await llm.generateComment(persona, {
@@ -1667,7 +1675,8 @@ export class ProactiveEngine {
         threadContext: threadContext || undefined,
         triggerType: 'reply',
         fromAgent: target.commentAuthorId,
-      });
+        rootId: target.rootId,
+      }, this.memoryFor(agentId));
     }
 
     // Check similarity to recent comments
@@ -1722,6 +1731,33 @@ export class ProactiveEngine {
         .slice(0, 5)
         .map(([tag]) => tag);
 
+      // Fetch agent's own recent content for personalization + differentiation
+      const ownRecentTitles: string[] = [];
+      const ownRecentHotTakes: string[] = [];
+      try {
+        const [ownPapers, ownTakes] = await Promise.all([
+          client.getPapers(apiKey, { limit: 3, sort: 'new', agentId }),
+          client.getTakes(apiKey, { limit: 3, sort: 'new', agentId }),
+        ]);
+        if (ownPapers.success && ownPapers.data) {
+          const papers = Array.isArray(ownPapers.data) ? ownPapers.data
+            : (ownPapers.data as { papers?: { title: string }[] }).papers ?? [];
+          for (const p of (papers as { title: string }[]).slice(0, 3)) {
+            if (p.title) ownRecentTitles.push(p.title);
+          }
+        }
+        if (ownTakes.success && ownTakes.data) {
+          const takes = Array.isArray(ownTakes.data) ? ownTakes.data
+            : (ownTakes.data as { takes?: { title?: string; hotTake?: string }[] }).takes ?? [];
+          for (const t of (takes as { title?: string; hotTake?: string }[]).slice(0, 3)) {
+            if (t.title) ownRecentTitles.push(t.title);
+            if (t.hotTake) ownRecentHotTakes.push(t.hotTake);
+          }
+        }
+      } catch {
+        logger.debug({ ...agentLog(agentId) }, 'Failed to fetch own content for standalone take personalization');
+      }
+
       // Fetch sciencesubs for tag selection
       let sciencesubs: { slug: string; name: string; description: string }[] = [];
       try {
@@ -1730,11 +1766,33 @@ export class ProactiveEngine {
         logger.debug({ ...agentLog(agentId) }, 'Failed to fetch sciencesubs for standalone take');
       }
 
-      const take = await llm.generateStandaloneTake(persona, {
-        recentPaperTitles,
-        trendingTags: topTags,
-        personaTopics: persona.preferredTopics,
-      }, sciencesubs);
+      // Generate with retry: if first attempt fails quality gate, try once more
+      const MAX_ATTEMPTS = 2;
+      const MIN_TAKE_LENGTH = 100;
+      let take = null;
+      for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+        const candidate = await llm.generateStandaloneTake(persona, {
+          recentPaperTitles,
+          trendingTags: topTags,
+          personaTopics: persona.preferredTopics,
+          ownRecentTitles,
+          ownRecentHotTakes,
+        }, sciencesubs);
+
+        // Quality gate: check combined text has substance
+        const combined = [candidate.hotTake, ...(candidate.summary ?? []), ...(candidate.critique ?? [])].filter(Boolean).join(' ');
+        const quality = assessTextQuality(combined, MIN_TAKE_LENGTH);
+        if (quality.ok) {
+          take = candidate;
+          break;
+        }
+        logger.warn({ ...agentLog(agentId), attempt, reason: quality.reason }, 'Standalone take failed quality gate, retrying');
+      }
+
+      if (!take) {
+        logger.warn({ ...agentLog(agentId) }, 'Standalone take failed quality gate after retries, skipping');
+        return;
+      }
 
       // Enrich tags with matching sciencesub slugs (same as paper flow)
       if (sciencesubs.length > 0) {
@@ -1848,7 +1906,8 @@ export class ProactiveEngine {
           fromAgent: target.agentId,
           rootTitle,
           rootType,
-        });
+          rootId,
+        }, this.memoryFor(agentId));
 
         if (!generated.body) continue;
 
@@ -2421,7 +2480,8 @@ export class ProactiveEngine {
         targetType: 'paper',
         targetContent: `${paper.title}\n\n${paper.abstract || paper.tldr || ''}`,
         triggerType: 'new_content',
-      });
+        rootId: paper.id,
+      }, this.memoryFor(agentId));
 
       executor.queueAction(agentId, 'comment', paper.id, 'paper', comment as unknown as Record<string, unknown>, 'normal');
       db.recordEngagement(agentId, paper.id, 'paper', 'comment');
@@ -2448,7 +2508,8 @@ export class ProactiveEngine {
         targetType: 'take',
         targetContent: `${take.title}\n\n${take.hotTake || take.summary?.join('\n') || ''}`,
         triggerType: 'new_content',
-      });
+        rootId: take.id,
+      }, this.memoryFor(agentId));
 
       executor.queueAction(agentId, 'comment', take.id, 'take', comment as unknown as Record<string, unknown>, 'normal');
       db.recordEngagement(agentId, take.id, 'take', 'comment');
@@ -2482,7 +2543,8 @@ export class ProactiveEngine {
         targetType: 'review',
         targetContent: reviewContent,
         triggerType: 'new_content',
-      });
+        rootId: review.id,
+      }, this.memoryFor(agentId));
 
       executor.queueAction(agentId, 'comment', review.id, 'review', comment as unknown as Record<string, unknown>, 'normal');
       db.recordEngagement(agentId, review.id, 'review', 'comment');
@@ -2704,7 +2766,8 @@ export class ProactiveEngine {
           triggerType: 'new_content',
           rootTitle: challenge.title,
           rootType: 'submission',
-        });
+          rootId: submission.id,
+        }, this.memoryFor(agentId));
       }
 
       executor.queueAction(agentId, 'comment', submission.id, 'submission', comment as unknown as Record<string, unknown>, 'normal');

@@ -10,6 +10,7 @@ import type {
   AgentConfig,
   AgentCapability,
   AgentPersona,
+  AgentWorkingMemory,
   QueuedAction,
   ActionPriority,
   ActionType,
@@ -273,6 +274,18 @@ export class RuntimeDatabase {
       CREATE INDEX IF NOT EXISTS idx_neurico_runs_status
       ON neurico_runs(status, agent_id)
     `);
+
+    // Agent working memory — lightweight JSON blob per agent for interaction continuity.
+    // Single row per agent, updated after each successful action via upsert.
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS agent_memory (
+        agent_id TEXT PRIMARY KEY,
+        memory TEXT NOT NULL DEFAULT '{}',
+        version INTEGER NOT NULL DEFAULT 0,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (agent_id) REFERENCES agents(id)
+      )
+    `);
   }
 
   /** Run schema migrations for existing databases. */
@@ -519,6 +532,87 @@ export class RuntimeDatabase {
       WHERE run_id = ?
     `);
     stmt.run(status, new Date().toISOString(), exitCode, error, runId);
+  }
+
+  // ============================================================================
+  // Agent Working Memory
+  // ============================================================================
+
+  private static readonly EMPTY_MEMORY: AgentWorkingMemory = {
+    positions: [],
+    relationships: {},
+    recentActivity: [],
+    threads: {},
+  };
+
+  /** Get an agent's working memory. Returns empty memory if none exists. */
+  getAgentMemory(agentId: string): AgentWorkingMemory {
+    const stmt = this.db.prepare(`
+      SELECT memory FROM agent_memory WHERE agent_id = ?
+    `);
+    const row = stmt.get(agentId) as { memory: string } | undefined;
+    if (!row) return { ...RuntimeDatabase.EMPTY_MEMORY, positions: [], relationships: {}, recentActivity: [], threads: {} };
+    try {
+      return JSON.parse(row.memory) as AgentWorkingMemory;
+    } catch {
+      return { ...RuntimeDatabase.EMPTY_MEMORY, positions: [], relationships: {}, recentActivity: [], threads: {} };
+    }
+  }
+
+  /**
+   * Update an agent's working memory with optimistic concurrency control.
+   * Uses version column to prevent lost updates from concurrent actions.
+   * @param agentId - Agent ID
+   * @param updater - Function that receives current memory and returns updated memory
+   * @returns true if update succeeded, false if version conflict (caller can retry)
+   */
+  updateAgentMemory(agentId: string, updater: (current: AgentWorkingMemory) => AgentWorkingMemory): boolean {
+    const now = new Date().toISOString();
+
+    // Read current version
+    const readStmt = this.db.prepare(`
+      SELECT memory, version FROM agent_memory WHERE agent_id = ?
+    `);
+    const row = readStmt.get(agentId) as { memory: string; version: number } | undefined;
+
+    let current: AgentWorkingMemory;
+    let currentVersion: number;
+
+    if (!row) {
+      current = { positions: [], relationships: {}, recentActivity: [], threads: {} };
+      currentVersion = -1; // signals insert needed
+    } else {
+      try {
+        const parsed = JSON.parse(row.memory) as AgentWorkingMemory;
+        // Ensure threads field exists for backward compat with old memory blobs
+        current = { threads: {}, ...parsed };
+      } catch {
+        current = { positions: [], relationships: {}, recentActivity: [], threads: {} };
+      }
+      currentVersion = row.version;
+    }
+
+    // Apply the updater
+    const updated = updater(current);
+    const memoryJson = JSON.stringify(updated);
+
+    if (currentVersion === -1) {
+      // Insert new row
+      const insertStmt = this.db.prepare(`
+        INSERT OR IGNORE INTO agent_memory (agent_id, memory, version, updated_at)
+        VALUES (?, ?, 0, ?)
+      `);
+      const result = insertStmt.run(agentId, memoryJson, now);
+      return result.changes > 0;
+    }
+
+    // Optimistic update: only succeed if version hasn't changed
+    const updateStmt = this.db.prepare(`
+      UPDATE agent_memory SET memory = ?, version = version + 1, updated_at = ?
+      WHERE agent_id = ? AND version = ?
+    `);
+    const result = updateStmt.run(memoryJson, now, agentId, currentVersion);
+    return result.changes > 0;
   }
 
   // ============================================================================

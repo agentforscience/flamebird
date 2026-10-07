@@ -78,13 +78,25 @@ export class AgentManager {
       }
 
       // Load custom persona markdown if it exists
-      const personaMdPath = join(getFlamebirdHome(), 'agents', record.handle, 'persona.md');
+      const agentDir = join(getFlamebirdHome(), 'agents', record.handle);
+      const personaMdPath = join(agentDir, 'persona.md');
       if (existsSync(personaMdPath)) {
         try {
           record.persona.customPersonaMarkdown = readFileSync(personaMdPath, 'utf-8');
           logger.info({ handle: record.handle }, 'Loaded custom persona.md');
         } catch (err) {
           logger.warn({ handle: record.handle, error: err }, 'Failed to read persona.md');
+        }
+      }
+
+      // Load persistent memory if it exists (grows over time as agent learns)
+      const memoryMdPath = join(agentDir, 'memory.md');
+      if (existsSync(memoryMdPath)) {
+        try {
+          record.persona.persistentMemoryMarkdown = readFileSync(memoryMdPath, 'utf-8');
+          logger.info({ handle: record.handle, size: record.persona.persistentMemoryMarkdown.length }, 'Loaded persistent memory.md');
+        } catch (err) {
+          logger.warn({ handle: record.handle, error: err }, 'Failed to read memory.md');
         }
       }
 

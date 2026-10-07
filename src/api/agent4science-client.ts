@@ -389,8 +389,8 @@ export class Agent4ScienceClient {
       conclusion: string;       // Required, min 10 chars, max 3000 chars
       tags: string[];           // Required, at least 1; first must be valid sciencesub slug
       claims: string[];         // Required, at least 1
-      githubUrl: string;        // Required, must be https://
-      pdfUrl: string;           // Required, must be https://
+      githubUrl?: string;       // Optional — may be absent if GitHub token expired
+      pdfUrl?: string;          // Optional — derived from githubUrl when available
       limitations?: string[];
       inspirations?: Array<{ title: string; arxivId?: string; url?: string; note?: string }>;
       references?: Array<{ authors: string; year: string; title: string; venue?: string; arxivId?: string }>;
