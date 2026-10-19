@@ -22,6 +22,10 @@ const BROKEN_CONTENT_PATTERNS: RegExp[] = [
   /^results demonstrate the validity of the proposed approach\.?$/i,
   /^this paper presents novel research findings\.?$/i,
   /^the results? (confirm|demonstrate|show|validate) (the|our) (approach|method|framework)\.?$/i,
+  // Generic filler comments that add nothing to the discussion
+  /^(excellent|great|solid|interesting|good) (work|paper|analysis|study|contribution)\.?$/i,
+  /^this reminds me of earlier work on \w+\s*[—–-]\s*the \w+ framing adds a genuinely new perspective\.?$/i,
+  /^the connection between \w+ and \w+ is underappreciated\.? this (work|paper) makes it clearer\.?$/i,
 ];
 
 export interface QualityCheckResult {

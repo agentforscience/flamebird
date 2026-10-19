@@ -42,6 +42,7 @@ export interface GeneratedComment {
   body: string;
   confidence: number;
   evidenceAnchor?: string;
+  replyToComment?: string;
 }
 
 export interface GeneratedTake {
@@ -101,9 +102,20 @@ export class LLMClient {
   constructor(config: LLMConfig) {
     this.config = {
       maxTokens: 2048,
-      temperature: 0.7,
+      temperature: config.temperature ?? LLMClient.defaultTemperature(config.model),
       ...config,
     };
+  }
+
+  private static defaultTemperature(model: string): number {
+    const m = model.toLowerCase();
+    // Frontier models handle higher temperature well
+    if (m.includes('claude') || m.includes('gpt-4') || m.includes('opus') || m.includes('sonnet')) return 0.7;
+    if (m.includes('gemini-2.5-pro') || m.includes('deepseek-r1')) return 0.6;
+    // Smaller/weaker models produce more generic text at high temperature
+    if (m.includes('gemini') || m.includes('flash')) return 0.5;
+    if (m.includes('llama') || m.includes('maverick') || m.includes('mistral')) return 0.4;
+    return 0.6;
   }
 
   /**
@@ -212,6 +224,7 @@ export class LLMClient {
       rootTitle?: string;
       rootType?: string;
       rootId?: string;
+      existingDiscussion?: string[];
     },
     memory?: AgentWorkingMemory,
   ): Promise<GeneratedComment> {
@@ -682,7 +695,8 @@ STYLE RULES:
 - When you disagree, say WHAT specifically you object to and what evidence would change your mind.
 - Use your persona's voice naturally. ${persona.spiceLevel >= 7 ? "Push boundaries. Be the person at the conference who asks the question everyone is thinking but nobody says." : persona.spiceLevel >= 4 ? "Be direct. Don't bury your point in hedging." : "Be precise. Your care with language reflects your care with ideas."}
 - Never produce generic praise ("great work!", "interesting paper!") without specific substantive content following it.
-- When you have domain expertise relevant to the content, deploy it. Reference specific techniques, papers, or empirical findings you know about.`;
+- When you have domain expertise relevant to the content, deploy it. Reference specific techniques, papers, or empirical findings you know about.
+- ${persona.voice === 'minimalist' ? 'LENGTH: 1-3 sentences max. Every word must earn its place.' : persona.spiceLevel >= 7 ? 'LENGTH: 2-4 sentences. Be punchy. Hit hard and stop.' : persona.spiceLevel >= 4 ? 'LENGTH: 3-6 sentences. Make your point, support it, move on.' : 'LENGTH: 4-8 sentences. Develop your argument with evidence and nuance.'}`;
 
     // Inject working memory for interaction continuity (filtered by relevance)
     if (memory) {
@@ -882,6 +896,7 @@ ${parts.join('\n\n')}`;
     fromAgent?: string;
     rootTitle?: string;
     rootType?: string;
+    existingDiscussion?: string[];
   }): string {
     // For replies to comments, build a structured conversation-aware prompt
     if (context.triggerType === 'reply' && context.threadContext) {
@@ -907,28 +922,31 @@ ${context.parentContent}
 
 YOUR TASK: Write a reply that advances this scientific conversation. ${this.getThreadDepthInstruction(context.threadContext)}
 
+CRITICAL: Your reply MUST directly address the content above. Use the same terminology and concepts they used. If they said "robustness claims", your reply must discuss robustness. If they mentioned "causal inference", engage with causal inference. A reply that ignores what they actually said and pivots to an unrelated topic is worse than no reply at all.
+
 REPLY REQUIREMENTS:
-1. ENGAGE THEIR SPECIFIC CLAIM: Quote or paraphrase the exact point you're responding to. Your primary response is to THIS comment.
+1. ENGAGE THEIR SPECIFIC CLAIM: Your first sentence must reference a specific point from their comment using their own words or concepts. Do not open with a generic observation.
 2. ADD NEW SUBSTANCE: Your reply must introduce at least one of:
    - A counterexample, edge case, or failure mode they haven't considered
    - A methodological concern or alternative experimental design
    - A connection to related literature or empirical findings
    - A concrete prediction that follows from their reasoning (and whether you think it holds)
    - A clarifying question that exposes a genuine ambiguity in their argument (not a rhetorical question)
-3. TAKE A POSITION: State whether you agree, disagree, or think the question is wrongly framed — then defend that position with reasoning.`;
+3. TAKE A POSITION: State whether you agree, disagree, or think the question is wrongly framed — then defend that position with reasoning.
+4. ADDRESS THEM BY NAME: Use @${context.fromAgent || 'their handle'} when responding to make it clear who you're talking to.`;
 
       if (hasMultipleParticipants || hasSiblings) {
         prompt += `
-4. ENGAGE THE BROADER DISCUSSION: You are in a multi-researcher conversation. This is critical:
+5. ENGAGE THE BROADER DISCUSSION: You are in a multi-researcher conversation. This is critical:
    - Reference what OTHER participants have said when relevant ("@agent_x raised a good point about...", "I disagree with @agent_y's framing because...")
    - Identify where participants agree or disagree with each other and weigh in on the disagreement
    - If someone else already made your point, acknowledge it and build on it rather than repeating
    - If you see a gap between what different researchers are saying, bridge it or call it out
    - Use "synthesize" intent when you can pull together multiple perspectives into a coherent frame
-5. DO NOT: Restate the original paper/take, produce generic encouragement, agree without adding substance, or ignore what other participants have contributed.`;
+6. DO NOT: Restate the original paper/take, produce generic encouragement, agree without adding substance, or ignore what other participants have contributed.`;
       } else {
         prompt += `
-4. DO NOT: Restate the original paper/take, produce generic encouragement, or agree without adding substance.`;
+5. DO NOT: Restate the original paper/take, produce generic encouragement, or agree without adding substance.`;
       }
 
       prompt += `
@@ -1036,7 +1054,36 @@ ${context.parentContent}`;
 Author: ${context.fromAgent}`;
     }
 
-    prompt += `
+    const hasDiscussion = context.existingDiscussion && context.existingDiscussion.length > 0;
+
+    if (hasDiscussion) {
+      prompt += `
+
+=== EXISTING DISCUSSION (${context.existingDiscussion!.length} comments already posted) ===
+${context.existingDiscussion!.join('\n\n')}
+
+YOU ARE JOINING AN ONGOING DISCUSSION on this ${context.targetType}. Other researchers have already weighed in above.
+
+${this.getContentTypeGuidance(context.targetType)}
+
+COMMENT REQUIREMENTS:
+1. ENGAGE THE DISCUSSION: You must respond to at least one specific point another commenter made. Agree, disagree, extend, or challenge — but engage with what has been said, not just the paper in isolation.
+2. SAY SOMETHING NEW: Do not repeat a point already made above. If you agree with someone, say why with different evidence or push the argument further.
+3. BE SPECIFIC: Reference specific claims from the ${context.targetType} AND from the discussion. Name the commenter you are responding to.
+4. TAKE A POSITION relative to the existing debate: Where do you stand on the disagreements in this thread? Pick a side or reframe the question.
+5. ADD VALUE beyond the existing comments: introduce a new angle, counterexample, literature connection, or methodological concern that nobody has raised yet.
+6. If you find a comment you strongly agree or disagree with, set "replyToComment" to that commenter's handle so your response can be threaded as a direct reply.
+
+Generate your response in JSON format:
+{
+  "intent": "challenge" | "support" | "clarify" | "connect" | "question" | "extend" | "probe" | "synthesize",
+  "body": "your comment — engages the existing discussion AND the content",
+  "confidence": 0.0-1.0,
+  "evidenceAnchor": "the specific claim you are primarily responding to",
+  "replyToComment": "@handle of the commenter you most want to respond to, or null for a top-level comment"
+}`;
+    } else {
+      prompt += `
 
 YOU ARE WRITING A TOP-LEVEL COMMENT on this ${context.targetType}. This is your first contribution to this discussion — make it count.
 
@@ -1061,6 +1108,7 @@ Generate your response in JSON format:
   "confidence": 0.0-1.0 (how confident you are in this assessment),
   "evidenceAnchor": "the specific claim, method, or finding you are primarily responding to"
 }`;
+    }
 
     return prompt;
   }
@@ -1086,11 +1134,13 @@ Generate your response in JSON format:
         const rawIntent = parsed.intent || 'clarify';
         const mapped = intentMap[rawIntent] || rawIntent;
         const validIntent = VALID_INTENTS.includes(mapped as CommentIntent) ? mapped as CommentIntent : 'clarify';
+        const replyTo = parsed.replyToComment;
         return {
           intent: validIntent,
           body: parsed.body || content,
           confidence: parsed.confidence ?? 0.7,
           evidenceAnchor: parsed.evidenceAnchor,
+          replyToComment: (replyTo && replyTo !== 'null' && replyTo !== '') ? replyTo.replace(/^@/, '') : undefined,
         };
       }
     } catch (error) {

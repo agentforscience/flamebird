@@ -21,7 +21,7 @@ import { getLLMClient, getOrCreateLLMClient } from '../llm/llm-client.js';
 import { getDatabase } from '../db/database.js';
 import { getRateLimiter } from '../rate-limit/rate-limiter.js';
 import { createLogger } from '../logging/logger.js';
-import { isTooSimilarToRecent } from '../utils/similarity.js';
+import { isTooSimilarToRecent, isReplyRelevant } from '../utils/similarity.js';
 import { assessTextQuality } from '../utils/content-quality.js';
 
 const logger = createLogger('proactive');
@@ -460,9 +460,11 @@ export class ProactiveEngine {
         return;
       }
 
-      // ── Phase 3: AUTHOR ──────────────────────────────────────────────
+      // ── Phase 3: AUTHOR + CONTINUATIONS ─────────────────────────────
       // Reply to comments on own content (separate social contract)
       await this.discoverAuthorReplyOpportunities(agentId, agent.config.persona, apiKey);
+      // Continue threads the agent is already participating in (depth 2+ back-and-forth)
+      await this.discoverThreadContinuations(agentId, agent.config.persona, apiKey, snapshot);
       // Reply to critiques on challenge submissions (author rebuttals + cross-submitter discussion)
       await this.discoverSubmissionReplyOpportunities(agentId, agent.config.persona, apiKey, snapshot);
 
@@ -933,12 +935,16 @@ export class ProactiveEngine {
     else if (ageHours < 48) score += 0.12;
     else if (ageHours < 168) score += 0.05;
 
-    // Comment count bonus (0-0.15) — more comments = more interesting
-    if (paper.commentCount >= 5) score += 0.15;
-    else if (paper.commentCount >= 2) score += 0.10;
-    else if (paper.commentCount >= 1) score += 0.05;
+    // Comment count: moderate activity is interesting, pile-ons are not
+    // Papers with 1-10 comments get a bonus (active discussion worth joining)
+    // Papers with 20+ get a penalty (discussion is already saturated)
+    if (paper.commentCount >= 20) score -= 0.10;
+    else if (paper.commentCount >= 10) score += 0.05;
+    else if (paper.commentCount >= 3) score += 0.15;
+    else if (paper.commentCount >= 1) score += 0.10;
+    else score += 0.05; // fresh paper with no comments — worth starting a discussion
 
-    return Math.min(1, score);
+    return Math.min(1, Math.max(0, score));
   }
 
   /**
@@ -971,12 +977,14 @@ export class ProactiveEngine {
     else if (ageHours < 48) score += 0.12;
     else if (ageHours < 168) score += 0.05;
 
-    // Comment count bonus (0-0.15)
-    if (take.commentCount >= 5) score += 0.15;
-    else if (take.commentCount >= 2) score += 0.10;
-    else if (take.commentCount >= 1) score += 0.05;
+    // Comment count: moderate activity is interesting, pile-ons are not
+    if (take.commentCount >= 20) score -= 0.10;
+    else if (take.commentCount >= 10) score += 0.05;
+    else if (take.commentCount >= 3) score += 0.15;
+    else if (take.commentCount >= 1) score += 0.10;
+    else score += 0.05;
 
-    return Math.min(1, score);
+    return Math.min(1, Math.max(0, score));
   }
 
   /**
@@ -1409,7 +1417,7 @@ export class ProactiveEngine {
             }
             if (target && rateLimiter.canPerform(agentId, 'comment')) {
               logger.info({ ...agentLog(agentId), action, attempt }, `${agentName(agentId)} → comment_paper "${target.title}"`);
-              await this.queueCommentOnPaper(agentId, target, persona);
+              await this.queueCommentOnPaper(agentId, target, persona, apiKey);
               return;
             }
             break;
@@ -1422,7 +1430,7 @@ export class ProactiveEngine {
             }
             if (target && rateLimiter.canPerform(agentId, 'comment')) {
               logger.info({ ...agentLog(agentId), action, attempt }, `${agentName(agentId)} → comment_take "${target.title || target.hotTake?.slice(0, 60)}"`);
-              await this.queueCommentOnTake(agentId, target, persona);
+              await this.queueCommentOnTake(agentId, target, persona, apiKey);
               return;
             }
             break;
@@ -1685,6 +1693,12 @@ export class ProactiveEngine {
       return false;
     }
 
+    // Check that the reply actually engages with the parent comment
+    if (!isReplyRelevant(generated.body, target.commentBody)) {
+      logger.info(`${agentName(agentId)} reply is a non-sequitur (doesn't engage parent comment), skipping`);
+      return false;
+    }
+
     // Route to root content (paper/take) with parentId for threading
     // executeComment needs targetType='paper'|'take' — NOT 'comment'
     const payload = {
@@ -1882,12 +1896,12 @@ export class ProactiveEngine {
           ? data
           : (data as { comments?: ReplyableComment[] }).comments ?? [];
 
-        // Only top-level comments on author's own content that the author hasn't replied to
+        // Comments on author's own content that the author hasn't replied to
+        // Include both top-level and nested comments (someone replied in a thread on author's work)
         const unreplied = (comments as ReplyableComment[]).filter(
           (c) =>
             c.agentId &&
             c.agentId !== agentId &&   // Not the author's own comment
-            !c.parentId &&             // Top-level only
             c.id &&
             c.body &&
             !db.hasEngaged(agentId, c.id)  // Not already replied
@@ -1927,6 +1941,119 @@ export class ProactiveEngine {
         logger.info(`${agentName(agentId)} (author) queued reply to comment ${target.id} on their ${rootType}`);
       } catch (error) {
         logger.debug({ err: error, ...agentLog(agentId), rootId }, 'Author reply discovery skip');
+      }
+    }
+  }
+
+  /**
+   * Continue threads the agent is already in.
+   * Scans threads from the feed snapshot for unanswered replies to the agent's
+   * own comments. Creates depth-2+ back-and-forth by replying to those replies.
+   */
+  private async discoverThreadContinuations(
+    agentId: string,
+    persona: AgentPersona,
+    apiKey: string,
+    snapshot: FeedSnapshot
+  ): Promise<void> {
+    const client = getAgent4ScienceClient();
+    const executor = getActionExecutor();
+    const rateLimiter = getRateLimiter();
+    const llm = this.llmFor(agentId);
+    const db = getDatabase();
+
+    if (!rateLimiter.canPerform(agentId, 'comment')) return;
+
+    // Collect roots that have comments (same set as scanReplyOpportunities)
+    const roots: { id: string; type: 'paper' | 'take'; title?: string }[] = [];
+    for (const p of snapshot.papers.filter(p => (p.commentCount || 0) > 0).slice(0, 3)) {
+      roots.push({ id: p.id, type: 'paper', title: p.title });
+    }
+    for (const t of snapshot.takes.filter(t => (t.commentCount || 0) > 0).slice(0, 3)) {
+      roots.push({ id: t.id, type: 'take', title: t.title || t.hotTake?.slice(0, 60) });
+    }
+
+    let continuationsQueued = 0;
+    const maxContinuationsPerCycle = 2;
+
+    for (const { id: rootId, type: rootType, title: rootTitle } of roots) {
+      if (continuationsQueued >= maxContinuationsPerCycle) break;
+
+      try {
+        const threadResult = await client.getThread(rootId, apiKey);
+        if (!threadResult.success || !threadResult.data) continue;
+        const data = threadResult.data;
+        const comments: any[] = Array.isArray(data) ? data : (data as any).comments ?? [];
+
+        // Find the agent's own comments in this thread
+        const myCommentIds = new Set(
+          comments.filter((c: any) => c.agentId === agentId).map((c: any) => c.id)
+        );
+        if (myCommentIds.size === 0) continue;
+
+        // Find unanswered replies to the agent's comments (depth 1+ -> creates depth 2+)
+        const unansweredReplies = comments.filter((c: any) =>
+          c.parentId &&
+          myCommentIds.has(c.parentId) &&
+          c.agentId !== agentId &&
+          c.id &&
+          c.body &&
+          !db.hasEngaged(agentId, c.id)
+        );
+
+        if (unansweredReplies.length === 0) continue;
+
+        // Pick the oldest unanswered reply to continue the conversation naturally
+        const target = unansweredReplies[unansweredReplies.length - 1];
+
+        // Build thread context for the reply
+        const threadContext = await this.getThreadContext(rootId, rootType, target.id, apiKey, 5);
+
+        let rootContent: string | undefined;
+        try {
+          if (rootType === 'paper') {
+            const paperResult = await client.getPaper(rootId, apiKey);
+            if (paperResult.success && paperResult.data) {
+              rootContent = `${paperResult.data.title}\n\n${paperResult.data.tldr || paperResult.data.abstract || ''}`;
+            }
+          } else {
+            const takeResult = await client.getTake(rootId, apiKey);
+            if (takeResult.success && takeResult.data) {
+              rootContent = `${takeResult.data.title}\n\n${takeResult.data.hotTake || takeResult.data.summary?.join(' ') || ''}`;
+            }
+          }
+        } catch { /* non-critical */ }
+
+        const generated = await llm.generateComment(persona, {
+          targetType: 'comment',
+          targetContent: target.body,
+          parentContent: rootContent,
+          threadContext: threadContext || undefined,
+          triggerType: 'reply',
+          fromAgent: target.agentId || target.agent?.handle,
+          rootId,
+        }, this.memoryFor(agentId));
+
+        if (!generated.body) continue;
+        if (isTooSimilarToRecent(agentId, generated.body, db, 0.7, 10)) continue;
+
+        const payload = {
+          intent: generated.intent ?? 'clarify',
+          body: generated.body,
+          confidence: generated.confidence ?? 0.8,
+          parentId: target.id,
+        };
+
+        executor.queueAction(agentId, 'comment', rootId, rootType, payload, 'high');
+        db.recordEngagement(agentId, target.id, 'comment', 'comment');
+        if (target.agentId) db.recordInteraction(agentId, target.agentId, 'reply');
+
+        continuationsQueued++;
+        logger.info(
+          `${agentName(agentId)} continuing thread on ${rootType} "${rootTitle}" — replying to ${agentName(target.agentId || '')} (depth ${(target.depth || 0) + 1})`
+        );
+      } catch (error) {
+        logger.debug({ err: error, ...agentLog(agentId) }, 'Thread continuation discovery skip');
       }
     }
   }
@@ -2469,23 +2596,55 @@ export class ProactiveEngine {
   private async queueCommentOnPaper(
     agentId: string,
     paper: Agent4SciencePaper,
-    persona: AgentPersona
+    persona: AgentPersona,
+    apiKey?: string
   ): Promise<void> {
     const llm = this.llmFor(agentId);
     const executor = getActionExecutor();
     const db = getDatabase();
+    const client = getAgent4ScienceClient();
 
     try {
+      // Fetch existing comments so the agent can engage with the discussion
+      let existingDiscussion: string[] | undefined;
+      let commentMap: Map<string, { id: string; handle: string }> | undefined;
+      if ((paper.commentCount || 0) > 0 && apiKey) {
+        try {
+          const commentsResult = await client.getPaperComments(paper.id, apiKey);
+          if (commentsResult.success && commentsResult.data) {
+            const comments = Array.isArray(commentsResult.data) ? commentsResult.data : [];
+            commentMap = new Map();
+            existingDiscussion = comments.slice(0, 15).map((c: any) => {
+              const handle = c.agent?.handle || c.agentId || 'Researcher';
+              if (c.id) commentMap!.set(handle, { id: c.id, handle });
+              return `@${handle} (${c.intent || 'comment'}): ${c.body}`;
+            });
+          }
+        } catch { /* non-critical */ }
+      }
+
       const comment = await llm.generateComment(persona, {
         targetType: 'paper',
         targetContent: `${paper.title}\n\n${paper.abstract || paper.tldr || ''}`,
         triggerType: 'new_content',
         rootId: paper.id,
+        existingDiscussion,
       }, this.memoryFor(agentId));
 
-      executor.queueAction(agentId, 'comment', paper.id, 'paper', comment as unknown as Record<string, unknown>, 'normal');
+      // If the LLM wants to reply to a specific commenter, thread it
+      const payload = comment as unknown as Record<string, unknown>;
+      if (comment.replyToComment && commentMap?.has(comment.replyToComment)) {
+        const target = commentMap.get(comment.replyToComment)!;
+        payload.parentId = target.id;
+        db.recordEngagement(agentId, target.id, 'comment', 'comment');
+        logger.info(`${agentName(agentId)} queued threaded reply to @${target.handle} on paper "${paper.title}"`);
+      } else {
+        logger.info(`${agentName(agentId)} queued comment on paper "${paper.title}"`);
+      }
+      delete payload.replyToComment;
+
+      executor.queueAction(agentId, 'comment', paper.id, 'paper', payload, 'normal');
       db.recordEngagement(agentId, paper.id, 'paper', 'comment');
-      logger.info(`${agentName(agentId)} queued comment on paper "${paper.title}"`);
     } catch (error) {
       logger.error({ err: error, ...agentLog(agentId), paperId: paper.id }, 'Failed to generate comment');
     }
@@ -2497,23 +2656,53 @@ export class ProactiveEngine {
   private async queueCommentOnTake(
     agentId: string,
     take: Agent4ScienceTake,
-    persona: AgentPersona
+    persona: AgentPersona,
+    apiKey?: string
   ): Promise<void> {
     const llm = this.llmFor(agentId);
     const executor = getActionExecutor();
     const db = getDatabase();
+    const client = getAgent4ScienceClient();
 
     try {
+      let existingDiscussion: string[] | undefined;
+      let commentMap: Map<string, { id: string; handle: string }> | undefined;
+      if ((take.commentCount || 0) > 0 && apiKey) {
+        try {
+          const commentsResult = await client.getTakeComments(take.id, apiKey);
+          if (commentsResult.success && commentsResult.data) {
+            const comments = Array.isArray(commentsResult.data) ? commentsResult.data : [];
+            commentMap = new Map();
+            existingDiscussion = comments.slice(0, 15).map((c: any) => {
+              const handle = c.agent?.handle || c.agentId || 'Researcher';
+              if (c.id) commentMap!.set(handle, { id: c.id, handle });
+              return `@${handle} (${c.intent || 'comment'}): ${c.body}`;
+            });
+          }
+        } catch { /* non-critical */ }
+      }
+
       const comment = await llm.generateComment(persona, {
         targetType: 'take',
         targetContent: `${take.title}\n\n${take.hotTake || take.summary?.join('\n') || ''}`,
         triggerType: 'new_content',
         rootId: take.id,
+        existingDiscussion,
       }, this.memoryFor(agentId));
 
-      executor.queueAction(agentId, 'comment', take.id, 'take', comment as unknown as Record<string, unknown>, 'normal');
+      const payload = comment as unknown as Record<string, unknown>;
+      if (comment.replyToComment && commentMap?.has(comment.replyToComment)) {
+        const target = commentMap.get(comment.replyToComment)!;
+        payload.parentId = target.id;
+        db.recordEngagement(agentId, target.id, 'comment', 'comment');
+        logger.info(`${agentName(agentId)} queued threaded reply to @${target.handle} on take "${take.title || take.hotTake?.slice(0, 60)}"`);
+      } else {
+        logger.info(`${agentName(agentId)} queued comment on take "${take.title || take.hotTake?.slice(0, 60)}"`);
+      }
+      delete payload.replyToComment;
+
+      executor.queueAction(agentId, 'comment', take.id, 'take', payload, 'normal');
       db.recordEngagement(agentId, take.id, 'take', 'comment');
-      logger.info(`${agentName(agentId)} queued comment on take "${take.title || take.hotTake?.slice(0, 60)}"`);
     } catch (error) {
       logger.error({ err: error, ...agentLog(agentId), takeId: take.id }, 'Failed to generate comment');
     }

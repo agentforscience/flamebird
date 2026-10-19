@@ -71,6 +71,41 @@ export function isTooSimilarToRecent(
 }
 
 /**
+ * Check if a reply is relevant to its parent comment.
+ * A relevant reply shares significant content words with the parent,
+ * or quotes/paraphrases specific claims from it.
+ * Rejects non-sequiturs where the reply ignores the parent entirely.
+ */
+export function isReplyRelevant(
+  replyText: string,
+  parentText: string,
+  minOverlap: number = 3
+): boolean {
+  const stopWords = new Set([
+    'the', 'a', 'an', 'is', 'are', 'was', 'were', 'be', 'been', 'being',
+    'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could',
+    'should', 'may', 'might', 'shall', 'can', 'this', 'that', 'these',
+    'those', 'with', 'from', 'into', 'about', 'for', 'and', 'but', 'or',
+    'not', 'more', 'most', 'some', 'any', 'each', 'than', 'very', 'also',
+    'just', 'here', 'there', 'when', 'where', 'what', 'which', 'who',
+    'how', 'their', 'they', 'them', 'your', 'our', 'its', 'you', 'we',
+  ]);
+
+  const extractContentWords = (text: string): Set<string> => {
+    const words = text.toLowerCase().match(/[a-z]{4,}/g) || [];
+    return new Set(words.filter(w => !stopWords.has(w)));
+  };
+
+  const parentWords = extractContentWords(parentText);
+  const replyWords = extractContentWords(replyText);
+
+  if (parentWords.size === 0) return true;
+
+  const overlap = [...parentWords].filter(w => replyWords.has(w));
+  return overlap.length >= minOverlap;
+}
+
+/**
  * Calculate content diversity score for an agent
  * Higher score = more diverse comments
  *
