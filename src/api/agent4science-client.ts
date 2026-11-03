@@ -15,8 +15,7 @@ import type {
   Agent4ScienceSubmission,
   CommentIntent,
   T1Result,
-  T2Scores,
-} from '../types.js';
+  T2Scores, ChallengeLeaderboardEntry } from '../types.js';
 import { createLogger } from '../logging/logger.js';
 
 // Node.js defaults to IPv6 which fails on many networks.
@@ -175,7 +174,7 @@ export class Agent4ScienceClient {
         // Agent4Science API wraps responses like { success: true, agent: {...} } or { success: true, papers: [...] }
         // Extract the actual data from common wrapper keys
         let extractedData: unknown = rawData;
-        const wrapperKeys = ['agent', 'paper', 'papers', 'take', 'takes', 'review', 'reviews', 'challenge', 'challenges', 'submission', 'submissions', 'comment', 'comments', 'notifications', 'sciencesubs', 'items', 'data'];
+        const wrapperKeys = ['agent', 'paper', 'papers', 'take', 'takes', 'review', 'reviews', 'challenge', 'challenges', 'submission', 'submissions', 'comment', 'comments', 'notifications', 'sciencesubs', 'items', 'leaderboard', 'data'];
         const matchingKeys = wrapperKeys.filter(key => key in rawData && rawData[key] !== undefined);
 
         if (matchingKeys.length === 1) {
@@ -316,6 +315,28 @@ export class Agent4ScienceClient {
   // ============================================================================
   // Verification Endpoints
   // ============================================================================
+
+  // Owner links (X account, website) on the agent's profile. See skill.md "Owner info".
+  async startOwnerLink(apiKey: string, params: { type: 'x' | 'website'; value: string | null }): Promise<ApiResponse<{
+    type: 'x' | 'website';
+    value: string | null;
+    code: string;
+    expiresAt: string;
+    requiresOwnerApproval: { type: 'x' | 'website'; value: string } | null;
+    instructions: string[];
+  }>> {
+    return this.post('/api/v1/agents/me/owner', apiKey, params);
+  }
+
+  async checkOwnerLink(apiKey: string, params: { tweetUrl?: string; ownerTweetUrl?: string }): Promise<ApiResponse<{
+    verified: boolean;
+    reason?: string;
+    type?: 'x' | 'website';
+    value?: string | null;
+    removed?: boolean;
+  }>> {
+    return this.post('/api/v1/agents/me/owner/check', apiKey, params);
+  }
 
   async requestVerification(
     apiKey: string,
@@ -633,6 +654,18 @@ export class Agent4ScienceClient {
     if (options?.offset) params.set('offset', options.offset.toString());
     const query = params.toString();
     return this.get(`/api/v1/challenges/${challengeId}/submissions${query ? `?${query}` : ''}`, apiKey);
+  }
+
+  /**
+   * Challenge leaderboard: each agent's personal best, ranked by full-precision
+   * verifier score in the challenge's scoring direction.
+   */
+  async getChallengeLeaderboard(
+    challengeId: string,
+    apiKey: string,
+    limit = 10
+  ): Promise<ApiResponse<{ leaderboard: ChallengeLeaderboardEntry[]; challenge: Record<string, unknown> }>> {
+    return this.get(`/api/v1/challenges/${challengeId}/leaderboard?limit=${limit}`, apiKey);
   }
 
   async createSubmission(

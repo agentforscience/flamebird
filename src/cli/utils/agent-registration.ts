@@ -3,6 +3,7 @@
  * Used by both `init` and `create-agent` commands.
  */
 
+import { signupPow } from '../../utils/signup-pow.js';
 import ora from 'ora';
 import { createDatabase, getDatabase } from '../../db/database.js';
 import { encryptApiKey } from '../../agents/agent-manager.js';
@@ -46,7 +47,7 @@ export async function registerOnAgent4Science(
     const response = await fetch(`${apiUrl}/api/v1/agents/create`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ handle, displayName, bio, persona, ...(model ? { model } : {}) }),
+      body: JSON.stringify({ handle, displayName, bio, persona, ...(model ? { model } : {}), pow: await signupPow(apiUrl) }),
     });
 
     const result = await response.json() as {

@@ -1646,6 +1646,11 @@ Respond in JSON:
       verifier?: string;
       solutionSchema?: Record<string, unknown>;
       scoringDirection?: string;
+      minImprovement?: number;
+      referenceScore?: number | null;
+      referenceLabel?: string | null;
+      theoreticalScore?: number | null;
+      theoreticalLabel?: string | null;
     },
     topSubmissions: Array<{ title: string; approach: string; evaluatedScore?: number | null }>,
   ): Promise<GeneratedSolution | null> {
@@ -1659,6 +1664,18 @@ Respond in JSON:
       ? `\n\nExisting submissions (scores to beat):\n${topSubmissions.slice(0, 5).map((s, i) =>
           `${i + 1}. "${s.title}" — ${s.approach} — score: ${s.evaluatedScore ?? 'pending'}`).join('\n')}`
       : '\n\nNo existing submissions — you would be the first.';
+
+    // Best public result and how SOTA is judged (see skill.md "Gap Closed and SOTA")
+    const frontierContext = typeof challenge.referenceScore === 'number'
+      ? `\n\nBEST PUBLIC RESULT: ${challenge.referenceScore}${challenge.referenceLabel ? ` (${challenge.referenceLabel})` : ''}` +
+        (typeof challenge.theoreticalScore === 'number'
+          ? `\nBOUND: ${challenge.theoreticalScore}${challenge.theoreticalLabel ? ` (${challenge.theoreticalLabel})` : ''}`
+          : '') +
+        `\nA score only counts as SOTA if it beats the best public result by more than its printed precision` +
+        `${challenge.minImprovement ? ` and by at least ${challenge.minImprovement}` : ''}, and then passes a stricter re-check` +
+        ` (exact or high-precision arithmetic). Solutions that only pass because of floating-point slack on constraints fail.` +
+        ` Matching the best public result is fine; never pad or perturb a known construction to fake a tiny gain.`
+      : '';
 
     // ── Step 1: LLM generates Python solver code ──
 
@@ -1677,7 +1694,7 @@ VERIFIER CODE (this is what the server runs on your solution):
 \`\`\`python
 ${challenge.verifier || 'No verifier available'}
 \`\`\`
-${competitorContext}
+${competitorContext}${frontierContext}
 
 REQUIREMENTS:
 1. Write a COMPLETE, STANDALONE Python script

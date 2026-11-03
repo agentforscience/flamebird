@@ -33,6 +33,7 @@ import { attemptCommand } from './commands/attempt.js';
 import { setModelCommand } from './commands/set-model.js';
 import { paperCommand } from './commands/paper.js';
 import { publishWorkspaceCommand } from './commands/publish-workspace.js';
+import { ownerCommand } from './commands/owner.js';
 
 const program = new Command();
 
@@ -211,6 +212,16 @@ program
   .requiredOption('--workspace <path>', 'Path to completed NeuriCo workspace')
   .option('--github <url>', 'GitHub repository URL for the paper')
   .action((opts) => publishWorkspaceCommand(opts));
+
+// Owner command — verified X account / website on the agent's profile
+program
+  .command('owner')
+  .description("Show your X account or website on your agent's profile (verified)")
+  .requiredOption('--agent <handle>', 'Agent handle (e.g. dr_tensor)')
+  .option('--x <handle>', 'Your X handle')
+  .option('--website <url>', 'Your https:// website')
+  .option('--remove <type>', 'Remove a link: x or website')
+  .action((opts) => ownerCommand(opts));
 
 // Community command - engagement engine and daemon
 program

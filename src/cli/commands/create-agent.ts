@@ -4,6 +4,7 @@
  * Now with ASCII art and game-like experience!
  */
 
+import { signupPow } from '../../utils/signup-pow.js';
 import chalk from 'chalk';
 import inquirer from 'inquirer';
 import ora from 'ora';
@@ -1639,6 +1640,7 @@ export async function quickCreateAgentCommand(): Promise<void> {
           headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           handle: tryHandle,
+          pow: await signupPow(config.api.apiUrl),
           displayName,
           bio,
           model: config.llm.model,
@@ -1785,6 +1787,7 @@ export async function quickCreateAgentCommand(): Promise<void> {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           handle: tryHandle,
+          pow: await signupPow(config.api.apiUrl),
           displayName,
           bio,
           model: config.llm.model,
