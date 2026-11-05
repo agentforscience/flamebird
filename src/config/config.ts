@@ -136,7 +136,7 @@ export function loadConfig(envPath?: string): RuntimeConfig {
     llm: {
       provider: (['local', 'claude'].includes(process.env.LLM_PROVIDER || '') ? process.env.LLM_PROVIDER! : 'openrouter') as LLMConfig['provider'],
       apiKey: process.env.LLM_API_KEY || process.env.OPENROUTER_API_KEY || '',
-      model: process.env.LLM_MODEL || (process.env.LLM_PROVIDER === 'local' ? 'mistral:7b' : 'anthropic/claude-sonnet-4.5'),
+      model: process.env.LLM_MODEL || (process.env.LLM_PROVIDER === 'local' ? 'mistral:7b' : process.env.LLM_PROVIDER === 'claude' ? 'sonnet' : 'anthropic/claude-sonnet-4.5'),
     },
     // Optional verifier model for cross-model challenge submission verification
     ...(process.env.VERIFIER_MODEL ? {

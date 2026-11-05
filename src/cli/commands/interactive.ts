@@ -14,6 +14,10 @@ import { createLLMClient, getLLMClient, getOrCreateLLMClient } from '../../llm/l
 import { createRateLimiter } from '../../rate-limit/rate-limiter.js';
 import { createActionExecutor, getActionExecutor } from '../../actions/action-executor.js';
 import type { AgentRuntime } from '../../types.js';
+import { applyWorkFields, promptWorkFields, splitWorkFields } from '../utils/work-style-prompts.js';
+import { describeWorkProfile } from '../../llm/work-style.js';
+import { attachSiteMemory } from '../../utils/site-memory.js';
+import { beginNotesSession, endNotesSession } from '../../utils/site-notes.js';
 
 export async function interactiveCommand(): Promise<void> {
   console.log(chalk.bold('\n🎮 Interactive Mode'));
@@ -92,6 +96,11 @@ async function interactionLoop(runtime: AgentRuntime, apiKey: string): Promise<v
   const executor = getActionExecutor();
   const db = getDatabase();
 
+  // Session start: site notes and memory digest (silent when the site has none)
+  await beginNotesSession(runtime.config.id, apiKey, runtime.config.persona);
+  await attachSiteMemory(runtime.config.persona, runtime.config.id, apiKey);
+  const endSession = () => endNotesSession(runtime.config.id, apiKey, runtime.config.handle, runtime.config.persona);
+
   while (true) {
     const { action } = await inquirer.prompt([
       {
@@ -104,6 +113,7 @@ async function interactionLoop(runtime: AgentRuntime, apiKey: string): Promise<v
           { name: '💬 Comment on something', value: 'comment' },
           { name: '👍 Vote on content', value: 'vote' },
           { name: '🏆 Attempt a challenge', value: 'challenge' },
+          { name: '🧭 Working style', value: 'style' },
           { name: '👥 Follow an agent', value: 'follow' },
           { name: '📚 Join a sciencesub', value: 'join' },
           { name: '📊 View my stats', value: 'stats' },
@@ -129,6 +139,9 @@ async function interactionLoop(runtime: AgentRuntime, apiKey: string): Promise<v
         case 'vote':
           await castVote(client, executor, apiKey, runtime.config.id);
           break;
+        case 'style':
+          await editWorkStyle(runtime);
+          break;
         case 'challenge':
           await attemptChallenge(runtime, client, llm, executor, apiKey);
           break;
@@ -145,8 +158,10 @@ async function interactionLoop(runtime: AgentRuntime, apiKey: string): Promise<v
           await checkNotifications(client, apiKey);
           break;
         case 'switch':
+          await endSession();
           return; // Exit loop to allow agent selection
         case 'exit':
+          await endSession();
           console.log(chalk.yellow('\nGoodbye! 👋'));
           process.exit(0);
       }
@@ -679,6 +694,18 @@ async function attemptChallenge(
     console.log(chalk.green('✓ Solution queued for submission'));
     console.log(chalk.gray('  Peer critiques on sibling submissions will be auto-queued.'));
   }
+}
+
+/** Change the working style for this agent: saved to the DB and applied to this session. */
+async function editWorkStyle(runtime: AgentRuntime): Promise<void> {
+  const persona = runtime.config.persona;
+  console.log(chalk.gray(`\nCurrent: ${describeWorkProfile(persona)}\n`));
+  const next = applyWorkFields(persona, await promptWorkFields(splitWorkFields(persona).work));
+  getDatabase().updateAgentPersona(runtime.config.id, next);
+  // Keep runtime-only fields (persona.md, memory.md, site memory) on the live persona
+  delete persona.workStyle; delete persona.domain; delete persona.workSettings;
+  Object.assign(persona, next);
+  console.log(chalk.green(`✓ ${describeWorkProfile(persona)}\n`));
 }
 
 function formatTimeAgo(date: Date): string {

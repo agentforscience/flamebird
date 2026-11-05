@@ -24,6 +24,10 @@ import { getRateLimiter } from '../rate-limit/rate-limiter.js';
 import { createLogger } from '../logging/logger.js';
 import { isTooSimilarToRecent, isReplyRelevant } from '../utils/similarity.js';
 import { assessTextQuality } from '../utils/content-quality.js';
+import { attachSiteMemory, findPushback } from '../utils/site-memory.js';
+import { pushbackContextFor } from '../utils/pushback.js';
+import { targetTopics } from '../utils/focus.js';
+import { workProfileFor, workLogFields } from '../llm/work-style.js';
 
 const logger = createLogger('proactive');
 
@@ -461,6 +465,9 @@ export class ProactiveEngine {
         return;
       }
 
+      // Site memory (open pushback, recent outcomes) for every prompt below; cached 15 min, silent on failure
+      await attachSiteMemory(agent.config.persona, agentId, apiKey);
+
       // ── Phase 3: AUTHOR + CONTINUATIONS ─────────────────────────────
       // Reply to comments on own content (separate social contract)
       await this.discoverAuthorReplyOpportunities(agentId, agent.config.persona, apiKey);
@@ -633,8 +640,9 @@ export class ProactiveEngine {
       .map(([tag]) => tag);
 
     // Use persona's preferred topics or trending topics
-    const topics = persona.preferredTopics.length > 0
-      ? persona.preferredTopics
+    const ranked = targetTopics(persona);
+    const topics = ranked.length > 0
+      ? ranked
       : trendingTopics.length > 0
         ? trendingTopics
         : ['machine-learning', 'research'];
@@ -924,9 +932,10 @@ export class ProactiveEngine {
     let score = 0.3; // base score
 
     // Topic relevance (0-0.4)
-    if (this.isTopicRelevant(paper.tags || [], persona.preferredTopics)) {
+    if (this.isTopicRelevant(paper.tags || [], targetTopics(persona))) {
       score += 0.4;
     }
+    score += this.focusBonus(paper.tags || [], persona);
 
     // Recency bonus (0-0.30) — newer papers get a strong boost
     const ageHours = (Date.now() - new Date(paper.createdAt).getTime()) / (1000 * 60 * 60);
@@ -957,9 +966,10 @@ export class ProactiveEngine {
 
     // Topic relevance (0-0.4) — only engage with takes in agent's domain
     const takeTags = take.sciencesub ? [take.sciencesub] : [];
-    if (this.isTopicRelevant(takeTags, persona.preferredTopics)) {
+    if (this.isTopicRelevant(takeTags, targetTopics(persona))) {
       score += 0.4;
     }
+    score += this.focusBonus(takeTags, persona);
 
     // Stance interest (0-0.3) — controversial takes are more interesting
     if (this.stanceStrictlyConflicts(take.stance, persona)) {
@@ -996,9 +1006,10 @@ export class ProactiveEngine {
 
     // Topic relevance via paper tags (0-0.4)
     const paperTags = review.paper?.tags || [];
-    if (paperTags.length > 0 && this.isTopicRelevant(paperTags, persona.preferredTopics)) {
+    if (paperTags.length > 0 && this.isTopicRelevant(paperTags, targetTopics(persona))) {
       score += 0.4;
     }
+    score += this.focusBonus(paperTags, persona);
 
     // Recency bonus (0-0.30)
     const ageHours = (Date.now() - new Date(review.createdAt).getTime()) / (1000 * 60 * 60);
@@ -1024,9 +1035,10 @@ export class ProactiveEngine {
     let score = 0.4; // base score — all open challenges are worth considering
 
     // Topic relevance (0-0.3)
-    if (this.isTopicRelevant(challenge.tags || [], persona.preferredTopics)) {
+    if (this.isTopicRelevant(challenge.tags || [], targetTopics(persona))) {
       score += 0.3;
     }
+    score += this.focusBonus(challenge.tags || [], persona);
 
     // Recency bonus (0-0.30)
     const ageHours = (Date.now() - new Date(challenge.createdAt).getTime()) / (1000 * 60 * 60);
@@ -1364,9 +1376,9 @@ export class ProactiveEngine {
         continue;
       }
       // Lightweight relevance check: match slug against preferredTopics + joined sub slug parts
-      if (persona.preferredTopics.length > 0) {
+      if (targetTopics(persona).length > 0) {
         const subText = `${slug} ${subInfo.name} ${subInfo.description}`.toLowerCase();
-        const topics = persona.preferredTopics.map(t => t.toLowerCase());
+        const topics = targetTopics(persona).map(t => t.toLowerCase());
         const joinedParts = joinedSlugs.flatMap(s => s.split('-').filter(p => p.length > 2));
         const allKeywords = [...topics, ...joinedParts];
         const isRelevant = allKeywords.some(kw => subText.includes(kw) || slug.includes(kw));
@@ -1789,7 +1801,7 @@ export class ProactiveEngine {
         const candidate = await llm.generateStandaloneTake(persona, {
           recentPaperTitles,
           trendingTags: topTags,
-          personaTopics: persona.preferredTopics,
+          personaTopics: targetTopics(persona),
           ownRecentTitles,
           ownRecentHotTakes,
         }, sciencesubs);
@@ -1883,7 +1895,7 @@ export class ProactiveEngine {
     let repliesQueued = 0;
     const maxRepliesPerCycle = 3; // Author replies are rarer than general replies
 
-    type ReplyableComment = { id: string; body: string; agentId?: string; parentId?: string | null; depth?: number };
+    type ReplyableComment = { id: string; body: string; agentId?: string; parentId?: string | null; depth?: number; intent?: string };
 
     for (const { id: rootId, type: rootType, title: rootTitle } of roots) {
       if (repliesQueued >= maxRepliesPerCycle) break;
@@ -1913,6 +1925,9 @@ export class ProactiveEngine {
         // Pick the oldest unanswered comment (authors should respond in order)
         const target = unreplied[unreplied.length - 1] as ReplyableComment;
 
+        // Pushback on the agent's own work: show the commenter's record and the agent's positions
+        const pushback = pushbackContextFor(target.id, target.intent, findPushback(agentId, target.id));
+
         // Use generateComment with author_reply trigger to get full persona system prompt
         const generated = await llm.generateComment(persona, {
           targetType: rootType,
@@ -1922,6 +1937,7 @@ export class ProactiveEngine {
           rootTitle,
           rootType,
           rootId,
+          pushback,
         }, this.memoryFor(agentId));
 
         if (!generated.body) continue;
@@ -1931,6 +1947,7 @@ export class ProactiveEngine {
           body: generated.body,
           confidence: generated.confidence ?? 0.9,
           parentId: target.id,
+          ...(generated.positionUpdate && pushback ? { positionUpdate: generated.positionUpdate, pushbackCommentId: pushback.commentId } : {}),
         };
 
         // Route to root content type (paper/take) with parentId for threading
@@ -2179,8 +2196,8 @@ export class ProactiveEngine {
     const candidateTopics: string[] = [];
 
     // Prefer persona's preferred topics (agent is invested in these)
-    if (persona.preferredTopics?.length) {
-      candidateTopics.push(...persona.preferredTopics.slice(0, 5));
+    if (targetTopics(persona).length) {
+      candidateTopics.push(...targetTopics(persona).slice(0, 5));
     }
 
     // Add trending tags from recent papers (only if we have few persona topics)
@@ -2447,6 +2464,7 @@ export class ProactiveEngine {
       executor.queueAction(agentId, 'review', paper.id, 'paper', {
         paperId: paper.id,
         ...review,
+        workProfile: workProfileFor(persona),
       }, 'normal');
       db.recordEngagement(agentId, paper.id, 'paper', 'review');
       logger.info(`${agentName(agentId)} queued review on paper "${paper.title}"`);
@@ -2843,8 +2861,10 @@ export class ProactiveEngine {
         );
       }
 
+      const workProfile = workProfileFor(persona);
       if (!solution) {
         logger.info({ ...agentLog(agentId), challengeId: challenge.id }, 'Quality gate blocked submission — solution did not pass verification');
+        db.recordWork({ agentId, kind: 'submission', targetId: challenge.id, status: 'blocked', scoringDirection: challenge.scoringDirection ?? null, ...workLogFields(workProfile) });
         return;
       }
 
@@ -2853,7 +2873,7 @@ export class ProactiveEngine {
         'submission',
         challenge.id,
         'challenge',
-        solution as unknown as Record<string, unknown>,
+        { ...solution, workProfile, scoringDirection: challenge.scoringDirection } as unknown as Record<string, unknown>,
         'normal'
       );
 
@@ -2999,6 +3019,13 @@ export class ProactiveEngine {
   /**
    * Check if content topics are relevant to agent's interests
    */
+  /** Extra +0.1 when content matches an owner-set focus topic. 0 without a focus. */
+  private focusBonus(contentTags: string[], persona: AgentPersona): number {
+    const focusTopics = persona.focus?.topics?.filter(t => t.trim()) ?? [];
+    if (!focusTopics.length || !contentTags.length) return 0;
+    return this.isTopicRelevant(contentTags, focusTopics) ? 0.1 : 0;
+  }
+
   private isTopicRelevant(contentTags: string[], preferredTopics: string[]): boolean {
     if (preferredTopics.length === 0) return true; // No preferences = everything is relevant
 
@@ -3081,7 +3108,7 @@ export class ProactiveEngine {
     const text = `${slug} ${sciencesub.name} ${sciencesub.description}`.toLowerCase();
     // Split hyphenated names for partial matching
     const slugParts = slug.split('-').filter(p => p.length > 2);
-    const topics = persona.preferredTopics.map(t => t.toLowerCase());
+    const topics = targetTopics(persona).map(t => t.toLowerCase());
 
     // Agents without preferences get moderate base interest
     if (topics.length === 0) return 0.3;

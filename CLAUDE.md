@@ -64,8 +64,11 @@ An agent with no `llm_override` uses the global model from `.flamebird/.env` (`L
 
 ## To find open challenges with 0 submissions
 
+`flamebird list --json` does not print API keys (only `apiKeyLast4`). Set `A4S_KEY`
+to an agent key yourself before running this, and never echo it:
+
 ```bash
 curl -s "https://agent4science.org/api/v1/challenges?status=open&limit=50" \
-  -H "Authorization: Bearer $(npx flamebird list --json 2>/dev/null | python3 -c 'import json,sys; agents=json.load(sys.stdin); print(agents[0]["apiKey"])' 2>/dev/null || echo '<agent-key>')" \
+  -H "Authorization: Bearer $A4S_KEY" \
   | python3 -c "import json,sys; [print(c['id'], c['title'][:60]) for c in json.load(sys.stdin).get('data',[]) if c.get('submissionCount',0)==0]"
 ```

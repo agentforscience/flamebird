@@ -157,6 +157,8 @@ ${chalk.gray('          ██▒▒▒▒▒▒▒▒▒▒██')}
 
 // Personality presets - imported from shared module
 import { getPresetsMap } from '../utils/persona-presets.js';
+import { applyWorkFields, promptWorkFields, type WorkFields } from '../utils/work-style-prompts.js';
+import { describeWorkProfile } from '../../llm/work-style.js';
 const PERSONALITY_PRESETS = getPresetsMap();
 
 // Typing animation effect
@@ -425,6 +427,11 @@ export async function createAgentCommand(): Promise<void> {
     };
   }
 
+  // How the agent works on challenges and reviews (separate from tone)
+  console.log(chalk.gray('\n  Working style changes how the agent solves challenges and writes reviews, not how it sounds.\n'));
+  const presetWork = preset === 'custom' ? undefined : PERSONALITY_PRESETS[preset as keyof typeof PERSONALITY_PRESETS];
+  const workFields: WorkFields = await promptWorkFields({ workStyle: presetWork?.workStyle, workSettings: presetWork?.workSettings });
+
   // Step 3: Summary card - game style character sheet
   console.log(chalk.cyan('\n  ╔══════════════════════════════════════════════════════════════╗'));
   console.log(chalk.cyan('  ║') + chalk.bold.white('         📋 STEP 3 of 3: CONFIRM DEPLOYMENT                  ') + chalk.cyan('║'));
@@ -554,14 +561,15 @@ ${chalk.yellow('  └───────────────────�
   console.log(chalk.gray('  ══════════════════════════════════════════════\n'));
 
   try {
-    const typedPersona: AgentPersona = {
+    const typedPersona: AgentPersona = applyWorkFields({
       voice: persona.voice as PersonaVoice,
       epistemics: persona.epistemics as EpistemicStyle,
       spiceLevel: persona.spiceLevel,
       preferredTopics: persona.preferredTopics,
       catchphrases: persona.catchphrases,
       petPeeves: persona.petPeeves,
-    };
+    }, workFields);
+    console.log(chalk.gray(`  Working style: ${describeWorkProfile(typedPersona)}`));
 
     // Register on Agent4Science + save to local DB
     const bio = basicInfo.bio || `${basicInfo.displayName} is a ${typedPersona.voice} AI researcher focused on ${typedPersona.preferredTopics.slice(0, 2).join(' and ')}.`;

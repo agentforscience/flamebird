@@ -4,11 +4,19 @@
  */
 
 import type { AgentPersona, AgentLLMOverride, AgentWorkingMemory, CommentIntent } from '../types.js';
+import { claudeModel, runClaude } from './claude-cli.js';
 import { calculateSimilarity } from '../utils/similarity.js';
 import { createLogger } from '../logging/logger.js';
 import { getCostTracker } from '../utils/cost-tracker.js';
 import { smartTruncate, repairJSON } from '../utils/truncate.js';
-import { runSolverCode } from '../execution/code-sandbox.js';
+import { runSolverCode, runVerifierCode } from '../execution/code-sandbox.js';
+import { solveWorkBlock, codeWorkBlock, reviewWorkBlock, expertiseWithDomain, resolveWorkSettings } from './work-style.js';
+import {
+  activePositions, formatSiteNotes, parsePositionProposal, parsePositionUpdate, positionFieldLine, pushbackPromptBlock,
+  type PositionProposal, type PositionUpdate, type PushbackContext,
+} from './memory-prompts.js';
+import { focusDecisionLine } from '../utils/focus.js';
+import type { SitePosition } from '../types.js';
 
 const logger = createLogger('llm');
 
@@ -43,6 +51,8 @@ export interface GeneratedComment {
   confidence: number;
   evidenceAnchor?: string;
   replyToComment?: string;
+  /** Optional confidence change on one of the agent's positions (replies to pushback only). */
+  positionUpdate?: PositionUpdate;
 }
 
 export interface GeneratedTake {
@@ -54,6 +64,8 @@ export interface GeneratedTake {
   openQuestions: string[];
   hotTake: string;
   tags: string[];
+  /** Optional claim to open as a public position (only asked for when the site supports positions). */
+  position?: PositionProposal;
 }
 
 export interface GeneratedSolution {
@@ -64,6 +76,8 @@ export interface GeneratedSolution {
   delta?: string;
   declaredScore?: number;
   solutionData?: Record<string, unknown>;
+  /** Score from the local verifier run (solver path). Local only, never sent to the site. */
+  localScore?: number;
 }
 
 export interface ChallengeDecision {
@@ -92,6 +106,18 @@ export interface EngagementDecision {
   actionType?: 'comment' | 'take' | 'vote';
   priority?: number;
 }
+
+/**
+ * Soundness request added to the review prompt for blind review rounds, which score
+ * whether reviewers catch planted flaws. Worded so it does not lean toward 'flawed'.
+ * Exported so the prompt regression test can strip it.
+ */
+export const REVIEW_SOUNDNESS_FIELDS = `
+- soundness: "sound" | "flawed" (your honest overall judgment of correctness. Say "flawed" only if you found a specific error that breaks a central claim: a wrong derivation, an invalid method, or a conclusion the evidence does not support. Ordinary weaknesses, missing experiments or limited scope do not make a paper flawed. Judge each paper on its own and do not lean toward either answer.)
+- soundnessConfidence: number from 0 to 1 (how sure you are of that judgment)`;
+
+/** How the verifier rated a text solution; higher is better. Used to keep the best of several candidates. */
+const SOLUTION_RANK = { corrected: 0, inconclusive: 1, unchecked: 1, minor: 2, correct: 3 } as const;
 
 const OPENROUTER_ENDPOINT = 'https://openrouter.ai/api/v1/chat/completions';
 const LOCAL_ENDPOINT = process.env.LOCAL_LLM_URL || 'http://localhost:11434/v1/chat/completions';
@@ -180,33 +206,17 @@ export class LLMClient {
    * Call Claude CLI (`claude -p`) using OAuth credentials — no API key needed.
    */
   private async completeViaClaude(messages: LLMMessage[], _maxTokens?: number): Promise<LLMResponse> {
-    const { execFile } = await import('child_process');
-    const { promisify } = await import('util');
-    const execFileAsync = promisify(execFile);
-
-    // Combine messages into a single prompt for `claude -p`
-    const prompt = messages.map(m => {
-      if (m.role === 'system') return `[System]\n${m.content}`;
-      if (m.role === 'user') return m.content;
-      return `[Assistant]\n${m.content}`;
-    }).join('\n\n');
-
-    try {
-      const { stdout } = await execFileAsync('claude', ['-p', prompt, '--output-format', 'text'], {
-        timeout: 120_000,
-        maxBuffer: 10 * 1024 * 1024,
-        env: { ...process.env },
-      });
-
-      return {
-        content: stdout.trim(),
-        model: 'claude-cli',
-        usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
-      };
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      throw new Error(`Claude CLI error: ${msg}`);
-    }
+    // System messages become the appended system prompt; the rest goes on stdin.
+    const system = messages.filter(m => m.role === 'system').map(m => m.content).join('\n\n');
+    const prompt = messages.filter(m => m.role !== 'system')
+      .map(m => (m.role === 'assistant' ? `[Assistant]\n${m.content}` : m.content))
+      .join('\n\n');
+    const r = await runClaude({ prompt, system, model: this.config.model });
+    return {
+      content: r.content,
+      model: claudeModel(this.config.model) ?? 'claude-cli',
+      usage: { promptTokens: r.promptTokens, completionTokens: r.completionTokens, totalTokens: r.promptTokens + r.completionTokens },
+    };
   }
 
   /**
@@ -225,6 +235,8 @@ export class LLMClient {
       rootType?: string;
       rootId?: string;
       existingDiscussion?: string[];
+      /** Set when replying to pushback on the agent's own work (adds record and positions when present). */
+      pushback?: PushbackContext;
     },
     memory?: AgentWorkingMemory,
   ): Promise<GeneratedComment> {
@@ -235,7 +247,8 @@ export class LLMClient {
       rootId: context.rootId,
     } : undefined;
     const systemPrompt = this.buildPersonaPrompt(persona, memory, memoryHints);
-    const userPrompt = this.buildCommentPrompt(context);
+    const userPrompt = this.buildCommentPrompt(context) + pushbackPromptBlock(persona, context.pushback, context.rootId);
+    const offeredPositions = context.pushback ? activePositions(persona) : [];
 
     const response = await this.complete([
       { role: 'system', content: systemPrompt },
@@ -250,7 +263,7 @@ export class LLMClient {
       // Cost tracker not initialized - that's okay
     }
 
-    return this.parseCommentResponse(response.content);
+    return this.parseCommentResponse(response.content, offeredPositions);
   }
 
   /**
@@ -343,7 +356,7 @@ Respond in JSON format with these fields:
 - whoShouldCare: string (who this research matters to)
 - openQuestions: string[] (2-3 questions raised by this work)
 - hotTake: string (your spicy opinion in 1-2 sentences)
-${tagsInstruction}
+${tagsInstruction}${positionFieldLine(persona, 'take')}
 
 CRITICAL: You MUST complete every field fully. Do NOT leave any sentence unfinished or cut off mid-thought. Finish every sentence before moving to the next field. If you are running low on space, keep individual points concise rather than leaving them incomplete.${differentiationInstruction}`;
 
@@ -405,7 +418,7 @@ Respond in JSON format with these fields:
 - whoShouldCare: string (who this matters to)
 - openQuestions: string[] (2-3 questions you're wrestling with)
 - hotTake: string (your spicy opinion in 1-2 sentences)
-${tagsInstruction}
+${tagsInstruction}${positionFieldLine(persona, 'take')}
 
 CRITICAL: You MUST complete every field fully. Do NOT leave any sentence unfinished or cut off mid-thought. Finish every sentence before moving to the next field. If you are running low on space, keep individual points concise rather than leaving them incomplete.`;
 
@@ -468,6 +481,9 @@ Write a take that reflects your unique viewpoint. Be opinionated and substantive
     strengths: string[];
     weaknesses: string[];
     suggestions?: string;
+    soundness?: 'sound' | 'flawed';
+    soundnessConfidence?: number;
+    position?: PositionProposal;
   }> {
     const systemPrompt = this.buildPersonaPrompt(persona) + `
 
@@ -477,9 +493,9 @@ Respond in JSON format with these fields:
 - summary: string (a thorough, detailed assessment of what the paper does, its methodology, contributions, and your overall evaluation — MUST be at least 1500 characters long, this is a HARD MINIMUM enforced by the API. Write 4-6 substantial paragraphs covering: (1) what the paper does and why it matters, (2) methodology analysis, (3) key results and their significance, (4) limitations and concerns, (5) comparison to related work, (6) overall assessment. Aim for 2000+ characters.)
 - strengths: string[] (3-4 specific strengths of the paper, each at least 80 characters with concrete details)
 - weaknesses: string[] (3-4 specific weaknesses or concerns, each at least 80 characters with concrete details)
-- suggestions: string (optional constructive suggestions for improvement)
+- suggestions: string (optional constructive suggestions for improvement)${REVIEW_SOUNDNESS_FIELDS}${positionFieldLine(persona, 'review')}
 
-CRITICAL: You MUST complete every field fully. Do NOT leave any sentence unfinished or cut off mid-thought. Finish every sentence and every paragraph completely before moving to the next field. If you are running low on space, be more concise rather than leaving text incomplete.`;
+CRITICAL: You MUST complete every field fully. Do NOT leave any sentence unfinished or cut off mid-thought. Finish every sentence and every paragraph completely before moving to the next field. If you are running low on space, be more concise rather than leaving text incomplete.${reviewWorkBlock(persona)}`;
 
     const userPrompt = `Write a peer review of this paper:
 
@@ -551,6 +567,8 @@ Stated Limitations: ${paper.limitations.join('; ')}`;
             ? parsed.weaknesses.slice(0, 4).map((w: string) => smartTruncate(String(w), 500))
             : ['Limited evaluation across diverse scenarios and datasets', 'Needs more empirical evidence to support central claims'],
           suggestions: parsed.suggestions ? smartTruncate(String(parsed.suggestions), 2000) : undefined,
+          ...parseSoundness(parsed),
+          ...withPosition(parsed),
         };
       }
     } catch {
@@ -717,6 +735,17 @@ STYLE RULES:
         ? persona.persistentMemoryMarkdown.slice(0, 2000) + '\n[...truncated]'
         : persona.persistentMemoryMarkdown;
       prompt += `\n\nYOUR LONG-TERM KNOWLEDGE (accumulated from your past research and discussions — these are things you've learned and remember across sessions):\n${memContent}`;
+    }
+
+    // Private site notes (GET /agents/me/notes), read at session start, truncated
+    const notesBlock = formatSiteNotes(persona.siteNotesMarkdown);
+    if (notesBlock) {
+      prompt += `\n\n${notesBlock}`;
+    }
+
+    // Site memory (GET /agents/me/memory): open pushback and recent outcomes, already truncated
+    if (persona.siteMemoryMarkdown) {
+      prompt += `\n\n${persona.siteMemoryMarkdown}`;
     }
 
     return prompt;
@@ -1116,7 +1145,7 @@ Generate your response in JSON format:
   /**
    * Parse comment response from LLM
    */
-  private parseCommentResponse(content: string): GeneratedComment {
+  private parseCommentResponse(content: string, offeredPositions: SitePosition[] = []): GeneratedComment {
     // Map old intent names to new ones for backward compatibility
     const VALID_INTENTS: CommentIntent[] = ['challenge', 'support', 'clarify', 'connect', 'quip', 'summarize', 'question', 'extend', 'probe', 'synthesize'];
     const intentMap: Record<string, CommentIntent> = {
@@ -1141,6 +1170,7 @@ Generate your response in JSON format:
           confidence: parsed.confidence ?? 0.7,
           evidenceAnchor: parsed.evidenceAnchor,
           replyToComment: (replyTo && replyTo !== 'null' && replyTo !== '') ? replyTo.replace(/^@/, '') : undefined,
+          ...(offeredPositions.length ? withPositionUpdate(parsed, offeredPositions) : {}),
         };
       }
     } catch (error) {
@@ -1187,6 +1217,7 @@ Generate your response in JSON format:
           openQuestions: Array.isArray(parsed.openQuestions) ? parsed.openQuestions : ['What are the implications?'],
           hotTake: parsed.hotTake || 'Interesting work that merits attention.',
           tags: Array.isArray(parsed.tags) ? parsed.tags.map((t: string) => String(t).toLowerCase()) : [],
+          ...withPosition(parsed),
         };
       }
     } catch (error) {
@@ -1294,7 +1325,7 @@ Generate your response in JSON format:
       : '\n\nNo existing submissions yet — you would be the first to attempt this.';
 
     const systemPrompt = `You are a mathematician and researcher evaluating whether to attempt a challenge.
-Your expertise: ${persona.preferredTopics.join(', ') || 'general mathematics'}.
+Your expertise: ${expertiseWithDomain(persona, 'general mathematics')}.${focusDecisionLine(persona)}
 Your style: ${persona.voice} voice, ${persona.epistemics} epistemic approach, boldness ${persona.spiceLevel}/10.
 
 BEFORE deciding, you must analyze:
@@ -1359,6 +1390,10 @@ Tags: ${challenge.tags.join(', ')}${submissionsContext}`;
    *   GATE:  Return null if solution cannot pass verification after retries
    *
    * Returns null when the quality gate blocks submission (caller should skip).
+   *
+   * Working settings: `attempts` runs the pipeline that many times and keeps the
+   * candidate the verifier rated best; `readOthersFirst: false` hides prior
+   * submissions; `selfCheck` skips (off) or tightens (strict) the VERIFY step.
    */
   async generateSolution(
     persona: AgentPersona,
@@ -1371,7 +1406,33 @@ Tags: ${challenge.tags.join(', ')}${submissionsContext}`;
     improvesUpon?: { id: string; title: string; approach: string; body: string },
     skillMdContext?: string
   ): Promise<GeneratedSolution | null> {
-    const MAX_RETRIES = 1;
+    const { attempts, readOthersFirst, selfCheck } = resolveWorkSettings(persona);
+    const others = readOthersFirst ? topSubmissions : [];
+    const buildsOn = readOthersFirst ? improvesUpon : undefined;
+    // With no self-check there is nothing to rank candidates by, so the first one is kept.
+    const topRank = selfCheck === 'off' ? SOLUTION_RANK.unchecked : SOLUTION_RANK.correct;
+
+    let best: { solution: GeneratedSolution; rank: number } | null = null;
+    for (let i = 0; i < attempts; i++) {
+      if (attempts > 1) logger.info(`Challenge solver: candidate ${i + 1}/${attempts}`);
+      const candidate = await this.solveTextOnce(persona, challenge, others, buildsOn, skillMdContext);
+      if (candidate && (!best || candidate.rank > best.rank)) best = candidate;
+      if (best && best.rank >= topRank) break;
+    }
+    if (attempts > 1) logger.info({ rank: best?.rank ?? null }, 'Challenge solver: kept best candidate');
+    return best?.solution ?? null;
+  }
+
+  /** One ANALYZE → SOLVE → VERIFY → RETRY pass. Returns the solution and how the verifier rated it. */
+  private async solveTextOnce(
+    persona: AgentPersona,
+    challenge: { title: string; description: string; tags: string[] },
+    topSubmissions: Array<{ title: string; approach: string; body: string }>,
+    improvesUpon?: { id: string; title: string; approach: string; body: string },
+    skillMdContext?: string
+  ): Promise<{ solution: GeneratedSolution; rank: number } | null> {
+    const { selfCheck } = resolveWorkSettings(persona);
+    const MAX_RETRIES = selfCheck === 'strict' ? 2 : 1;
 
     // ── Platform skill.md context (if available) ──
     const skillGuidance = skillMdContext
@@ -1426,7 +1487,7 @@ Be specific and mathematical. Reference actual theorems, techniques, and structu
 
     logger.info('Challenge solver: Step 1 — Analyzing problem structure');
     const analysis = await this.complete([
-      { role: 'system', content: `You are a rigorous mathematician. Think deeply before solving. Your expertise: ${persona.preferredTopics.join(', ')}.` },
+      { role: 'system', content: `You are a rigorous mathematician. Think deeply before solving. Your expertise: ${persona.preferredTopics.join(', ')}.${solveWorkBlock(persona)}` },
       { role: 'user', content: analysisPrompt },
     ], 4096);
 
@@ -1474,7 +1535,7 @@ Respond in JSON:
   "confidence": "low/medium/high — your honest assessment of solution correctness"
 }
 
-CRITICAL: Complete every field fully. Do NOT leave sentences unfinished. The body should be a publishable-quality solution. ALL math must be in LaTeX, never plain text.`;
+CRITICAL: Complete every field fully. Do NOT leave sentences unfinished. The body should be a publishable-quality solution. ALL math must be in LaTeX, never plain text.${solveWorkBlock(persona)}`;
 
       const solveUserPrompt = `Here is the challenge and your analysis. Now write the full solution.
 
@@ -1513,6 +1574,20 @@ Now produce the complete, rigorous solution.`;
         continue;
       }
 
+      if (selfCheck === 'off') {
+        logger.info('Challenge solver: self-check off, skipping verification');
+        return {
+          rank: SOLUTION_RANK.unchecked,
+          solution: {
+            title: smartTruncate((draftParsed?.title as string) || `Solution: ${challenge.title}`, 200),
+            body: draftBody,
+            approach: smartTruncate((draftParsed?.approach as string) || 'Novel approach to the problem', 500),
+            ...(improvesUpon ? { improvesUpon: improvesUpon.id } : {}),
+            ...(draftParsed?.delta ? { delta: smartTruncate(String(draftParsed.delta), 1000) } : {}),
+          },
+        };
+      }
+
       logger.info(`Challenge solver: Step 3 — Verifying (${verifierInstance ? 'cross-model' : 'self'}-verification)`);
 
       const verifyPrompt = `You are a rigorous mathematical referee. Review this solution for correctness.
@@ -1531,7 +1606,8 @@ Check for:
 2. EDGE CASES — Does the solution handle degenerate or boundary cases?
 3. NOTATION — Is everything well-defined before use?
 4. CORRECTNESS — Does the argument actually prove what was asked? Is any step wrong?
-5. COMPLETENESS — Does it fully answer the challenge, or only part of it?
+5. COMPLETENESS — Does it fully answer the challenge, or only part of it?${selfCheck === 'strict' ? `
+6. STRICT CHECK — Recompute every number and check every case you can. Any unproven step or unchecked case is a major issue.` : ''}
 
 If you find issues, provide the CORRECTED version of the affected sections.
 If the solution is correct, say so and suggest minor improvements if any.
@@ -1571,12 +1647,15 @@ Respond in JSON:
 
         logger.info({ attempt }, 'Challenge solver: Solution passed verification');
         return {
-          title: smartTruncate((draftParsed?.title as string) || `Solution: ${challenge.title}`, 200),
-          body: finalBody,
-          approach: smartTruncate((draftParsed?.approach as string) || 'Novel approach to the problem', 500),
-          ...(improvesUpon ? { improvesUpon: improvesUpon.id } : {}),
-          ...(draftParsed?.delta ? { delta: smartTruncate(String(draftParsed.delta), 1000) } : {}),
-          ...(draftParsed?.declaredScore != null ? { declaredScore: Number(draftParsed.declaredScore) } : {}),
+          rank: verdict === 'correct' ? SOLUTION_RANK.correct : SOLUTION_RANK.minor,
+          solution: {
+            title: smartTruncate((draftParsed?.title as string) || `Solution: ${challenge.title}`, 200),
+            body: finalBody,
+            approach: smartTruncate((draftParsed?.approach as string) || 'Novel approach to the problem', 500),
+            ...(improvesUpon ? { improvesUpon: improvesUpon.id } : {}),
+            ...(draftParsed?.delta ? { delta: smartTruncate(String(draftParsed.delta), 1000) } : {}),
+            ...(draftParsed?.declaredScore != null ? { declaredScore: Number(draftParsed.declaredScore) } : {}),
+          },
         };
       }
 
@@ -1594,11 +1673,14 @@ Respond in JSON:
         if (improvedBody && improvedBody.length > 200) {
           logger.info('Challenge solver: Using verifier-corrected solution on final attempt');
           return {
-            title: smartTruncate((draftParsed?.title as string) || `Solution: ${challenge.title}`, 200),
-            body: improvedBody,
-            approach: smartTruncate((draftParsed?.approach as string) || 'Novel approach to the problem', 500),
-            ...(improvesUpon ? { improvesUpon: improvesUpon.id } : {}),
-            ...(draftParsed?.delta ? { delta: smartTruncate(String(draftParsed.delta), 1000) } : {}),
+            rank: SOLUTION_RANK.corrected,
+            solution: {
+              title: smartTruncate((draftParsed?.title as string) || `Solution: ${challenge.title}`, 200),
+              body: improvedBody,
+              approach: smartTruncate((draftParsed?.approach as string) || 'Novel approach to the problem', 500),
+              ...(improvesUpon ? { improvesUpon: improvesUpon.id } : {}),
+              ...(draftParsed?.delta ? { delta: smartTruncate(String(draftParsed.delta), 1000) } : {}),
+            },
           };
         }
 
@@ -1616,11 +1698,14 @@ Respond in JSON:
       // Final attempt with unknown verdict — submit with what we have
       logger.info('Challenge solver: Inconclusive verification on final attempt, submitting best effort');
       return {
-        title: smartTruncate((draftParsed?.title as string) || `Solution: ${challenge.title}`, 200),
-        body: draftBody,
-        approach: smartTruncate((draftParsed?.approach as string) || 'Novel approach to the problem', 500),
-        ...(improvesUpon ? { improvesUpon: improvesUpon.id } : {}),
-        ...(draftParsed?.delta ? { delta: smartTruncate(String(draftParsed.delta), 1000) } : {}),
+        rank: SOLUTION_RANK.inconclusive,
+        solution: {
+          title: smartTruncate((draftParsed?.title as string) || `Solution: ${challenge.title}`, 200),
+          body: draftBody,
+          approach: smartTruncate((draftParsed?.approach as string) || 'Novel approach to the problem', 500),
+          ...(improvesUpon ? { improvesUpon: improvesUpon.id } : {}),
+          ...(draftParsed?.delta ? { delta: smartTruncate(String(draftParsed.delta), 1000) } : {}),
+        },
       };
     }
 
@@ -1654,13 +1739,19 @@ Respond in JSON:
     },
     topSubmissions: Array<{ title: string; approach: string; evaluatedScore?: number | null }>,
   ): Promise<GeneratedSolution | null> {
-    const MAX_RETRIES = 1;
+    const { attempts, readOthersFirst, selfCheck } = resolveWorkSettings(persona);
+    const MAX_RETRIES = selfCheck === 'off' ? 0 : selfCheck === 'strict' ? 2 : 1;
+    // Score candidates locally when choosing among several, or when self-check is strict
+    const useLocalVerifier = !!challenge.verifier && (attempts > 1 || selfCheck === 'strict');
+    const minimize = challenge.scoringDirection === 'minimize';
 
     const schemaStr = challenge.solutionSchema
       ? JSON.stringify(challenge.solutionSchema, null, 2)
       : 'No schema provided';
 
-    const competitorContext = topSubmissions.length > 0
+    const competitorContext = !readOthersFirst
+      ? ''
+      : topSubmissions.length > 0
       ? `\n\nExisting submissions (scores to beat):\n${topSubmissions.slice(0, 5).map((s, i) =>
           `${i + 1}. "${s.title}" — ${s.approach} — score: ${s.evaluatedScore ?? 'pending'}`).join('\n')}`
       : '\n\nNo existing submissions — you would be the first.';
@@ -1707,45 +1798,75 @@ REQUIREMENTS:
 OUTPUT FORMAT: Respond with ONLY the Python code, no markdown fences, no explanation.`;
 
     let lastError = '';
+    let best: { code: string; solutionData: Record<string, unknown>; score: number | null } | null = null;
 
-    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-      const retryContext = attempt > 0
-        ? `\n\nYour previous code failed with error: ${lastError}\nFix the issue and try again.`
-        : '';
+    for (let candidate = 0; candidate < attempts; candidate++) {
+      lastError = '';
+      for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+        const retryContext = attempt > 0
+          ? `\n\nYour previous code failed with error: ${lastError}\nFix the issue and try again.`
+          : '';
 
-      logger.info({ attempt }, 'Solver: generating Python code');
-      const codeResponse = await this.complete([
-        { role: 'system', content: `You are a Python optimization expert. Write clean, efficient code. ${persona.preferredTopics.length > 0 ? `Your expertise: ${persona.preferredTopics.join(', ')}.` : ''}` },
-        { role: 'user', content: codeGenPrompt + retryContext },
-      ], 8192);
+        logger.info({ attempt }, 'Solver: generating Python code');
+        const codeResponse = await this.complete([
+          { role: 'system', content: `You are a Python optimization expert. Write clean, efficient code. ${persona.preferredTopics.length > 0 ? `Your expertise: ${persona.preferredTopics.join(', ')}.` : ''}${codeWorkBlock(persona)}` },
+          { role: 'user', content: codeGenPrompt + retryContext },
+        ], 8192);
 
-      this.trackCost('submission', codeResponse.usage);
+        this.trackCost('submission', codeResponse.usage);
 
-      // Extract Python code (strip markdown fences if present)
-      let code = codeResponse.content.trim();
-      code = code.replace(/^```python\n?/m, '').replace(/^```\n?/m, '').replace(/\n?```$/m, '');
+        // Extract Python code (strip markdown fences if present)
+        let code = codeResponse.content.trim();
+        code = code.replace(/^```python\n?/m, '').replace(/^```\n?/m, '').replace(/\n?```$/m, '');
 
-      if (code.length < 50) {
-        lastError = 'Generated code too short';
-        continue;
+        if (code.length < 50) {
+          lastError = 'Generated code too short';
+          continue;
+        }
+
+        // ── Step 2: Execute the solver locally ──
+
+        logger.info({ attempt, codeLength: code.length }, 'Solver: executing Python code');
+        const result = await runSolverCode(code);
+
+        if (!result.success || !result.solutionData) {
+          lastError = result.error || 'Unknown execution error';
+          logger.warn({ attempt, error: lastError, timeMs: result.executionTimeMs }, 'Solver: execution failed');
+          continue;
+        }
+
+        logger.info({ attempt, timeMs: result.executionTimeMs, keys: Object.keys(result.solutionData) }, 'Solver: execution succeeded');
+
+        let score: number | null = null;
+        if (useLocalVerifier) {
+          const check = await runVerifierCode(challenge.verifier!, result.solutionData);
+          if (check.success && typeof check.score === 'number') {
+            score = check.score;
+          } else if (selfCheck === 'strict') {
+            lastError = `Local verifier rejected the output: ${check.error || 'no score'}`;
+            logger.warn({ attempt, error: lastError }, 'Solver: strict self-check failed');
+            continue;
+          }
+          logger.info({ candidate, score }, 'Solver: local verifier score');
+        }
+
+        const better = !best
+          || (score !== null && (best.score === null || (minimize ? score < best.score : score > best.score)));
+        if (better) best = { code, solutionData: result.solutionData, score };
+        break;
       }
+    }
 
-      // ── Step 2: Execute the solver locally ──
+    if (!best) {
+      logger.warn('Solver: QUALITY GATE — failed to generate working solver after all retries');
+      return null;
+    }
 
-      logger.info({ attempt, codeLength: code.length }, 'Solver: executing Python code');
-      const result = await runSolverCode(code);
+    const { code } = best;
 
-      if (!result.success || !result.solutionData) {
-        lastError = result.error || 'Unknown execution error';
-        logger.warn({ attempt, error: lastError, timeMs: result.executionTimeMs }, 'Solver: execution failed');
-        continue;
-      }
+    // ── Step 3: LLM writes the submission text (title, body, approach) ──
 
-      logger.info({ attempt, timeMs: result.executionTimeMs, keys: Object.keys(result.solutionData) }, 'Solver: execution succeeded');
-
-      // ── Step 3: LLM writes the submission text (title, body, approach) ──
-
-      const describePrompt = `You just solved this optimization challenge by writing and running Python code.
+    const describePrompt = `You just solved this optimization challenge by writing and running Python code.
 
 Challenge: ${challenge.title}
 Description: ${challenge.description.slice(0, 500)}
@@ -1782,31 +1903,28 @@ QUALITY REQUIREMENTS:
 - Describe WHAT the algorithm does and WHY each design choice matters
 - Body should be 800-3000 chars (excluding code block)`;
 
-      const descResponse = await this.complete([
-        { role: 'system', content: this.buildPersonaPrompt(persona) },
-        { role: 'user', content: describePrompt },
-      ], 8192);
+    const descResponse = await this.complete([
+      { role: 'system', content: this.buildPersonaPrompt(persona) },
+      { role: 'user', content: describePrompt },
+    ], 8192);
 
-      this.trackCost('submission', descResponse.usage);
+    this.trackCost('submission', descResponse.usage);
 
-      const desc = this.extractJSON(descResponse.content);
+    const desc = this.extractJSON(descResponse.content);
 
-      let body = (desc?.body as string) || '';
-      // Ensure the code is included in the body — append if missing
-      if (!body.includes('```python') && !body.includes('```py')) {
-        body += `\n\n### Code\n\n\`\`\`python\n${code}\n\`\`\``;
-      }
-
-      return {
-        title: smartTruncate((desc?.title as string) || `Solver: ${challenge.title}`, 200),
-        body,
-        approach: smartTruncate((desc?.approach as string) || 'Numerical optimization via Python solver', 500),
-        solutionData: result.solutionData,
-      };
+    let body = (desc?.body as string) || '';
+    // Ensure the code is included in the body — append if missing
+    if (!body.includes('```python') && !body.includes('```py')) {
+      body += `\n\n### Code\n\n\`\`\`python\n${code}\n\`\`\``;
     }
 
-    logger.warn('Solver: QUALITY GATE — failed to generate working solver after all retries');
-    return null;
+    return {
+      title: smartTruncate((desc?.title as string) || `Solver: ${challenge.title}`, 200),
+      body,
+      approach: smartTruncate((desc?.approach as string) || 'Numerical optimization via Python solver', 500),
+      solutionData: best.solutionData,
+      ...(typeof best.score === 'number' && Number.isFinite(best.score) ? { localScore: best.score } : {}),
+    };
   }
 
   /**
@@ -1849,7 +1967,7 @@ Respond in JSON:
   "body": "your critique (markdown, may include $LaTeX$, 200-800 chars)",
   "confidence": 0.0-1.0,
   "evidenceAnchor": "the specific claim or step you are responding to"
-}`;
+}${reviewWorkBlock(persona)}`;
 
     let userPrompt = `CHALLENGE: ${challenge.title}
 Tags: ${challenge.tags.join(', ')}
@@ -2136,4 +2254,25 @@ export function getOrCreateLLMClient(override?: AgentLLMOverride): LLMClient {
     logger.info({ model: override.model }, 'Created per-agent LLM client');
   }
   return client;
+}
+
+/** Read soundness fields from a parsed review. Invalid or missing values are dropped. */
+/** `{ position }` when the model returned a usable one, else {} (so the key is absent). */
+function withPosition(parsed: Record<string, unknown>): { position?: PositionProposal } {
+  const position = parsePositionProposal(parsed.position);
+  return position ? { position } : {};
+}
+
+function withPositionUpdate(parsed: Record<string, unknown>, offered: SitePosition[]): { positionUpdate?: PositionUpdate } {
+  const positionUpdate = parsePositionUpdate(parsed.positionUpdate, offered);
+  return positionUpdate ? { positionUpdate } : {};
+}
+
+export function parseSoundness(parsed: Record<string, unknown>): { soundness?: 'sound' | 'flawed'; soundnessConfidence?: number } {
+  const raw = typeof parsed.soundness === 'string' ? parsed.soundness.trim().toLowerCase() : '';
+  if (raw !== 'sound' && raw !== 'flawed') return {};
+  const c = Number(parsed.soundnessConfidence);
+  return Number.isFinite(c)
+    ? { soundness: raw, soundnessConfidence: Math.min(1, Math.max(0, c)) }
+    : { soundness: raw };
 }

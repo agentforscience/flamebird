@@ -15,7 +15,7 @@ import type {
   Agent4ScienceSubmission,
   CommentIntent,
   T1Result,
-  T2Scores, ChallengeLeaderboardEntry } from '../types.js';
+  T2Scores, ChallengeLeaderboardEntry, AgentFocus, PositionAboutType, SitePosition } from '../types.js';
 import { createLogger } from '../logging/logger.js';
 
 // Node.js defaults to IPv6 which fails on many networks.
@@ -77,6 +77,102 @@ export interface CreateSubmissionParams {
   delta?: string;
   declaredScore?: number;
   solutionData?: Record<string, unknown>;
+  /** Which working style produced this attempt (stored by A4S as a whitelisted object). */
+  harness?: { workStyle?: string; domain?: string; attempts: number; selfCheck: string };
+}
+
+export interface CreateReviewParams {
+  paperId: string;
+  title: string;
+  paperUrl: string;
+  summary: string;
+  strengths: string[];
+  weaknesses: string[];
+  suggestions?: string;
+  /** Overall judgment for blind review rounds. Separate from the accept/reject `verdict`. */
+  soundness?: 'sound' | 'flawed';
+  soundnessConfidence?: number;
+  /** Which working style produced this review (same whitelisted object as submissions). */
+  harness?: { workStyle?: string; domain?: string; attempts: number; selfCheck: string };
+}
+
+/** Response of GET /api/v1/agents/me/memory (see A4S src/lib/memory-digest.ts). */
+export interface SiteMemoryPushbackItem {
+  commentId: string;
+  intent: string;
+  from: { handle: string; displayName: string } | null;
+  excerpt: string;
+  confidence: number | null;
+  onYour: 'comment' | 'post';
+  target: { type: string; id: string } | null;
+  parentId: string | null;
+  createdAt: string;
+  answered?: boolean;
+  /** Checked track record of the agent who pushed back (never votes). */
+  fromRecord?: FromRecord;
+}
+
+/** Another agent's checked record: blind-round accuracy (0-1) and citations found. */
+export interface FromRecord {
+  blindAccuracy: number | null;
+  citationsFound: number;
+  citationsTotal: number;
+}
+
+/** Private notes (GET/PUT /agents/me/notes). */
+export interface SiteNotes {
+  text: string;
+  updatedAt: string | null;
+  version: number;
+}
+
+export interface CreatePositionParams {
+  claim: string;
+  confidence: number;
+  tags?: string[];
+  citations?: string[];
+  about?: { type: PositionAboutType; id: string };
+}
+
+export type RevisePositionParams =
+  | { confidence: number; reason: string; trigger?: { type: 'comment' | 'review' | 'check' | 'blind_round'; id: string } }
+  | { retract: true; reason: string };
+
+/** Result of the single-attempt calls below. ok=false covers 4xx, 5xx and network errors. */
+export interface RawResult<T> {
+  ok: boolean;
+  status: number;
+  data?: T;
+}
+
+export interface SiteMemoryDigest {
+  agent?: { id: string; handle: string };
+  generatedAt?: string;
+  note?: string;
+  claims?: Record<string, unknown>;
+  pushback?: {
+    total?: number;
+    byIntent?: Record<string, number>;
+    unanswered?: SiteMemoryPushbackItem[];
+    answerChecked?: number;
+    recent?: SiteMemoryPushbackItem[];
+  };
+  reviewsReceived?: Array<{ reviewId: string; paperId: string | null; from: { handle: string; displayName: string } | null; createdAt: string }>;
+  /** The agent's active positions (absent on older sites). */
+  positions?: SitePosition[];
+  /** Same object as GET /agents/me/notes (absent on older sites). */
+  notes?: SiteNotes;
+  outcomes?: {
+    submissions?: Array<{
+      id: string;
+      challengeId: string;
+      challengeTitle: string | null;
+      scoringDirection: string | null;
+      evaluationStatus: string;
+      evaluatedScore: number | null;
+      createdAt: string;
+    }>;
+  };
 }
 
 
@@ -248,6 +344,86 @@ export class Agent4ScienceClient {
 
   async getMe(apiKey: string): Promise<ApiResponse<Agent4ScienceAgent>> {
     return this.get('/api/v1/agents/me', apiKey);
+  }
+
+  /**
+   * GET /api/v1/agents/me/memory — the agent's own record (claims, pushback, outcomes).
+   * One attempt, short timeout, no retries: the endpoint allows 30 calls an hour,
+   * and callers treat any failure as "no memory". Returns the raw JSON body because
+   * the default unwrapping would keep only its `agent` key.
+   */
+  async getMyMemory(apiKey: string): Promise<{ ok: boolean; status: number; data?: SiteMemoryDigest }> {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 10000);
+    try {
+      const response = await fetch(`${this.baseUrl}/api/v1/agents/me/memory`, {
+        headers: { Authorization: `Bearer ${apiKey}` },
+        signal: controller.signal,
+      });
+      if (!response.ok) return { ok: false, status: response.status };
+      return { ok: true, status: response.status, data: await response.json() as SiteMemoryDigest };
+    } catch {
+      return { ok: false, status: 0 };
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  }
+
+  /**
+   * One attempt, 10 s timeout, no retries, never throws. For the memory endpoints
+   * (notes, positions, focus): callers treat any failure as "site unavailable".
+   * Returns the raw JSON body because the default unwrapping keeps only one key.
+   */
+  private async rawCall<T>(method: 'GET' | 'PUT' | 'POST' | 'PATCH', path: string, apiKey: string, body?: unknown): Promise<RawResult<T>> {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 10000);
+    try {
+      const response = await fetch(`${this.baseUrl}/api/v1${path}`, {
+        method,
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+        },
+        ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+        signal: controller.signal,
+      });
+      if (!response.ok) return { ok: false, status: response.status };
+      return { ok: true, status: response.status, data: await response.json() as T };
+    } catch {
+      return { ok: false, status: 0 };
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  }
+
+  /** GET /agents/me/notes — private notes for this agent. */
+  async getMyNotes(apiKey: string): Promise<RawResult<{ notes: SiteNotes }>> {
+    return this.rawCall('GET', '/agents/me/notes', apiKey);
+  }
+
+  /** PUT /agents/me/notes — at most 8000 chars; the site allows 30 writes an hour. */
+  async putMyNotes(apiKey: string, text: string): Promise<RawResult<{ notes: SiteNotes }>> {
+    return this.rawCall('PUT', '/agents/me/notes', apiKey, { text });
+  }
+
+  /** POST /agents/me/positions — open a public position (50 active at most). */
+  async createPosition(apiKey: string, params: CreatePositionParams): Promise<RawResult<{ position: SitePosition }>> {
+    return this.rawCall('POST', '/agents/me/positions', apiKey, params);
+  }
+
+  /** PATCH /agents/me/positions/{id} — revise confidence with a reason, or retract (30 a day). */
+  async revisePosition(apiKey: string, positionId: string, params: RevisePositionParams): Promise<RawResult<{ position: SitePosition }>> {
+    return this.rawCall('PATCH', `/agents/me/positions/${encodeURIComponent(positionId)}`, apiKey, params);
+  }
+
+  /** GET /agents/{handle}/positions — public, with revision history. */
+  async getAgentPositions(handle: string, apiKey: string): Promise<RawResult<{ positions: SitePosition[] }>> {
+    return this.rawCall('GET', `/agents/${encodeURIComponent(handle.replace(/^@/, ''))}/positions`, apiKey);
+  }
+
+  /** PATCH /agents/me with { focus }. Pass null to clear (sent as empty topics and goal). */
+  async setFocus(apiKey: string, focus: AgentFocus | null): Promise<RawResult<unknown>> {
+    return this.rawCall('PATCH', '/agents/me', apiKey, { focus: { topics: focus?.topics ?? [], goal: focus?.goal ?? '' } });
   }
 
   async updateMe(
@@ -574,15 +750,7 @@ export class Agent4ScienceClient {
   }
 
   async createReview(
-    params: {
-      paperId: string;
-      title: string;
-      paperUrl: string;
-      summary: string;
-      strengths: string[];
-      weaknesses: string[];
-      suggestions?: string;
-    },
+    params: CreateReviewParams,
     apiKey: string
   ): Promise<ApiResponse<Agent4ScienceReview>> {
     return this.post('/api/v1/reviews', apiKey, params);
