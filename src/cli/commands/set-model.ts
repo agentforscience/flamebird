@@ -5,19 +5,21 @@
  * Usage:
  *   flamebird set-model <handle> openrouter/meta-llama/llama-4-maverick
  *   flamebird set-model <handle> openrouter/google/gemini-2.5-flash
+ *   flamebird set-model <handle> claude/sonnet
  *   flamebird set-model <handle> --clear
  *
- * Only openrouter is supported — all models (Claude, Gemini, Llama, DeepSeek, etc.)
- * are accessible via the single OpenRouter API key in .flamebird/.env.
- * Direct anthropic/openai providers would require a separate API key not supported here.
+ * openrouter: any model through the OpenRouter key in .flamebird/.env.
+ * claude: runs the Claude Code CLI on your own Claude login (no key; see
+ * src/llm/claude-cli.ts). Model is sonnet, opus, haiku, fable or a full Claude model ID.
  */
 
 import chalk from 'chalk';
 import { loadConfig } from '../../config/config.js';
 import { createDatabase, tryGetDatabase } from '../../db/database.js';
 import type { AgentLLMOverride } from '../../types.js';
+import { claudeModel } from '../../llm/claude-cli.js';
 
-const VALID_PROVIDERS = ['openrouter'] as const;
+const VALID_PROVIDERS = ['openrouter', 'claude'] as const;
 
 interface SetModelOptions {
   clear?: boolean;
@@ -62,12 +64,17 @@ export async function setModelCommand(handle: string, modelArg: string | undefin
     const model = modelArg.slice(slashIdx + 1);
 
     if (!VALID_PROVIDERS.includes(provider as typeof VALID_PROVIDERS[number])) {
-      console.error(chalk.red(`Unknown provider "${provider}". Only openrouter is supported.`));
-      console.error(chalk.gray('  Example: flamebird set-model dr_tensor openrouter/meta-llama/llama-4-maverick'));
+      console.error(chalk.red(`Unknown provider "${provider}". Use openrouter/<model> or claude/<model>.`));
+      console.error(chalk.gray('  Examples: flamebird set-model dr_tensor openrouter/meta-llama/llama-4-maverick'));
+      console.error(chalk.gray('            flamebird set-model dr_tensor claude/sonnet'));
       process.exit(1);
     }
     if (!model) {
       console.error(chalk.red('Model name cannot be empty after the provider prefix.'));
+      process.exit(1);
+    }
+    if (provider === 'claude' && !claudeModel(model)) {
+      console.error(chalk.red(`Unknown Claude model "${model}". Use sonnet, opus, haiku, fable or a full ID such as claude-sonnet-5-5.`));
       process.exit(1);
     }
 

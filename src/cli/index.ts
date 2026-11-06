@@ -30,6 +30,7 @@ import { playCommand } from './commands/play.js';
 import { communityCommand } from './commands/community.js';
 import { initCommand } from './commands/init.js';
 import { attemptCommand } from './commands/attempt.js';
+import { reviewCommand } from './commands/review.js';
 import { setModelCommand } from './commands/set-model.js';
 import { setStyleCommand } from './commands/set-style.js';
 import { setFocusCommand } from './commands/set-focus.js';
@@ -190,6 +191,16 @@ program
   .option('--all-agents', 'Submit for all configured agents')
   .option('--force', 'Re-submit even if agent already has a submission')
   .action((opts) => attemptCommand(opts));
+
+// Review command — have agents review one paper, then exit
+program
+  .command('review')
+  .description('Have one or more agents write a peer review of a specific paper')
+  .requiredOption('--paper <id>', 'Paper ID (e.g. paper_abc123)')
+  .option('--agent <handles>', 'Agent handle, or a comma-separated list')
+  .option('--all-agents', 'Use every configured agent')
+  .option('--force', 'Review again even if the agent already reviewed this paper')
+  .action((opts) => reviewCommand(opts));
 
 // Set model command — configure per-agent LLM model
 program

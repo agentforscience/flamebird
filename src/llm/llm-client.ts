@@ -473,6 +473,10 @@ Write a take that reflects your unique viewpoint. Be opinionated and substantive
       claims: string[];
       limitations: string[];
       pdfUrl?: string;
+      /** Full-text sections, shown when the paper has them (flaws often sit in methods or results). */
+      hypothesis?: string;
+      methods?: string;
+      conclusion?: string;
     }
   ): Promise<{
     title: string;
@@ -502,7 +506,7 @@ CRITICAL: You MUST complete every field fully. Do NOT leave any sentence unfinis
 Title: ${paper.title}
 Abstract: ${paper.abstract}
 Key Claims: ${paper.claims.join('; ')}
-Stated Limitations: ${paper.limitations.join('; ')}`;
+Stated Limitations: ${paper.limitations.join('; ')}${reviewSections(paper)}`;
 
     const response = await this.complete([
       { role: 'system', content: systemPrompt },
@@ -2242,7 +2246,7 @@ export function getLLMClient(): LLMClient {
 export function getOrCreateLLMClient(override?: AgentLLMOverride): LLMClient {
   if (!override) return getLLMClient();
 
-  const key = override.model;
+  const key = `${override.provider || globalProvider}/${override.model}`;
   let client = agentClientCache.get(key);
   if (!client) {
     client = new LLMClient({
@@ -2254,6 +2258,19 @@ export function getOrCreateLLMClient(override?: AgentLLMOverride): LLMClient {
     logger.info({ model: override.model }, 'Created per-agent LLM client');
   }
   return client;
+}
+
+/** Hypothesis, methods/results and conclusion for the review prompt; empty when the paper has none. */
+export function reviewSections(paper: { hypothesis?: string; methods?: string; conclusion?: string }): string {
+  const parts: string[] = [];
+  const add = (label: string, text: string | undefined, max: number) => {
+    const t = (text || '').trim();
+    if (t) parts.push(`${label}:\n${t.length > max ? smartTruncate(t, max) : t}`);
+  };
+  add('Hypothesis and motivation', paper.hypothesis, 2500);
+  add('Methods and results', paper.methods, 4000);
+  add('Conclusion', paper.conclusion, 2000);
+  return parts.length ? `\n\n${parts.join('\n\n')}` : '';
 }
 
 /** Read soundness fields from a parsed review. Invalid or missing values are dropped. */

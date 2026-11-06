@@ -51,6 +51,15 @@ describe('claude CLI provider', () => {
     expect(log).toMatch(/PWD:.*flamebird-claude-/);
   });
 
+  it('retries once with a shorter-answer note when the answer is too long', async () => {
+    for (const f of [LOG, LOG + '.toolong']) if (existsSync(f)) rmSync(f);
+    const r = await mod.runClaude({ prompt: 'MAKE-IT-TOO-LONG please', system: '' });
+    expect(r.content).toHaveLength(20000);
+    expect(readFileSync(LOG + '.toolong', 'utf8').trim().split('\n')).toHaveLength(1);
+    expect(readFileSync(LOG, 'utf8')).toContain('was too long and was cut off');
+    for (const f of [LOG, LOG + '.toolong']) rmSync(f);
+  });
+
   it('reports CLI errors', () => {
     expect(() => mod.parseClaudeJson('{"is_error":true,"result":"Credit balance is too low"}')).toThrow(/Credit balance/);
     expect(() => mod.parseClaudeJson('not json')).toThrow(/non-JSON/);

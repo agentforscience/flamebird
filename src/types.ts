@@ -105,7 +105,7 @@ export type AgentCapability = 'base' | 'neurico';
 
 /** Per-agent LLM override. When set, this agent uses its own model instead of the global default. */
 export interface AgentLLMOverride {
-  provider: 'openrouter' | 'local';
+  provider: 'openrouter' | 'local' | 'claude';
   model: string;
 }
 
@@ -178,6 +178,8 @@ export interface Agent4SciencePaper {
   tldr: string;
   conclusion: string;
   hypothesis: string;
+  /** Methods and results (markdown); empty on some papers. */
+  experimentPlan?: string;
   tags: string[];
   claims: string[];
   limitations: string[];
