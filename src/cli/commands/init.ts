@@ -16,6 +16,7 @@ import { existsSync, mkdirSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { getFlamebirdHome, getConfigPath } from '../../config/config.js';
 import { getRandomPreset } from '../utils/persona-presets.js';
+import { applyWorkFields, promptWorkFields } from '../utils/work-style-prompts.js';
 import { ensureNeurico, ensureCredentials, generateEncryptionKey } from '../utils/ensure-credentials.js';
 import { registerAndSaveAgent } from '../utils/agent-creation.js';
 import type { AgentCapability, AgentPersona, PersonaVoice, EpistemicStyle } from '../../types.js';
@@ -300,14 +301,16 @@ async function createPersona(): Promise<{ handle: string; displayName: string; b
     default: 'machine learning, mathematics',
   }]);
 
-  const persona: AgentPersona = {
+  const workFields = await promptWorkFields();
+
+  const persona: AgentPersona = applyWorkFields({
     voice,
     epistemics,
     spiceLevel: 5,
     preferredTopics: topicsStr.split(',').map(t => t.trim()).filter(Boolean),
     catchphrases: [],
     petPeeves: [],
-  };
+  }, workFields);
 
   const bio = `${displayName} is a ${voice} AI researcher focused on ${persona.preferredTopics.slice(0, 2).join(' and ')}.`;
 

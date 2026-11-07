@@ -20,6 +20,9 @@ import { createAgent4ScienceClient, getAgent4ScienceClient } from '../../api/age
 import { createLLMClient, getOrCreateLLMClient } from '../../llm/llm-client.js';
 import { createRateLimiter } from '../../rate-limit/rate-limiter.js';
 import { createActionExecutor } from '../../actions/action-executor.js';
+import { describeWorkProfile, toHarness, workLogFields, workProfileFor } from '../../llm/work-style.js';
+import { attachSiteMemory } from '../../utils/site-memory.js';
+import { beginNotesSession, endNotesSession } from '../../utils/site-notes.js';
 
 export async function attemptCommand(opts: {
   agent?: string;
@@ -120,8 +123,18 @@ export async function attemptCommand(opts: {
 
       const modelLabel = llmOverride?.model ?? config.llm.model;
       console.log(chalk.bold(`\n@${handle}`) + chalk.dim(` (${modelLabel})`));
+      const workProfile = workProfileFor(runtime.config.persona);
+      console.log(chalk.dim(`  Style:    ${describeWorkProfile(runtime.config.persona)}`));
+      const logWork = (status: 'submitted' | 'blocked' | 'failed', resultId?: string, error?: string, score?: number) =>
+        db.recordWork({
+          agentId, kind: 'submission', targetId: challengeId, resultId, status, error, ...workLogFields(workProfile),
+          score: score ?? null, scoringDirection: challenge.scoringDirection ?? null,
+        });
 
       try {
+        await beginNotesSession(agentId, apiKey, runtime.config.persona);
+        await attachSiteMemory(runtime.config.persona, agentId, apiKey);
+
         let solution;
 
         if (isDeterministic) {
@@ -154,6 +167,7 @@ export async function attemptCommand(opts: {
 
         if (!solution) {
           console.log(chalk.yellow(`  @${handle}: quality gate blocked — no submission made`));
+          logWork('blocked');
           overallSuccess = false;
           continue;
         }
@@ -167,15 +181,18 @@ export async function attemptCommand(opts: {
           body: solution.body,
           approach: solution.approach,
           solutionData: solution.solutionData,
+          harness: toHarness(workProfile),
         }, apiKey);
 
         if (!submitResult.success) {
           console.log(chalk.red(`  @${handle}: API error — ${submitResult.error}`));
+          logWork('failed', undefined, submitResult.error);
           overallSuccess = false;
           continue;
         }
 
         const submissionId = submitResult.data?.id;
+        logWork('submitted', submissionId, undefined, solution.localScore ?? solution.declaredScore);
         console.log(chalk.dim(`  Submission: ${submissionId}`));
 
         db.recordEngagement(agentId, challengeId, 'challenge', 'submission');
@@ -183,7 +200,11 @@ export async function attemptCommand(opts: {
 
       } catch (err) {
         console.error(chalk.red(`  @${handle}: error — ${err instanceof Error ? err.message : err}`));
+        logWork('failed', undefined, err instanceof Error ? err.message : String(err));
         overallSuccess = false;
+      } finally {
+        // Run end: write consolidated site notes once (guarded; silent on failure)
+        await endNotesSession(agentId, apiKey, handle, runtime.config.persona);
       }
     }
 

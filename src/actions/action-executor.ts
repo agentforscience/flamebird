@@ -12,7 +12,7 @@ import type {
   Agent4ScienceNotification,
   CommentIntent,
 } from '../types.js';
-import { getAgent4ScienceClient } from '../api/agent4science-client.js';
+import { getAgent4ScienceClient, type CreateReviewParams, type CreateSubmissionParams } from '../api/agent4science-client.js';
 import { smartTruncate } from '../utils/truncate.js';
 import { assessTextQuality } from '../utils/content-quality.js';
 import { getAgentManager } from '../agents/agent-manager.js';
@@ -20,6 +20,8 @@ import { getDatabase } from '../db/database.js';
 import { getRateLimiter } from '../rate-limit/rate-limiter.js';
 import { updateAgentMemory } from '../utils/memory-updater.js';
 import { createLogger } from '../logging/logger.js';
+import { toHarness, workLogFields, workProfileFor, type WorkProfile } from '../llm/work-style.js';
+import { applyPositionEffects } from '../utils/positions.js';
 
 const logger = createLogger('executor');
 
@@ -33,6 +35,36 @@ function agentName(agentId: string): string {
   } catch {
     return agentId.slice(-12);
   }
+}
+
+/** Review body for POST /reviews from a queued payload. Only known fields are sent. */
+export function buildReviewParams(p: CreateReviewParams, profile: WorkProfile | null): CreateReviewParams {
+  return {
+    paperId: p.paperId,
+    title: p.title,
+    paperUrl: p.paperUrl,
+    summary: p.summary,
+    strengths: p.strengths,
+    weaknesses: p.weaknesses,
+    ...(p.suggestions ? { suggestions: p.suggestions } : {}),
+    ...(p.soundness ? { soundness: p.soundness } : {}),
+    ...(typeof p.soundnessConfidence === 'number' ? { soundnessConfidence: p.soundnessConfidence } : {}),
+    ...(profile ? { harness: toHarness(profile) } : {}),
+  };
+}
+
+/** Submission body for POST /challenges/:id/submissions from a queued payload. */
+export function buildSubmissionParams(p: CreateSubmissionParams, profile: WorkProfile | null): CreateSubmissionParams {
+  return {
+    title: p.title,
+    body: p.body,
+    approach: p.approach,
+    ...(p.improvesUpon ? { improvesUpon: p.improvesUpon } : {}),
+    ...(p.delta ? { delta: p.delta } : {}),
+    ...(p.declaredScore != null ? { declaredScore: p.declaredScore } : {}),
+    ...(p.solutionData ? { solutionData: p.solutionData } : {}),
+    ...(profile ? { harness: toHarness(profile) } : {}),
+  };
 }
 
 export interface ActionExecutorConfig {
@@ -298,6 +330,9 @@ export class ActionExecutor {
           logger.debug({ err: memErr, actionId: action.id }, 'Memory update failed (non-fatal)');
         }
 
+        // Open or revise a public position carried by the payload (never fails the action)
+        await applyPositionEffects(action, result, apiKey).catch(() => undefined);
+
         logger.info(`Executed ${action.type}: ${agentName(action.agentId)} -> ${action.targetId}`);
       } else {
         throw new Error(result.error || 'Action failed');
@@ -550,6 +585,14 @@ export class ActionExecutor {
     };
   }
 
+  /** Working profile stored with a queued action, or the agent's current one for older queued actions. */
+  private profileFor(action: QueuedAction): WorkProfile | null {
+    const stored = (action.payload as { workProfile?: WorkProfile }).workProfile;
+    if (stored) return stored;
+    const persona = getAgentManager().getRuntime(action.agentId)?.config.persona;
+    return persona ? workProfileFor(persona) : null;
+  }
+
   /**
    * Execute a peer review action
    */
@@ -558,25 +601,20 @@ export class ActionExecutor {
     apiKey: string,
     client: ReturnType<typeof getAgent4ScienceClient>
   ): Promise<ActionResult> {
-    const reviewData = action.payload as {
-      paperId: string;
-      title: string;
-      paperUrl: string;
-      summary: string;
-      strengths: string[];
-      weaknesses: string[];
-      suggestions?: string;
-    };
+    const p = action.payload as unknown as CreateReviewParams;
+    const reviewData = buildReviewParams(p, this.profileFor(action));
 
     const result = await client.createReview(reviewData, apiKey);
 
     if (!result.success) {
       return { success: false, actionId: action.id, error: result.error };
     }
+    const reviewId = (result.data as { id?: string })?.id;
+    this.recordWork(action, 'review', reviewId, { soundness: p.soundness ?? null, soundnessConfidence: p.soundnessConfidence ?? null });
     return {
       success: true,
       actionId: action.id,
-      responseId: (result.data as { id?: string })?.id,
+      responseId: reviewId,
     };
   }
 
@@ -698,15 +736,7 @@ export class ActionExecutor {
     apiKey: string,
     client: ReturnType<typeof getAgent4ScienceClient>
   ): Promise<ActionResult> {
-    const submissionData = action.payload as {
-      title: string;
-      body: string;
-      approach: string;
-      improvesUpon?: string;
-      delta?: string;
-      declaredScore?: number;
-      solutionData?: Record<string, unknown>;
-    };
+    const submissionData = buildSubmissionParams(action.payload as unknown as CreateSubmissionParams, this.profileFor(action));
 
     // targetId is the challengeId
     const result = await client.createSubmission(
@@ -720,6 +750,8 @@ export class ActionExecutor {
     }
 
     const submissionId = result.data?.id;
+    const meta = action.payload as { localScore?: number; scoringDirection?: string };
+    this.recordWork(action, 'submission', submissionId, { score: meta.localScore ?? submissionData.declaredScore ?? null, scoringDirection: meta.scoringDirection ?? null });
     logger.info(`Created submission: ${submissionId} for challenge ${action.targetId}`);
 
     // Trigger server-side evaluation (T1 gates + T2 peer signal)
@@ -728,6 +760,9 @@ export class ActionExecutor {
         const evalResult = await client.evaluateSubmission(submissionId, apiKey);
         if (evalResult.success) {
           const evalData = evalResult.data?.submission;
+          if (typeof evalData?.evaluatedScore === 'number') {
+            try { getDatabase().setWorkScore(submissionId, evalData.evaluatedScore); } catch { /* non-fatal */ }
+          }
           logger.info({
             submissionId,
             evaluationStatus: evalData?.evaluationStatus,
@@ -747,6 +782,30 @@ export class ActionExecutor {
       actionId: action.id,
       responseId: submissionId,
     };
+  }
+
+  /** Write a work-log row for a posted submission or review. Never fails the action. */
+  private recordWork(
+    action: QueuedAction,
+    kind: 'submission' | 'review',
+    resultId: string | undefined,
+    extra: { soundness?: string | null; soundnessConfidence?: number | null; score?: number | null; scoringDirection?: string | null } = {}
+  ): void {
+    try {
+      const profile = this.profileFor(action);
+      if (!profile) return;
+      getDatabase().recordWork({
+        agentId: action.agentId,
+        kind,
+        targetId: kind === 'review' ? String((action.payload as { paperId?: string }).paperId ?? action.targetId) : action.targetId,
+        resultId: resultId ?? null,
+        status: 'submitted',
+        ...workLogFields(profile),
+        ...extra,
+      });
+    } catch (err) {
+      logger.debug({ err, actionId: action.id }, 'Work log write failed (non-fatal)');
+    }
   }
 
   /**

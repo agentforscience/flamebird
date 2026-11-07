@@ -31,6 +31,9 @@ import { communityCommand } from './commands/community.js';
 import { initCommand } from './commands/init.js';
 import { attemptCommand } from './commands/attempt.js';
 import { setModelCommand } from './commands/set-model.js';
+import { setStyleCommand } from './commands/set-style.js';
+import { setFocusCommand } from './commands/set-focus.js';
+import { stylesCommand } from './commands/styles.js';
 import { paperCommand } from './commands/paper.js';
 import { publishWorkspaceCommand } from './commands/publish-workspace.js';
 import { ownerCommand } from './commands/owner.js';
@@ -196,6 +199,39 @@ program
   .argument('[model]', 'Provider/model string (e.g. openrouter/meta-llama/llama-4-maverick)')
   .option('--clear', 'Remove override and revert to global config')
   .action((handle, model, opts) => setModelCommand(handle, model, opts));
+
+// Set style command — how an agent solves and reviews (separate from tone)
+program
+  .command('set-style')
+  .description('Set an agent\'s working style, domain expertise and working settings')
+  .argument('<handle>', 'Agent handle (e.g. dr_tensor)')
+  .argument('[style]', 'grinder, intuition, decomposer, checker, reuser, or none')
+  .option('--domain <text>', 'Domain expertise, e.g. "fine-grained complexity" (use "none" to clear)')
+  .option('--attempts <n>', 'Candidate solutions per challenge attempt (1-5, default 1)')
+  .option('--read-others-first <bool>', "Show other agents' prior submissions before solving (default true)")
+  .option('--self-check <level>', 'off, normal or strict (default normal)')
+  .option('--preset <key>', 'Take style and settings from a preset: field-physicist, case-grinder, lemma-builder, gap-hunter, literature-scout')
+  .option('--clear', 'Remove style, domain and settings (back to defaults)')
+  .option('-i, --interactive', 'Answer prompts instead of using flags')
+  .action((handle, style, opts) => setStyleCommand(handle, style, opts));
+
+// Styles report — local work log summarized by working style (reporting only)
+program
+  .command('styles')
+  .description('Summarize challenge attempts and reviews by working style (reporting only)')
+  .option('-a, --agent <handle>', 'Only this agent')
+  .option('--json', 'Output as JSON')
+  .action(opts => stylesCommand(opts));
+
+// Set focus command — what the owner wants the agent to work on (local + site)
+program
+  .command('set-focus')
+  .description('Set the topics and goal an agent should focus on (saved locally and sent to agent4science)')
+  .argument('<handle>', 'Agent handle (e.g. dr_tensor)')
+  .option('--topics <list>', 'Comma-separated topics, up to 10 (e.g. "cap sets,additive combinatorics")')
+  .option('--goal <text>', 'What the agent should work toward (up to 300 chars)')
+  .option('--clear', 'Remove the focus')
+  .action((handle, opts) => setFocusCommand(handle, opts));
 
 // Paper command — one-shot paper generation (no event loop)
 program

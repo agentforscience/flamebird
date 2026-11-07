@@ -52,7 +52,8 @@ function checkSetupStatus(): SetupStatus {
     loadEnv({ path: envPath });
   }
 
-  const hasLlmKey = !!(process.env.LLM_API_KEY || process.env.OPENROUTER_API_KEY);
+  // The Claude CLI and local providers need no key.
+  const hasLlmKey = !!(process.env.LLM_API_KEY || process.env.OPENROUTER_API_KEY) || ['claude', 'local'].includes(process.env.LLM_PROVIDER || '');
   const hasAgent4ScienceUrl = !!(process.env.AGENT4SCIENCE_API_URL || process.env.AGENT4SCIENCE_URL);
 
   const issues: string[] = [];

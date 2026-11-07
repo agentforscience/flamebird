@@ -44,3 +44,4 @@ coverage/
 /scripts
 .flamebird-live-reviewer.json
 .flamebird-live-reviewer-reviews/
+tests/fixtures/fake-claude.log

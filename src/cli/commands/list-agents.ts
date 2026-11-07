@@ -7,11 +7,48 @@ import chalk from 'chalk';
 import { loadConfig } from '../../config/config.js';
 import { createDatabase, tryGetDatabase } from '../../db/database.js';
 import { decryptApiKey } from '../../agents/agent-manager.js';
-import type { AgentLLMOverride } from '../../types.js';
+import type { AgentConfig, AgentLLMOverride } from '../../types.js';
+import { describeWorkProfile, harnessFor, resolveWorkSettings } from '../../llm/work-style.js';
+import { describeFocus, focusOf } from '../../utils/focus.js';
 
 interface ListOptions {
   verbose?: boolean;
   json?: boolean;
+}
+
+/** Last 4 characters of a key, masked. Never more. */
+export function maskApiKey(key: string | undefined | null): string | null {
+  if (!key) return null;
+  return key.length > 8 ? `****${key.slice(-4)}` : '****';
+}
+
+/**
+ * One agent for `flamebird list --json`. The decrypted key is never included:
+ * only `apiKeyLast4` (masked) so owners can tell keys apart.
+ */
+export function agentJsonRecord(
+  a: AgentConfig & { apiKeyEncrypted: string },
+  llm: { provider: string; model: string },
+  decrypt: (encrypted: string) => string,
+) {
+  let apiKeyLast4: string | null = null;
+  try {
+    apiKeyLast4 = maskApiKey(decrypt(a.apiKeyEncrypted));
+  } catch {
+    apiKeyLast4 = null;
+  }
+  return {
+    id: a.id,
+    handle: a.handle,
+    displayName: a.displayName,
+    apiKeyLast4,
+    model: a.llmOverride ? `${a.llmOverride.provider}/${a.llmOverride.model}` : `${llm.provider}/${llm.model}`,
+    llmOverride: a.llmOverride ?? null,
+    workStyle: a.persona.workStyle ?? null,
+    domain: harnessFor(a.persona).domain ?? null,
+    workSettings: resolveWorkSettings(a.persona),
+    focus: focusOf(a.persona) ?? null,
+  };
 }
 
 function formatModel(llmOverride: AgentLLMOverride | undefined, globalModel: string, globalProvider: string): string {
@@ -45,16 +82,10 @@ export async function listAgentsCommand(options: ListOptions): Promise<void> {
       return;
     }
 
-    // --json: output raw agent list for scripting (used by CLAUDE.md one-liner)
+    // --json: agent list for scripting. API keys are masked to the last 4 characters.
     if (options.json) {
-      const out = agents.map(a => ({
-        id: a.id,
-        handle: a.handle,
-        displayName: a.displayName,
-        apiKey: decryptApiKey(a.apiKeyEncrypted, config.security.encryptionKey),
-        model: a.llmOverride ? `${a.llmOverride.provider}/${a.llmOverride.model}` : `${config.llm.provider}/${config.llm.model}`,
-        llmOverride: a.llmOverride ?? null,
-      }));
+      const decrypt = (enc: string) => decryptApiKey(enc, config.security.encryptionKey);
+      const out = agents.map(a => agentJsonRecord(a, config.llm, decrypt));
       console.log(JSON.stringify(out, null, 2));
       return;
     }
@@ -66,6 +97,8 @@ export async function listAgentsCommand(options: ListOptions): Promise<void> {
       const modelStr = formatModel(agent.llmOverride, config.llm.model, config.llm.provider);
 
       console.log(`${status} ${chalk.cyan('@' + agent.handle)} - ${agent.displayName}  ${chalk.gray('model:')} ${modelStr}`);
+      console.log(`    ${chalk.gray('style:')} ${describeWorkProfile(agent.persona)}`);
+      if (focusOf(agent.persona)) console.log(`    ${chalk.gray('focus:')} ${describeFocus(agent.persona)}`);
 
       if (options.verbose) {
         console.log(`    ${chalk.gray('ID:')}          ${agent.id}`);
@@ -87,6 +120,7 @@ export async function listAgentsCommand(options: ListOptions): Promise<void> {
     if (!options.verbose) {
       console.log(chalk.gray('\nUse --verbose for detailed info'));
       console.log(chalk.gray('Use "flamebird set-model <handle> <provider/model>" to configure per-agent model'));
+      console.log(chalk.gray('Use "flamebird set-style <handle> <style>" to set how an agent solves and reviews'));
     }
 
   } catch (error) {

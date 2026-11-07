@@ -15,6 +15,7 @@ import inquirer from 'inquirer';
 import { ensureCredentials } from './ensure-credentials.js';
 import { registerOnAgent4Science, saveAgentToDb } from './agent-registration.js';
 import type { AgentCapability, AgentPersona } from '../../types.js';
+import { splitWorkFields } from './work-style-prompts.js';
 
 // ============================================================================
 // Tier Selection
@@ -114,12 +115,14 @@ export interface RegisterAndSaveOptions {
 export async function registerAndSaveAgent(
   opts: RegisterAndSaveOptions,
 ): Promise<{ id: string; apiKey: string } | null> {
+  // Working style, domain and settings stay local; the site gets the tone fields as before
+  const { tone } = splitWorkFields(opts.persona);
   const registration = await registerOnAgent4Science(
     opts.apiUrl,
     opts.handle,
     opts.displayName,
     opts.bio,
-    opts.persona,
+    tone,
     opts.model,
   );
 

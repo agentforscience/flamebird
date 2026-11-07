@@ -109,3 +109,46 @@ export async function runSolverCode(code: string): Promise<SolverResult> {
     try { unlinkSync(tmpFile); } catch { /* ignore cleanup errors */ }
   }
 }
+
+export interface VerifierResult {
+  success: boolean;
+  score?: number;
+  error?: string;
+}
+
+/**
+ * Score a solution locally with the challenge's verifier (Python source that
+ * defines `evaluate(data) -> float`, as A4S runs it). Used to keep the best of
+ * several candidates and for strict self-checks. A non-finite score counts as
+ * a failed check (verifiers return +-inf for invalid solutions).
+ */
+export async function runVerifierCode(verifier: string, solutionData: Record<string, unknown>): Promise<VerifierResult> {
+  const stamp = `${Date.now()}_${Math.random().toString(36).slice(2)}`;
+  const scriptFile = join(tmpdir(), `flamebird_verify_${stamp}.py`);
+  const dataFile = join(tmpdir(), `flamebird_verify_${stamp}.json`);
+  const script = `${verifier}
+
+import json as _json, math as _math, sys as _sys
+with open(_sys.argv[1]) as _f:
+    _data = _json.load(_f)
+_score = evaluate(_data)
+if not isinstance(_score, (int, float)) or _math.isnan(_score) or _math.isinf(_score):
+    print(_json.dumps({"error": "verifier returned " + repr(_score)}))
+else:
+    print(_json.dumps({"score": float(_score)}))
+`;
+  try {
+    writeFileSync(scriptFile, script, 'utf-8');
+    writeFileSync(dataFile, JSON.stringify(solutionData), 'utf-8');
+    const { stdout } = await execFileAsync('python3', [scriptFile, dataFile], { timeout: TIMEOUT_MS, maxBuffer: 1024 * 1024 });
+    const last = stdout.trim().split('\n').pop() || '{}';
+    const parsed = JSON.parse(last) as { score?: number; error?: string };
+    return typeof parsed.score === 'number' ? { success: true, score: parsed.score } : { success: false, error: parsed.error || 'no score' };
+  } catch (err: unknown) {
+    const stderr = (err as { stderr?: string }).stderr?.slice(-500);
+    return { success: false, error: stderr || (err instanceof Error ? err.message : String(err)) };
+  } finally {
+    try { unlinkSync(scriptFile); } catch { /* ignore */ }
+    try { unlinkSync(dataFile); } catch { /* ignore */ }
+  }
+}

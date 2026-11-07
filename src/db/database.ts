@@ -48,6 +48,82 @@ interface AgentRow {
   last_generation_time: string | null;
 }
 
+/** One challenge attempt or review, with the working style that produced it. */
+export interface WorkLogEntry {
+  agentId: string;
+  kind: 'submission' | 'review';
+  /** Challenge id for submissions, paper id for reviews. */
+  targetId: string;
+  /** Submission or review id returned by A4S, when there is one. */
+  resultId?: string | null;
+  status: 'submitted' | 'blocked' | 'failed';
+  workStyle?: string | null;
+  domain?: string | null;
+  attempts: number;
+  readOthersFirst: boolean;
+  selfCheck: string;
+  soundness?: string | null;
+  soundnessConfidence?: number | null;
+  /** Score where known: the site's evaluated score, else the declared or locally verified one. */
+  score?: number | null;
+  scoringDirection?: string | null;
+  error?: string | null;
+}
+
+export interface WorkLogRow {
+  id: number;
+  agent_id: string;
+  kind: string;
+  target_id: string;
+  result_id: string | null;
+  status: string;
+  work_style: string | null;
+  domain: string | null;
+  attempts: number;
+  read_others_first: number;
+  self_check: string;
+  soundness: string | null;
+  soundness_confidence: number | null;
+  score: number | null;
+  scoring_direction: string | null;
+  error: string | null;
+  created_at: string;
+}
+
+/** A position row in the local mirror (agent_positions). */
+export interface PositionRow {
+  id: string;
+  agent_id: string;
+  claim: string;
+  confidence: number;
+  tags: string | null;
+  about_type: string | null;
+  about_id: string | null;
+  status: string;
+  synced: number;
+  created_at: string;
+  updated_at: string;
+}
+
+/** A change of confidence recorded locally (position_revisions). */
+export interface PositionRevisionRow {
+  id: number;
+  agent_id: string;
+  position_id: string;
+  from_confidence: number;
+  to_confidence: number;
+  reason: string;
+  trigger_type: string | null;
+  trigger_id: string | null;
+  at: string;
+}
+
+/** Persona JSON for the DB, without fields that are loaded at runtime (persona.md, memory.md, site memory, notes, positions). */
+function personaForStorage(persona: AgentPersona): string {
+  const { customPersonaMarkdown: _c, persistentMemoryMarkdown: _m, siteMemoryMarkdown: _s, siteNotesMarkdown: _n, sitePositions: _p, ...stored } = persona;
+  return JSON.stringify(stored);
+}
+
 function rowToAgentConfig(row: AgentRow): AgentConfig & { apiKeyEncrypted: string } {
   return {
     id: row.id,
@@ -286,6 +362,71 @@ export class RuntimeDatabase {
         FOREIGN KEY (agent_id) REFERENCES agents(id)
       )
     `);
+
+    // Work log — one row per challenge attempt or review, with the working style,
+    // domain and settings that produced it. Kept when an agent is removed so
+    // style comparisons keep their history.
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS work_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        agent_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        target_id TEXT NOT NULL,
+        result_id TEXT,
+        status TEXT NOT NULL,
+        work_style TEXT,
+        domain TEXT,
+        attempts INTEGER NOT NULL DEFAULT 1,
+        read_others_first INTEGER NOT NULL DEFAULT 1,
+        self_check TEXT NOT NULL DEFAULT 'normal',
+        soundness TEXT,
+        soundness_confidence REAL,
+        error TEXT,
+        created_at TEXT NOT NULL
+      )
+    `);
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_work_log_agent
+      ON work_log(agent_id, kind, created_at)
+    `);
+    const workCols = this.db.pragma('table_info(work_log)') as Array<{ name: string }>;
+    if (!workCols.some(c => c.name === 'score')) this.db.exec('ALTER TABLE work_log ADD COLUMN score REAL');
+    if (!workCols.some(c => c.name === 'scoring_direction')) this.db.exec('ALTER TABLE work_log ADD COLUMN scoring_direction TEXT');
+
+    // Local mirror of the agent's public positions, plus confidence changes.
+    // Rows with synced = 0 were never accepted by the site (kept for notes only).
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS agent_positions (
+        id TEXT PRIMARY KEY,
+        agent_id TEXT NOT NULL,
+        claim TEXT NOT NULL,
+        confidence REAL NOT NULL,
+        tags TEXT,
+        about_type TEXT,
+        about_id TEXT,
+        status TEXT NOT NULL DEFAULT 'active',
+        synced INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )
+    `);
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS position_revisions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        agent_id TEXT NOT NULL,
+        position_id TEXT NOT NULL,
+        from_confidence REAL NOT NULL,
+        to_confidence REAL NOT NULL,
+        reason TEXT NOT NULL,
+        trigger_type TEXT,
+        trigger_id TEXT,
+        at TEXT NOT NULL
+      )
+    `);
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_position_revisions_agent
+      ON position_revisions(agent_id, at)
+    `);
   }
 
   /** Run schema migrations for existing databases. */
@@ -330,7 +471,7 @@ export class RuntimeDatabase {
       config.id,
       config.handle,
       config.displayName,
-      JSON.stringify(config.persona),
+      personaForStorage(config.persona),
       config.capability || 'base',
       config.researchDomain || null,
       config.llmOverride ? JSON.stringify(config.llmOverride) : null,
@@ -431,6 +572,111 @@ export class RuntimeDatabase {
       UPDATE agents SET capability = ?, updated_at = ? WHERE id = ?
     `);
     stmt.run(capability, new Date().toISOString(), id);
+  }
+
+  /** Replace the stored persona (tone and working style). Runtime-only fields are dropped. */
+  updateAgentPersona(id: string, persona: AgentPersona): void {
+    const stmt = this.db.prepare(`
+      UPDATE agents SET persona = ?, updated_at = ? WHERE id = ?
+    `);
+    stmt.run(personaForStorage(persona), new Date().toISOString(), id);
+  }
+
+  /** Record a challenge attempt or review with the working style that produced it. */
+  recordWork(entry: WorkLogEntry): void {
+    this.db.prepare(`
+      INSERT INTO work_log (agent_id, kind, target_id, result_id, status, work_style, domain, attempts,
+        read_others_first, self_check, soundness, soundness_confidence, score, scoring_direction, error, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      entry.agentId, entry.kind, entry.targetId, entry.resultId ?? null, entry.status,
+      entry.workStyle ?? null, entry.domain ?? null, entry.attempts, entry.readOthersFirst ? 1 : 0,
+      entry.selfCheck, entry.soundness ?? null, entry.soundnessConfidence ?? null,
+      typeof entry.score === 'number' && Number.isFinite(entry.score) ? entry.score : null,
+      entry.scoringDirection ?? null,
+      entry.error ? entry.error.slice(0, 500) : null, new Date().toISOString(),
+    );
+  }
+
+  /** Set the score of a logged submission once the site has evaluated it. */
+  setWorkScore(resultId: string, score: number): void {
+    if (!Number.isFinite(score)) return;
+    this.db.prepare('UPDATE work_log SET score = ? WHERE result_id = ?').run(score, resultId);
+  }
+
+  /** Every work-log row (for `flamebird styles`), optionally for one agent. */
+  getAllWorkLog(agentId?: string): WorkLogRow[] {
+    return (agentId
+      ? this.db.prepare('SELECT * FROM work_log WHERE agent_id = ? ORDER BY id').all(agentId)
+      : this.db.prepare('SELECT * FROM work_log ORDER BY id').all()) as WorkLogRow[];
+  }
+
+  // ============================================================================
+  // Positions (local mirror of the agent's public positions)
+  // ============================================================================
+
+  /** Insert or update a position. Revisions are recorded separately. */
+  savePosition(p: {
+    id: string; agentId: string; claim: string; confidence: number; tags?: string[];
+    aboutType?: string | null; aboutId?: string | null; status?: string; synced?: boolean;
+    createdAt?: string; updatedAt?: string;
+  }): void {
+    const now = new Date().toISOString();
+    this.db.prepare(`
+      INSERT INTO agent_positions (id, agent_id, claim, confidence, tags, about_type, about_id, status, synced, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET claim = excluded.claim, confidence = excluded.confidence, tags = excluded.tags,
+        about_type = excluded.about_type, about_id = excluded.about_id, status = excluded.status,
+        synced = excluded.synced, updated_at = excluded.updated_at
+    `).run(
+      p.id, p.agentId, p.claim, p.confidence, p.tags?.length ? JSON.stringify(p.tags) : null,
+      p.aboutType ?? null, p.aboutId ?? null, p.status ?? 'active', p.synced === false ? 0 : 1,
+      p.createdAt ?? now, p.updatedAt ?? now,
+    );
+  }
+
+  getPositions(agentId: string, options: { status?: 'active' | 'retracted'; limit?: number } = {}): PositionRow[] {
+    const where = ['agent_id = ?'];
+    const args: (string | number)[] = [agentId];
+    if (options.status) { where.push('status = ?'); args.push(options.status); }
+    args.push(options.limit ?? 50);
+    return this.db.prepare(`
+      SELECT * FROM agent_positions WHERE ${where.join(' AND ')} ORDER BY updated_at DESC LIMIT ?
+    `).all(...args) as PositionRow[];
+  }
+
+  recordPositionRevision(r: {
+    agentId: string; positionId: string; from: number; to: number; reason: string;
+    triggerType?: string | null; triggerId?: string | null; at?: string;
+  }): void {
+    this.db.prepare(`
+      INSERT INTO position_revisions (agent_id, position_id, from_confidence, to_confidence, reason, trigger_type, trigger_id, at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(r.agentId, r.positionId, r.from, r.to, r.reason, r.triggerType ?? null, r.triggerId ?? null, r.at ?? new Date().toISOString());
+  }
+
+  /** Revisions, newest first. `since` is an ISO timestamp. */
+  getPositionRevisions(agentId: string, options: { since?: string; limit?: number } = {}): PositionRevisionRow[] {
+    const where = ['agent_id = ?'];
+    const args: (string | number)[] = [agentId];
+    if (options.since) { where.push('at >= ?'); args.push(options.since); }
+    args.push(options.limit ?? 50);
+    return this.db.prepare(`
+      SELECT * FROM position_revisions WHERE ${where.join(' AND ')} ORDER BY id DESC LIMIT ?
+    `).all(...args) as PositionRevisionRow[];
+  }
+
+  /** Most recent work log rows, newest first. */
+  getWorkLog(options: { agentId?: string; kind?: 'submission' | 'review'; limit?: number } = {}): WorkLogRow[] {
+    const where: string[] = [];
+    const args: (string | number)[] = [];
+    if (options.agentId) { where.push('agent_id = ?'); args.push(options.agentId); }
+    if (options.kind) { where.push('kind = ?'); args.push(options.kind); }
+    args.push(options.limit ?? 50);
+    return this.db.prepare(`
+      SELECT * FROM work_log ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
+      ORDER BY id DESC LIMIT ?
+    `).all(...args) as WorkLogRow[];
   }
 
   /** Set or clear the per-agent LLM model override. Pass null to revert to global config. */

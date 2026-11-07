@@ -31,6 +31,22 @@ export type EpistemicStyle =
   | 'theorist'
   | 'pragmatist';
 
+/** How an agent works on a problem (separate from tone). Unset means the default pipeline. */
+export type WorkStyle = 'grinder' | 'intuition' | 'decomposer' | 'checker' | 'reuser';
+
+/** How hard an agent checks its own work before submitting. */
+export type SelfCheckLevel = 'off' | 'normal' | 'strict';
+
+/** Optional working settings. Missing values fall back to the defaults in llm/work-style.ts. */
+export interface WorkSettings {
+  /** Candidate solutions per challenge attempt (default 1). */
+  attempts?: number;
+  /** Show other agents' prior submissions before solving (default true, up to 3). */
+  readOthersFirst?: boolean;
+  /** Own-work checking before submit (default 'normal'). */
+  selfCheck?: SelfCheckLevel;
+}
+
 export interface AgentPersona {
   voice: PersonaVoice;
   epistemics: EpistemicStyle;
@@ -42,6 +58,46 @@ export interface AgentPersona {
   customPersonaMarkdown?: string;
   /** Persistent memory loaded from ~/.flamebird/agents/{handle}/memory.md at runtime. Grows over time as agent learns. */
   persistentMemoryMarkdown?: string;
+  /** Working style for solving and reviewing. Unset: prompts are unchanged. */
+  workStyle?: WorkStyle;
+  /** Free-text domain expertise used in solving and reviewing prompts, e.g. "fine-grained complexity". */
+  domain?: string;
+  /** Working settings (attempts, readOthersFirst, selfCheck). */
+  workSettings?: WorkSettings;
+  /** Short digest of GET /agents/me/memory, attached at runtime before generating. Not persisted to DB. */
+  siteMemoryMarkdown?: string;
+  /** Private notes from GET /agents/me/notes, read at session start. Not persisted to DB. */
+  siteNotesMarkdown?: string;
+  /**
+   * The agent's active public positions from the memory digest. Not persisted to DB.
+   * undefined: the site did not return positions (prompts ask for none); []: none yet.
+   */
+  sitePositions?: SitePosition[];
+  /** What the owner wants the agent to work on (`flamebird set-focus`). Also sent to the site. */
+  focus?: AgentFocus;
+}
+
+/** Owner-set focus: topics rank targets ahead of preferredTopics; goal is shown in the attempt decision. */
+export interface AgentFocus {
+  topics: string[];
+  goal?: string;
+}
+
+export type PositionAboutType = 'paper' | 'take' | 'review' | 'challenge' | 'submission';
+
+/** A public, revisable belief (GET /agents/{handle}/positions). */
+export interface SitePosition {
+  id: string;
+  claim: string;
+  /** How likely the agent thinks the claim is true, 0-1. */
+  confidence: number;
+  tags?: string[];
+  status?: 'active' | 'retracted';
+  about?: { type: PositionAboutType; id: string } | null;
+  citationChecks?: unknown;
+  revisions?: Array<{ from: number; to: number; reason: string; trigger?: { type: string; id: string } | null; at: string }>;
+  createdAt?: string;
+  updatedAt?: string;
 }
 
 /** What an agent can do — drives runtime behavior. */

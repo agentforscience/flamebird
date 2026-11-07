@@ -18,6 +18,9 @@ import { createNotificationPoller, getNotificationPoller } from '../polling/noti
 import { createActionExecutor, getActionExecutor } from '../actions/action-executor.js';
 import { createLLMClient, createVerifierClient, getOrCreateLLMClient } from '../llm/llm-client.js';
 import { createProactiveEngine, getProactiveEngine } from '../engagement/proactive-engine.js';
+import { attachSiteMemory, findPushback } from '../utils/site-memory.js';
+import { pushbackContextFor } from '../utils/pushback.js';
+import { beginNotesSession, endAllNotesSessions } from '../utils/site-notes.js';
 import { createLogger } from '../logging/logger.js';
 import { loadConfig } from '../config/config.js';
 import { tickPaperGeneration, type ManagerAgentConfig } from '../tools/manager-agent.js';
@@ -103,6 +106,13 @@ export class EventLoop {
     const manager = getAgentManager();
     await manager.loadAgents(agentFilter);
     logger.info(`Agent manager initialized with ${manager.getAgentIds().length} agents`);
+
+    // Site notes: read once per agent at session start (silent if the site has none)
+    await Promise.all(manager.getAgentIds().map(async id => {
+      const runtime = manager.getRuntime(id);
+      const key = manager.getApiKey(id);
+      if (runtime && key) await beginNotesSession(id, key, runtime.config.persona);
+    }));
 
     // Create notification poller
     createNotificationPoller({
@@ -596,6 +606,8 @@ export class EventLoop {
     const llm = getOrCreateLLMClient(agent.config.llmOverride);
     const db = getDatabase();
 
+    const apiKey = manager.getApiKey(agentId);
+    if (apiKey) await attachSiteMemory(agent.config.persona, agentId, apiKey);
     const persona = agent.config.persona;
 
     // Load agent's working memory for interaction continuity
@@ -613,6 +625,8 @@ export class EventLoop {
         let rootTitle: string | undefined;
         let rootType: string | undefined;
         let rootId: string | undefined;
+        let triggerCommentId: string | undefined;
+        let triggerIntent: string | undefined;
 
         const apiKey = manager.getApiKey(agentId);
 
@@ -620,6 +634,7 @@ export class EventLoop {
           // Resolve the triggering comment ID — may come from commentId or targetId
           const commentId = notification.commentId ||
             (notification.targetType === 'comment' ? notification.targetId : undefined);
+          triggerCommentId = commentId;
 
           // 1. Directly fetch the triggering comment to get its body and rootId
           let commentRootId: string | undefined;
@@ -629,6 +644,7 @@ export class EventLoop {
               if (commentResult.success && commentResult.data) {
                 targetContent = commentResult.data.body || targetContent;
                 commentRootId = commentResult.data.rootId;
+                triggerIntent = commentResult.data.intent;
               }
             } catch (commentErr) {
               logger.debug({ err: commentErr, ...agentLog(agentId), commentId }, 'Failed to fetch comment for notification');
@@ -789,6 +805,10 @@ export class EventLoop {
           from: notification.fromAgentId,
         }, `${agentName(agentId)} generating ${triggerType} on "${rootTitle || notification.targetId}"`)
 
+        // Replies to pushback on the agent's own work carry the commenter's record and the agent's positions
+        const pushback = triggerType === 'mention' ? undefined
+          : pushbackContextFor(triggerCommentId, triggerIntent, findPushback(agentId, triggerCommentId));
+
         const response = await llm.generateComment(persona, {
           targetType: notification.commentId ? 'comment' : (notification.targetType === 'review' ? 'comment' : notification.targetType ?? 'comment') as 'paper' | 'take' | 'comment',
           targetContent,
@@ -799,6 +819,7 @@ export class EventLoop {
           rootTitle,
           rootType,
           rootId,
+          pushback,
         }, memory);
 
         return {
@@ -806,6 +827,7 @@ export class EventLoop {
           body: response.body,
           confidence: response.confidence,
           evidenceAnchor: response.evidenceAnchor,
+          ...(response.positionUpdate && pushback ? { positionUpdate: response.positionUpdate, pushbackCommentId: pushback.commentId } : {}),
           // Stash context for memory-updater to extract topic/relationship/thread
           rootTitle,
           rootId,
@@ -964,6 +986,17 @@ export class EventLoop {
 
       logger.info(`Waiting for ${busyAgents.length} agents to finish...`);
       await new Promise(resolve => setTimeout(resolve, 500));
+    }
+
+    // Write consolidated site notes once per agent (guarded; silent on failure)
+    try {
+      const manager = getAgentManager();
+      await endAllNotesSessions(id => {
+        const runtime = manager.getRuntime(id);
+        return { apiKey: manager.getApiKey(id), handle: runtime?.config.handle, persona: runtime?.config.persona };
+      });
+    } catch (err) {
+      logger.debug({ err }, 'Site notes write at shutdown failed (non-fatal)');
     }
 
     // Close database
