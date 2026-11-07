@@ -19,7 +19,8 @@ import { closeSync, mkdtempSync, openSync, readFileSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 
-const CLAUDE_BIN = process.env.FLAMEBIRD_CLAUDE_BIN || 'claude';
+// Read at call time: ~/.flamebird/.env is loaded after this module is imported.
+const claudeBin = () => process.env.FLAMEBIRD_CLAUDE_BIN || 'claude';
 const TIMEOUT_MS = 300_000;
 
 export const DISALLOWED_TOOLS = [
@@ -103,13 +104,30 @@ export function parseClaudeJson(raw: string): ClaudeResult {
   };
 }
 
-export function runClaude(opts: { prompt: string; system: string; model?: string }): Promise<ClaudeResult> {
+type RunOpts = { prompt: string; system: string; model?: string };
+
+// The CLI caps one answer's length. When an answer runs past it, ask once more
+// for a shorter one in the same format, instead of failing the whole action.
+export const TOO_LONG_RE = /exceeded the \d+ output token maximum/i;
+export const SHORTER_NOTE = '\n\nYour previous answer to this was too long and was cut off. Answer again in the same required format, in under 1,500 words.';
+
+export async function runClaude(opts: RunOpts): Promise<ClaudeResult> {
+  try {
+    return await runOnce(opts);
+  } catch (e) {
+    if (!(e instanceof Error) || !TOO_LONG_RE.test(e.message)) throw e;
+    return runOnce({ ...opts, prompt: opts.prompt + SHORTER_NOTE });
+  }
+}
+
+function runOnce(opts: RunOpts): Promise<ClaudeResult> {
   return slot(() => new Promise<ClaudeResult>((resolve, reject) => {
     const dir = mkdtempSync(join(tmpdir(), 'flamebird-claude-'));
     const outPath = join(dir, 'out.json');
     const out = openSync(outPath, 'w');
     let stderr = '';
-    const child = spawn(CLAUDE_BIN, claudeArgs(opts.model, opts.system), {
+    const bin = claudeBin();
+    const child = spawn(bin, claudeArgs(opts.model, opts.system), {
       cwd: dir, env: claudeEnv(), stdio: ['pipe', out, 'pipe'],
     });
     const timer = setTimeout(() => child.kill('SIGTERM'), TIMEOUT_MS);
@@ -124,7 +142,9 @@ export function runClaude(opts: { prompt: string; system: string; model?: string
       try { resolve(parseClaudeJson(raw)); } catch (e) { reject(e); }
     };
     child.on('error', (e: NodeJS.ErrnoException) => finish(new Error(
-      e.code === 'ENOENT' ? `Claude CLI not found (${CLAUDE_BIN}). Install Claude Code and run \`claude\` once to log in.` : `Claude CLI error: ${e.message}`)));
+      e.code === 'ENOENT' ? `Claude CLI not found (${bin}). Install Claude Code and run \`claude\` once to log in.`
+        : e.code === 'ENOEXEC' || e.code === 'EACCES' ? `${bin} is not a runnable program (check \`which -a claude\`); set FLAMEBIRD_CLAUDE_BIN to the real Claude CLI path.`
+        : `Claude CLI error: ${e.message}`)));
     child.on('close', (code, signal) => {
       if (signal) return finish(new Error(`Claude CLI stopped (${signal}); timeout is ${TIMEOUT_MS / 1000}s`));
       // On failure the CLI usually still writes a JSON result with the reason.

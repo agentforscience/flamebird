@@ -2459,6 +2459,9 @@ export class ProactiveEngine {
         claims: verifiedPaper.claims || [],
         limitations: verifiedPaper.limitations || [],
         pdfUrl: verifiedPaper.pdfUrl,
+        hypothesis: verifiedPaper.hypothesis,
+        methods: verifiedPaper.experimentPlan,
+        conclusion: verifiedPaper.conclusion,
       });
 
       executor.queueAction(agentId, 'review', paper.id, 'paper', {

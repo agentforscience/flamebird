@@ -16,7 +16,10 @@ import {
   type PositionProposal, type PositionUpdate, type PushbackContext,
 } from './memory-prompts.js';
 import { focusDecisionLine } from '../utils/focus.js';
-import type { SitePosition } from '../types.js';
+import type { SitePosition, PostVariation } from '../types.js';
+import { cardBlock } from '../personas/archetypes.js';
+import { pickVariation, varietyBlock, repetitionProblem, recordOpeningInMemory } from '../personas/variety.js';
+import { tryGetDatabase } from '../db/database.js';
 
 const logger = createLogger('llm');
 
@@ -222,7 +225,13 @@ export class LLMClient {
   /**
    * Generate a comment response
    */
-  async generateComment(
+  async generateComment(...args: Parameters<LLMClient['generateCommentOnce']>): Promise<GeneratedComment> {
+    const [persona, ...rest] = args;
+    return this.freshPost(persona, 'comment', p => this.generateCommentOnce(p, ...rest), r => r.body);
+  }
+
+  /** One generation without the repeated-opening check; use generateComment. */
+  async generateCommentOnce(
     persona: AgentPersona,
     context: {
       targetType: 'paper' | 'take' | 'comment' | 'review';
@@ -319,7 +328,13 @@ Tags: ${content.tags.join(', ')}`;
   /**
    * Generate a take (peer review)
    */
-  async generateTake(
+  async generateTake(...args: Parameters<LLMClient['generateTakeOnce']>): Promise<GeneratedTake> {
+    const [persona, ...rest] = args;
+    return this.freshPost(persona, 'take', p => this.generateTakeOnce(p, ...rest), r => r.hotTake || r.summary?.[0] || '');
+  }
+
+  /** One generation without the repeated-opening check; use generateTake. */
+  async generateTakeOnce(
     persona: AgentPersona,
     paper: {
       title: string;
@@ -387,7 +402,13 @@ Limitations: ${paper.limitations.join('; ')}`;
    * Generate a standalone take (not linked to a specific paper)
    * Agent shares perspective on topics, trends, or recent observations from browsing
    */
-  async generateStandaloneTake(
+  async generateStandaloneTake(...args: Parameters<LLMClient['generateStandaloneTakeOnce']>): Promise<GeneratedTake> {
+    const [persona, ...rest] = args;
+    return this.freshPost(persona, 'take', p => this.generateStandaloneTakeOnce(p, ...rest), r => r.hotTake || r.summary?.[0] || '');
+  }
+
+  /** One generation without the repeated-opening check; use generateStandaloneTake. */
+  async generateStandaloneTakeOnce(
     persona: AgentPersona,
     context: {
       recentPaperTitles: string[];
@@ -464,7 +485,13 @@ Write a take that reflects your unique viewpoint. Be opinionated and substantive
   /**
    * Generate a peer review of a paper
    */
-  async generateReview(
+  async generateReview(...args: Parameters<LLMClient['generateReviewOnce']>): ReturnType<LLMClient['generateReviewOnce']> {
+    const [persona, ...rest] = args;
+    return this.freshPost(persona, 'review', p => this.generateReviewOnce(p, ...rest), r => r.summary);
+  }
+
+  /** One generation without the repeated-opening check; use generateReview. */
+  async generateReviewOnce(
     persona: AgentPersona,
     paper: {
       id?: string;
@@ -473,6 +500,10 @@ Write a take that reflects your unique viewpoint. Be opinionated and substantive
       claims: string[];
       limitations: string[];
       pdfUrl?: string;
+      /** Full-text sections, shown when the paper has them (flaws often sit in methods or results). */
+      hypothesis?: string;
+      methods?: string;
+      conclusion?: string;
     }
   ): Promise<{
     title: string;
@@ -502,7 +533,7 @@ CRITICAL: You MUST complete every field fully. Do NOT leave any sentence unfinis
 Title: ${paper.title}
 Abstract: ${paper.abstract}
 Key Claims: ${paper.claims.join('; ')}
-Stated Limitations: ${paper.limitations.join('; ')}`;
+Stated Limitations: ${paper.limitations.join('; ')}${reviewSections(paper)}`;
 
     const response = await this.complete([
       { role: 'system', content: systemPrompt },
@@ -657,6 +688,32 @@ CRITICAL: You MUST complete every field fully. Do NOT leave any sentence unfinis
   /**
    * Build persona system prompt
    */
+  /**
+   * Discourse posts (comments, takes, reviews): pick an opening and move, and
+   * if the draft repeats a recent opening, a catchphrase or a stock site
+   * opening, ask once for a rewrite. Set FLAMEBIRD_VARIETY=0 to turn off.
+   */
+  private async freshPost<T>(persona: AgentPersona, kind: PostVariation['kind'], run: (p: AgentPersona) => Promise<T>, textOf: (r: T) => string): Promise<T> {
+    if (process.env.FLAMEBIRD_VARIETY === '0') return run(persona);
+    const base: AgentPersona = { ...persona, postVariation: pickVariation(persona, kind) };
+    let result = await run(base);
+    const problem = repetitionProblem(textOf(result) ?? '', persona);
+    if (problem) {
+      logger.info({ kind, problem }, 'Repeated opening; asking for one rewrite');
+      try {
+        const second = await run({ ...base, openingRetryNote: problem });
+        if (!repetitionProblem(textOf(second) ?? '', persona)) result = second;
+      } catch (err) {
+        logger.warn({ err: err instanceof Error ? err.message : String(err) }, 'Rewrite failed; keeping the first draft');
+      }
+    }
+    const entry = recordOpeningInMemory(persona, textOf(result) ?? '', base.postVariation);
+    if (entry && persona.runtimeAgentId) {
+      try { tryGetDatabase()?.recordOpening(persona.runtimeAgentId, entry); } catch { /* memory only */ }
+    }
+    return result;
+  }
+
   private buildPersonaPrompt(
     persona: AgentPersona,
     memory?: AgentWorkingMemory,
@@ -697,7 +754,7 @@ YOUR INTELLECTUAL IDENTITY:
 - Boldness: ${persona.spiceLevel}/10 (${persona.spiceLevel < 4 ? 'measured and careful — you hedge appropriately and acknowledge uncertainty' : persona.spiceLevel < 7 ? 'direct with an edge — you state positions clearly and push back when warranted' : 'provocative and unflinching — you name problems others avoid, challenge weak consensus, and stake out positions'})
 - Domain expertise: ${persona.preferredTopics.join(', ') || 'broadly interdisciplinary'}
 - Intellectual triggers: ${persona.petPeeves.join(', ') || 'sloppy reasoning'}
-- Signature expressions: ${persona.catchphrases.join(', ') || 'none'}
+${persona.catchphrases.length ? `- Occasional expressions (rare flavor only: at most one in about eight posts, and never as your opening): ${persona.catchphrases.join(', ')}` : '- Signature expressions: none'}
 
 HOW YOU ENGAGE WITH SCIENCE:
 - You think about METHODOLOGY first. What did they actually do? What controls are missing? What confounds exist?
@@ -715,6 +772,8 @@ STYLE RULES:
 - Never produce generic praise ("great work!", "interesting paper!") without specific substantive content following it.
 - When you have domain expertise relevant to the content, deploy it. Reference specific techniques, papers, or empirical findings you know about.
 - ${persona.voice === 'minimalist' ? 'LENGTH: 1-3 sentences max. Every word must earn its place.' : persona.spiceLevel >= 7 ? 'LENGTH: 2-4 sentences. Be punchy. Hit hard and stop.' : persona.spiceLevel >= 4 ? 'LENGTH: 3-6 sentences. Make your point, support it, move on.' : 'LENGTH: 4-8 sentences. Develop your argument with evidence and nuance.'}`;
+
+    prompt += cardBlock(persona.card);
 
     // Inject working memory for interaction continuity (filtered by relevance)
     if (memory) {
@@ -747,6 +806,9 @@ STYLE RULES:
     if (persona.siteMemoryMarkdown) {
       prompt += `\n\n${persona.siteMemoryMarkdown}`;
     }
+
+    // Discourse posts only: how to open, the main move, recent openings to avoid
+    prompt += varietyBlock(persona);
 
     return prompt;
   }
@@ -2242,7 +2304,7 @@ export function getLLMClient(): LLMClient {
 export function getOrCreateLLMClient(override?: AgentLLMOverride): LLMClient {
   if (!override) return getLLMClient();
 
-  const key = override.model;
+  const key = `${override.provider || globalProvider}/${override.model}`;
   let client = agentClientCache.get(key);
   if (!client) {
     client = new LLMClient({
@@ -2254,6 +2316,19 @@ export function getOrCreateLLMClient(override?: AgentLLMOverride): LLMClient {
     logger.info({ model: override.model }, 'Created per-agent LLM client');
   }
   return client;
+}
+
+/** Hypothesis, methods/results and conclusion for the review prompt; empty when the paper has none. */
+export function reviewSections(paper: { hypothesis?: string; methods?: string; conclusion?: string }): string {
+  const parts: string[] = [];
+  const add = (label: string, text: string | undefined, max: number) => {
+    const t = (text || '').trim();
+    if (t) parts.push(`${label}:\n${t.length > max ? smartTruncate(t, max) : t}`);
+  };
+  add('Hypothesis and motivation', paper.hypothesis, 2500);
+  add('Methods and results', paper.methods, 4000);
+  add('Conclusion', paper.conclusion, 2000);
+  return parts.length ? `\n\n${parts.join('\n\n')}` : '';
 }
 
 /** Read soundness fields from a parsed review. Invalid or missing values are dropped. */

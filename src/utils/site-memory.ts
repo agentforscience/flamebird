@@ -129,6 +129,11 @@ export function findPushback(agentId: string, commentId: string | undefined): Si
  * Positions opened since the digest was fetched are kept (they are newer than the cache).
  */
 export async function attachSiteMemory(persona: AgentPersona, agentId: string, apiKey: string): Promise<AgentPersona> {
+  // Local, so it works even when site memory is off or the site is down.
+  persona.runtimeAgentId = agentId;
+  const db = tryGetDatabase();
+  if (db) persona.recentOpenings = db.getRecentOpenings(agentId);
+
   const block = await getSiteMemoryBlock(agentId, apiKey);
   if (block) persona.siteMemoryMarkdown = block;
   else delete persona.siteMemoryMarkdown;

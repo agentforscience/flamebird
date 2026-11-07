@@ -14,6 +14,7 @@ import type {
   QueuedAction,
   ActionPriority,
   ActionType,
+  RecentOpening,
 } from '../types.js';
 
 /** Raw row shape from the neurico_runs table. */
@@ -120,7 +121,8 @@ export interface PositionRevisionRow {
 
 /** Persona JSON for the DB, without fields that are loaded at runtime (persona.md, memory.md, site memory, notes, positions). */
 function personaForStorage(persona: AgentPersona): string {
-  const { customPersonaMarkdown: _c, persistentMemoryMarkdown: _m, siteMemoryMarkdown: _s, siteNotesMarkdown: _n, sitePositions: _p, ...stored } = persona;
+  const { customPersonaMarkdown: _c, persistentMemoryMarkdown: _m, siteMemoryMarkdown: _s, siteNotesMarkdown: _n, sitePositions: _p,
+    recentOpenings: _o, runtimeAgentId: _r, postVariation: _v, openingRetryNote: _t, ...stored } = persona;
   return JSON.stringify(stored);
 }
 
@@ -427,6 +429,19 @@ export class RuntimeDatabase {
       CREATE INDEX IF NOT EXISTS idx_position_revisions_agent
       ON position_revisions(agent_id, at)
     `);
+    // First sentences of the agent's recent posts, so it can avoid repeating itself.
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS agent_openings (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        agent_id TEXT NOT NULL,
+        text TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        opening_type TEXT,
+        used_catchphrase INTEGER NOT NULL DEFAULT 0,
+        at TEXT NOT NULL
+      )
+    `);
+    this.db.exec(`CREATE INDEX IF NOT EXISTS idx_agent_openings_agent ON agent_openings(agent_id, id)`);
   }
 
   /** Run schema migrations for existing databases. */
@@ -580,6 +595,21 @@ export class RuntimeDatabase {
       UPDATE agents SET persona = ?, updated_at = ? WHERE id = ?
     `);
     stmt.run(personaForStorage(persona), new Date().toISOString(), id);
+  }
+
+  /** Remember the opening of a generated post; keeps the newest 50 per agent. */
+  recordOpening(agentId: string, o: RecentOpening): void {
+    this.db.prepare(`INSERT INTO agent_openings (agent_id, text, kind, opening_type, used_catchphrase, at) VALUES (?, ?, ?, ?, ?, ?)`)
+      .run(agentId, o.text.slice(0, 200), o.kind, o.openingType ?? null, o.usedCatchphrase ? 1 : 0, o.at);
+    this.db.prepare(`DELETE FROM agent_openings WHERE agent_id = ? AND id NOT IN (SELECT id FROM agent_openings WHERE agent_id = ? ORDER BY id DESC LIMIT 50)`)
+      .run(agentId, agentId);
+  }
+
+  /** The agent's recent openings, newest first. */
+  getRecentOpenings(agentId: string, limit = 20): RecentOpening[] {
+    const rows = this.db.prepare(`SELECT text, kind, opening_type, used_catchphrase, at FROM agent_openings WHERE agent_id = ? ORDER BY id DESC LIMIT ?`)
+      .all(agentId, limit) as { text: string; kind: string; opening_type: string | null; used_catchphrase: number; at: string }[];
+    return rows.map(r => ({ text: r.text, kind: r.kind, openingType: r.opening_type ?? undefined, usedCatchphrase: r.used_catchphrase === 1, at: r.at }));
   }
 
   /** Record a challenge attempt or review with the working style that produced it. */

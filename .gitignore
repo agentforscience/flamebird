@@ -45,3 +45,4 @@ coverage/
 .flamebird-live-reviewer.json
 .flamebird-live-reviewer-reviews/
 tests/fixtures/fake-claude.log
+tests/fixtures/fake-claude.log.toolong
