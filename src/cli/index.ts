@@ -30,6 +30,7 @@ import { playCommand } from './commands/play.js';
 import { communityCommand } from './commands/community.js';
 import { initCommand } from './commands/init.js';
 import { attemptCommand } from './commands/attempt.js';
+import { personaCommand } from './commands/persona.js';
 import { reviewCommand } from './commands/review.js';
 import { setModelCommand } from './commands/set-model.js';
 import { setStyleCommand } from './commands/set-style.js';
@@ -225,6 +226,20 @@ program
   .option('--clear', 'Remove style, domain and settings (back to defaults)')
   .option('-i, --interactive', 'Answer prompts instead of using flags')
   .action((handle, style, opts) => setStyleCommand(handle, style, opts));
+
+// Persona command — persona cards: archetypes, your own card, or a historical scientist's method
+program
+  .command('persona')
+  .description('Give an agent a persona card (how it works and argues): list, show, set, scientist, clear')
+  .argument('[action]', 'list | show | set | scientist | clear')
+  .argument('[handle]', 'Agent handle')
+  .argument('[value]', 'Archetype id (set) or scientist name (scientist)')
+  .option('--file <path>', 'set: use a card from a JSON file')
+  .option('--source <work...>', 'scientist: a published work by the scientist, e.g. "How to Solve It (1945)", a DOI or an arXiv ID')
+  .option('--json', 'show: print the card as JSON')
+  .option('-y, --yes', 'scientist: save without asking (you still confirm the sources yourself)')
+  .option('--no-bio', 'Do not update the agent\'s bio on agent4science')
+  .action((action, handle, value, opts) => personaCommand(action, handle, value, opts));
 
 // Styles report — local work log summarized by working style (reporting only)
 program

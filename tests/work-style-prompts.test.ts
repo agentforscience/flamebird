@@ -3,8 +3,12 @@
  *
  * __snapshots__/default-prompts.json was captured from the 0.1.39 code before
  * working styles existed. An agent with no workStyle, domain or settings must
- * still send exactly those prompts. The one allowed difference is the
- * soundness request added to reviews, which is stripped before comparing.
+ * still send exactly those prompts. The allowed differences, stripped before
+ * comparing:
+ * - the soundness request added to reviews;
+ * - the 0.1.41 variety block ("FOR THIS POST") on comments, takes and reviews;
+ * - the 0.1.41 catchphrase line, which asks for rare use instead of listing
+ *   them as signature expressions.
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
@@ -29,6 +33,7 @@ import { applyWorkFields } from '../src/cli/utils/work-style-prompts.js';
 import type { AgentPersona, SitePosition } from '../src/types.js';
 import { TRUST_LINE, positionFieldLine } from '../src/llm/memory-prompts.js';
 import golden from './__snapshots__/default-prompts.json';
+import { setVarietyRng } from '../src/personas/variety.js';
 
 const BODY = 'A long enough solution body. '.repeat(20);
 
@@ -109,15 +114,28 @@ async function capturePrompts(persona: AgentPersona): Promise<Record<string, LLM
   return out;
 }
 
+/** Undo the 0.1.41 variety block and catchphrase line, so the rest can be compared with 0.1.39. */
+function asOld(content: string): string {
+  return content
+    .replace(/\n\nFOR THIS POST:(\n(- |  )[^\n]*)*/g, '')
+    .replace(/- Occasional expressions \(rare flavor only: at most one in about eight posts, and never as your opening\): /g, '- Signature expressions: ');
+}
+
+function oldComments(msgs: LLMMessage[][]): LLMMessage[][] {
+  return msgs.map(c => c.map(m => ({ ...m, content: asOld(m.content) })));
+}
+
 function withoutSoundness(prompts: Record<string, LLMMessage[][]>) {
   const copy = JSON.parse(JSON.stringify(prompts)) as Record<string, LLMMessage[][]>;
   for (const m of copy.review.flat()) m.content = m.content.replace(REVIEW_SOUNDNESS_FIELDS, '');
+  for (const k of Object.keys(copy)) copy[k] = oldComments(copy[k]);
   return copy;
 }
 
 const allText = (msgs: LLMMessage[][]) => msgs.flat().map(m => m.content).join('\n');
 
 beforeEach(() => {
+  setVarietyRng(() => 0);
   vi.restoreAllMocks();
   verdicts = [];
   vi.mocked(runSolverCode).mockReset().mockResolvedValue({ success: true, solutionData: { x: [1, 2, 3] }, executionTimeMs: 5 });
@@ -163,8 +181,8 @@ describe('memory features keep default prompts unchanged', () => {
   });
 
   it('a reply to pushback with no record and no positions sends the 0.1.39 comment prompt', async () => {
-    expect(await pushbackReply(basePersona(), { commentId: 'c1', fromHandle: 'rival' })).toEqual(golden.comment);
-    expect(await pushbackReply(basePersona({ sitePositions: [] }), { commentId: 'c1', fromRecord: { blindAccuracy: null, citationsFound: 0, citationsTotal: 0 } })).toEqual(golden.comment);
+    expect(oldComments(await pushbackReply(basePersona(), { commentId: 'c1', fromHandle: 'rival' }))).toEqual(golden.comment);
+    expect(oldComments(await pushbackReply(basePersona({ sitePositions: [] }), { commentId: 'c1', fromRecord: { blindAccuracy: null, citationsFound: 0, citationsTotal: 0 } }))).toEqual(golden.comment);
   });
 
   it('take and review prompts ask for a position only once the site returns positions, and only add that line', async () => {
@@ -187,7 +205,7 @@ describe('memory features keep default prompts unchanged', () => {
     expect(user).toContain("COMMENTER'S RECORD (@rival: blind rounds 72%, citations found 9/10). " + TRUST_LINE);
     expect(user).toContain('- pos_1 (confidence 0.80): "Greedy lifts never beat product constructions for n > 6"');
     expect(user).toContain('"positionUpdate": { "positionId"');
-    expect(msgs[0][0]).toEqual(golden.comment[0][0]);
+    expect(oldComments(msgs)[0][0]).toEqual(golden.comment[0][0]);
     expect(user.startsWith(golden.comment[0][1].content)).toBe(true);
   });
 
@@ -195,7 +213,7 @@ describe('memory features keep default prompts unchanged', () => {
     const p = await capturePrompts(basePersona({ focus: { topics: ['cap sets'], goal: 'Beat the cap set record' } }));
     expect(allText(p.decide)).toContain("Your owner's current focus for you (topics: cap sets; goal: Beat the cap set record)");
     const rest = withoutSoundness(p);
-    for (const k of ['solution', 'solver', 'review', 'critique', 'comment'] as const) expect(rest[k]).toEqual(golden[k]);
+    for (const k of ['solution', 'solver', 'review', 'critique', 'comment'] as const) expect(oldComments(rest[k])).toEqual(golden[k]);
   });
 
   it('site notes land after memory.md and before the site record', async () => {
@@ -215,7 +233,7 @@ describe('working styles change solving and reviewing, not tone', () => {
       expect(allText(p.solver)).toContain(WORK_STYLES[style].code);
       expect(allText(p.review)).toContain(WORK_STYLES[style].review);
       expect(allText(p.critique)).toContain(WORK_STYLES[style].review);
-      expect(p.comment).toEqual(golden.comment);
+      expect(oldComments(p.comment)).toEqual(golden.comment);
     });
   }
 
@@ -224,7 +242,7 @@ describe('working styles change solving and reviewing, not tone', () => {
     for (const k of ['solution', 'solver', 'review', 'critique', 'decide']) {
       expect(allText(p[k])).toContain('fine-grained complexity');
     }
-    expect(p.comment).toEqual(golden.comment);
+    expect(oldComments(p.comment)).toEqual(golden.comment);
   });
 });
 

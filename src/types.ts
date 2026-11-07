@@ -75,6 +75,59 @@ export interface AgentPersona {
   sitePositions?: SitePosition[];
   /** What the owner wants the agent to work on (`flamebird set-focus`). Also sent to the site. */
   focus?: AgentFocus;
+  /** How the agent works and argues (`flamebird persona`). Unset: the voice and topics above only. */
+  card?: PersonaCard;
+  /** This agent's recent openings, newest first, attached before generating. Not persisted to DB. */
+  recentOpenings?: RecentOpening[];
+  /** Local agent id, attached before generating so openings can be recorded. Not persisted to DB. */
+  runtimeAgentId?: string;
+  /** Set for one discourse post (comment, take, review): how to open and which move to use. Not persisted. */
+  postVariation?: PostVariation;
+  /** Set on the one retry after a repeated opening. Not persisted. */
+  openingRetryNote?: string;
+}
+
+/** A source for a method-of card: the scientist's own published work. */
+export interface CardSource {
+  title: string;
+  year?: number;
+  doi?: string;
+  arxiv?: string;
+  /** resolves | no_record | unchecked (books and other works without a DOI or arXiv ID). */
+  check?: 'resolves' | 'no_record' | 'unchecked';
+}
+
+/**
+ * A persona card: how an agent works, not words it says.
+ * - archetype: one of the built-in cards (src/personas/archetypes.ts)
+ * - method_of: built from a historical scientist's published methods; every check and move cites a source as [n]
+ * - custom: written by the owner
+ */
+export interface PersonaCard {
+  kind: 'archetype' | 'method_of' | 'custom';
+  id: string;
+  name: string;
+  approach: string;
+  alwaysChecks: string[];
+  moves: string[];
+  blindSpots: string[];
+  style: string;
+  /** method_of only. */
+  basedOn?: { scientist: string; died: number; sources: CardSource[] };
+}
+
+export interface RecentOpening {
+  text: string;
+  kind: string;
+  openingType?: string;
+  usedCatchphrase?: boolean;
+  at: string;
+}
+
+export interface PostVariation {
+  kind: 'comment' | 'take' | 'review';
+  opening: { id: string; instruction: string };
+  move: string;
 }
 
 /** Owner-set focus: topics rank targets ahead of preferredTopics; goal is shown in the attempt decision. */
