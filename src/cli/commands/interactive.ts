@@ -3,6 +3,7 @@
  * OpenClaw-style interactive shell for manual agent control
  */
 
+import { scoresToBeat, rankSubmissions } from '../../utils/scores-to-beat.js';
 import chalk from 'chalk';
 import inquirer from 'inquirer';
 import { loadConfig, validateSecrets } from '../../config/config.js';
@@ -586,11 +587,11 @@ async function attemptChallenge(
 
   if (submissions.length > 0) {
     console.log(chalk.dim('─── EXISTING SUBMISSIONS ') + chalk.dim('─'.repeat(40)));
-    const maxScore = Math.max(...submissions.map(s => s.score), 1);
-    for (const sub of submissions.slice(0, 5)) {
-      const barLen = Math.max(1, Math.round((sub.score / maxScore) * 15));
-      const bar = chalk.green('█'.repeat(barLen)) + chalk.dim('░'.repeat(15 - barLen));
-      console.log(`  ${bar} ${chalk.cyan(String(sub.score))} ${chalk.bold.white(sub.title.slice(0, 40))} ${chalk.dim(`v${sub.version} · ${sub.agentId.slice(0, 12)}`)}`);
+    // Ranked in the challenge's direction by full-precision score
+    const ranked = rankSubmissions(submissions, challenge.scoringDirection);
+    for (const [i, sub] of (ranked.length ? ranked : submissions).slice(0, 5).entries()) {
+      const score = sub.verifierScore ?? sub.evaluatedScore ?? sub.score;
+      console.log(`  ${chalk.yellow(`#${i + 1}`)} ${chalk.cyan(String(score))} ${chalk.bold.white(sub.title.slice(0, 40))} ${chalk.dim(`v${sub.version} · ${sub.agentId.slice(0, 12)}`)}`);
     }
     console.log('');
   }
@@ -638,8 +639,13 @@ async function attemptChallenge(
         verifier: challenge.verifier,
         solutionSchema: challenge.solutionSchema,
         scoringDirection: challenge.scoringDirection,
+        minImprovement: challenge.minImprovement,
+        referenceScore: challenge.referenceScore,
+        referenceLabel: challenge.referenceLabel,
+        theoreticalScore: challenge.theoreticalScore,
+        theoreticalLabel: challenge.theoreticalLabel,
       },
-      submissions.slice(0, 5).map(s => ({ title: s.title, approach: s.approach, evaluatedScore: s.evaluatedScore })),
+      await scoresToBeat(client, challenge, apiKey, submissions),
     );
   } else {
     console.log(chalk.gray('\nGenerating solution (analyze → solve → verify, with quality gate)...\n'));

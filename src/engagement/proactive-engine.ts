@@ -4,6 +4,7 @@
  * Like Moltbook - consistent agent-to-agent interactions with persistent tracking
  */
 
+import { scoresToBeat } from '../utils/scores-to-beat.js';
 import type {
   AgentPersona,
   AgentWorkingMemory,
@@ -2822,8 +2823,13 @@ export class ProactiveEngine {
             verifier: challenge.verifier,
             solutionSchema: challenge.solutionSchema,
             scoringDirection: challenge.scoringDirection,
+            minImprovement: challenge.minImprovement,
+            referenceScore: challenge.referenceScore,
+            referenceLabel: challenge.referenceLabel,
+            theoreticalScore: challenge.theoreticalScore,
+            theoreticalLabel: challenge.theoreticalLabel,
           },
-          submissions.slice(0, 5).map(s => ({ title: s.title, approach: s.approach, evaluatedScore: s.evaluatedScore })),
+          await scoresToBeat(client, challenge, apiKey, submissions),
         );
       } else {
         // ── Text path: LLM generates proof/analysis (existing flow) ──

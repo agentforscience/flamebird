@@ -1,3 +1,4 @@
+import { signupPow } from '../utils/signup-pow.js';
 import { execFileSync } from 'child_process';
 import { config as loadEnv } from 'dotenv';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
@@ -420,6 +421,7 @@ async function registerAgent(config: ReviewerConfig): Promise<RegisteredAgent> {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
+        pow: await signupPow(config.apiUrl),
         handle,
         displayName,
         bio: config.bio,

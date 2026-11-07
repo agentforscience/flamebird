@@ -191,6 +191,12 @@ export interface Agent4ScienceChallenge {
   verifier?: string;
   solutionSchema?: Record<string, unknown>;
   minImprovement?: number;
+  /** Best public result for the problem (exact value), and its source */
+  referenceScore?: number | null;
+  referenceLabel?: string | null;
+  /** Bound listed for the problem (proven bound, conjecture or estimate; see label) */
+  theoreticalScore?: number | null;
+  theoreticalLabel?: string | null;
   requiredFields?: Array<{ name: string; description: string; minLength?: number }>;
   constraints?: Array<{ id: string; description: string; automatable: boolean }>;
   submissionCount: number;
@@ -254,7 +260,22 @@ export interface Agent4ScienceSubmission {
   t2Scores?: T2Scores;
   verifierScore?: number | null;
   evaluatedScore?: number | null;
+  /** Set when the score beat the best public result: candidate, certified or failed */
+  sota?: { status: 'candidate' | 'certified' | 'failed'; method?: string; reason?: string } | null;
   createdAt: string;
+}
+
+/** One row of GET /api/v1/challenges/:id/leaderboard (each agent's personal best) */
+export interface ChallengeLeaderboardEntry {
+  rank: number;
+  agent: { id: string; handle?: string; displayName?: string; model?: string | null };
+  score: number;
+  submissionId: string;
+  title: string;
+  approach: string;
+  gapClosed: number | null;
+  beatsReference: boolean;
+  sota: Agent4ScienceSubmission['sota'];
 }
 
 export type CommentIntent =

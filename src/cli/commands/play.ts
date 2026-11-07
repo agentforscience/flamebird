@@ -3,6 +3,7 @@
  * Game-like interface to select agents, create new ones, and start the runtime
  */
 
+import { rankSubmissions } from '../../utils/scores-to-beat.js';
 import chalk from 'chalk';
 import inquirer from 'inquirer';
 import fs from 'fs';
@@ -920,28 +921,34 @@ async function viewSubmissionsMenu(challenge: Agent4ScienceChallenge, config: Re
   console.log(chalk.dim(`  ${challenge.title.slice(0, W)}`));
   console.log('');
 
-  const res = await fetch(`${apiUrl}/api/v1/challenges/${challenge.id}/submissions?sort=top&limit=10`);
-  const raw = await res.json() as { submissions?: Array<{ id: string; title: string; approach: string; score: number; version: number; agentId: string; commentCount?: number }> };
-  const subs = raw.submissions || [];
+  // The leaderboard ranks personal bests by full-precision score in the
+  // challenge's direction (sort=top on submissions is descending only).
+  const res = await fetch(`${apiUrl}/api/v1/challenges/${challenge.id}/leaderboard?limit=10`);
+  const raw = await res.json() as {
+    leaderboard?: Array<{ rank: number; title: string; approach: string; score: number; version: number; agent?: { handle?: string; id?: string }; gapClosed: number | null; sota: { status: string } | null }>;
+    challenge?: { referenceScore?: number | null; referenceLabel?: string | null };
+  };
+  const subs = raw.leaderboard || [];
+  if (typeof raw.challenge?.referenceScore === 'number') {
+    console.log(chalk.dim(`  Best public result: ${raw.challenge.referenceScore}${raw.challenge.referenceLabel ? ` (${raw.challenge.referenceLabel})` : ''}`));
+    console.log('');
+  }
 
   if (subs.length === 0) {
     console.log(chalk.dim('  No submissions yet — be the first to solve it.\n'));
   } else {
-    // Leaderboard-style display
-    const maxScore = Math.max(...subs.map(s => s.score), 1);
     for (let i = 0; i < subs.length; i++) {
       const sub = subs[i];
-      const rank = i + 1;
+      const rank = sub.rank;
       const rankStr = rank <= 3
         ? chalk.yellow(`#${rank}`)
         : chalk.dim(`#${rank}`);
 
-      // Score bar (visual indicator)
-      const barLen = Math.max(1, Math.round((sub.score / maxScore) * 20));
-      const bar = chalk.green('█'.repeat(barLen)) + chalk.dim('░'.repeat(20 - barLen));
+      const sotaTag = sub.sota?.status === 'certified' ? chalk.green(' SOTA') : sub.sota?.status === 'candidate' ? chalk.yellow(' SOTA pending') : '';
+      const gapTag = sub.gapClosed !== null && sub.gapClosed > 0 ? chalk.green(`  ${(sub.gapClosed * 100).toFixed(2)}% gap closed`) : '';
 
-      console.log(`  ${rankStr}  ${chalk.bold.white(sub.title.slice(0, 50))}${sub.title.length > 50 ? chalk.dim('...') : ''}`);
-      console.log(`      ${bar}  ${chalk.cyan(String(sub.score))} pts  ${chalk.dim(`v${sub.version}`)}  ${chalk.dim(`by ${sub.agentId.slice(0, 16)}`)}`);
+      console.log(`  ${rankStr}  ${chalk.bold.white(sub.title.slice(0, 50))}${sub.title.length > 50 ? chalk.dim('...') : ''}${sotaTag}`);
+      console.log(`      ${chalk.cyan(String(sub.score))}${gapTag}  ${chalk.dim(`v${sub.version}`)}  ${chalk.dim(`by @${sub.agent?.handle ?? sub.agent?.id ?? '?'}`)}`);
       console.log(`      ${chalk.dim(sub.approach.slice(0, 60))}${sub.approach.length > 60 ? chalk.dim('...') : ''}`);
       if (i < subs.length - 1) console.log('');
     }
@@ -1018,8 +1025,9 @@ async function attemptChallengeFromMenu(challenge: Agent4ScienceChallenge, confi
 
     if (submissions.length > 0) {
       console.log(chalk.bold(`    ${submissions.length} existing submission(s):`));
-      for (const sub of submissions.slice(0, 5)) {
-        console.log(chalk.gray(`      • ${sub.title} (v${sub.version}, score: ${sub.score}) by ${sub.agentId.slice(0, 12)}...`));
+      const ranked = rankSubmissions(submissions, challenge.scoringDirection);
+      for (const sub of (ranked.length ? ranked : submissions).slice(0, 5)) {
+        console.log(chalk.gray(`      • ${sub.title} (v${sub.version}, score: ${sub.verifierScore ?? sub.evaluatedScore ?? sub.score}) by ${sub.agentId.slice(0, 12)}...`));
       }
       console.log('');
     }
