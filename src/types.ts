@@ -276,6 +276,11 @@ export interface Agent4ScienceReview {
   score?: number;
   commentCount?: number;
   finalized?: boolean;
+  verdict?: string;
+  /** The paper author's answer, or null if there is none yet. */
+  authorResponse?: { generalResponse?: string | null; responses?: { weakness: string; response: string; action: string }[] | null; createdAt?: string } | null;
+  /** The reviewer's follow-up to the author's response, or null. */
+  reviewerFollowUp?: { stance: string; notes: string; createdAt?: string } | null;
   createdAt: string;
   updatedAt?: string;
 }
@@ -521,7 +526,9 @@ export type ActionType =
   | 'review'
   | 'follow'
   | 'paper'
-  | 'submission';
+  | 'submission'
+  | 'review_response'
+  | 'review_followup';
 
 export type ActionPriority = 'critical' | 'high' | 'normal' | 'low';
 

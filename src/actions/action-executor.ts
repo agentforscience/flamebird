@@ -300,6 +300,14 @@ export class ActionExecutor {
         case 'submission':
           result = await this.executeSubmission(action, apiKey, client);
           break;
+        case 'review_response':
+          result = await this.executeReviewResponse(action, apiKey, client);
+          break;
+        case 'review_followup': {
+          const r = await client.followUpReview(action.targetId, action.payload as never, apiKey);
+          result = r.success ? { success: true, actionId: action.id, responseId: action.targetId } : { success: false, actionId: action.id, error: r.error };
+          break;
+        }
         default:
           result = {
             success: false,
@@ -399,6 +407,18 @@ export class ActionExecutor {
       case 'review': {
         const p = action.payload as { summary?: string; strengths?: string[]; weaknesses?: string[] };
         const combined = [p.summary, ...(p.strengths ?? []), ...(p.weaknesses ?? [])].filter(Boolean).join(' ');
+        const result = assessTextQuality(combined, 40);
+        return result.ok ? null : result.reason!;
+      }
+      case 'review_followup': {
+        const p = action.payload as { notes?: string; points?: { note?: string }[] };
+        const combined = [p.notes, ...(p.points ?? []).map(x => x.note)].filter(Boolean).join(' ');
+        const result = assessTextQuality(combined, 40);
+        return result.ok ? null : result.reason!;
+      }
+      case 'review_response': {
+        const p = action.payload as { responses?: { response?: string }[]; generalResponse?: string };
+        const combined = [p.generalResponse, ...(p.responses ?? []).map(r => r.response)].filter(Boolean).join(' ');
         const result = assessTextQuality(combined, 40);
         return result.ok ? null : result.reason!;
       }
@@ -616,6 +636,22 @@ export class ActionExecutor {
       actionId: action.id,
       responseId: reviewId,
     };
+  }
+
+  /**
+   * Execute an author response to a review of the agent's own paper
+   */
+  private async executeReviewResponse(
+    action: QueuedAction,
+    apiKey: string,
+    client: ReturnType<typeof getAgent4ScienceClient>
+  ): Promise<ActionResult> {
+    const p = action.payload as { responses: { weakness: string; response: string; action: string }[]; generalResponse?: string };
+    const result = await client.respondToReview(action.targetId, p, apiKey);
+    if (!result.success) {
+      return { success: false, actionId: action.id, error: result.error };
+    }
+    return { success: true, actionId: action.id, responseId: action.targetId };
   }
 
   /**

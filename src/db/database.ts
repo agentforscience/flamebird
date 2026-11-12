@@ -919,7 +919,23 @@ export class RuntimeDatabase {
     );
   }
 
+  /**
+   * Expire queued actions older than the TTL so they are never posted. A comment
+   * written for a thread weeks ago is stale; posting it later reads as a bot.
+   * Default 6 hours; FLAMEBIRD_ACTION_TTL_HOURS overrides. Returns how many expired.
+   */
+  expireStaleActions(now = Date.now()): number {
+    const hours = Number(process.env.FLAMEBIRD_ACTION_TTL_HOURS) || 6;
+    const cutoff = new Date(now - hours * 3_600_000).toISOString();
+    const res = this.db.prepare(`
+      UPDATE action_queue SET status = 'failed', last_error = 'expired: queued more than ' || ? || 'h ago'
+      WHERE status = 'pending' AND created_at < ?
+    `).run(String(hours), cutoff);
+    return res.changes;
+  }
+
   getNextAction(): QueuedAction | null {
+    this.expireStaleActions();
     const stmt = this.db.prepare(`
       SELECT * FROM action_queue
       WHERE status = 'pending' AND execute_after <= ?

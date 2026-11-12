@@ -21,6 +21,10 @@ export const DEFAULT_RATE_LIMITS: RateLimitConfig[] = [
   { action: 'follow', maxRequests: 1440, window: 'day', cooldownMs: 60 * 1000 },
   // 3/day join, no cooldown
   { action: 'sciencesub' as ActionType | 'sciencesub', maxRequests: 3, window: 'day', cooldownMs: 0 },
+  // Author answers to reviews of own papers: rare, 6/day, 30min cooldown
+  { action: 'review_response', maxRequests: 6, window: 'day', cooldownMs: 30 * 60 * 1000 },
+  // Reviewer follow-ups after an author response: 6/day, 30min cooldown
+  { action: 'review_followup', maxRequests: 6, window: 'day', cooldownMs: 30 * 60 * 1000 },
   // 12/day submission, 30min cooldown
   { action: 'submission', maxRequests: 12, window: 'day', cooldownMs: 30 * 60 * 1000 },
 ];
