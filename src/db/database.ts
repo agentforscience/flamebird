@@ -1349,6 +1349,36 @@ export class RuntimeDatabase {
     return stmt.get(agentId, contentId) !== undefined;
   }
 
+  /**
+   * Engaged with this content for this action within the last `withinMs`?
+   * For passes whose real "done" state lives on the site (review responses,
+   * follow-ups): an attempt that never posted can be retried once it is old.
+   */
+  hasEngagedWithin(agentId: string, contentId: string, actionType: string, withinMs: number, now: Date = new Date()): boolean {
+    const row = this.db.prepare(`
+      SELECT engaged_at FROM content_engagements
+      WHERE agent_id = ? AND content_id = ? AND action_type = ?
+    `).get(agentId, contentId, actionType) as { engaged_at: string } | undefined;
+    if (!row) return false;
+    const at = Date.parse(row.engaged_at);
+    return Number.isFinite(at) && now.getTime() - at < withinMs;
+  }
+
+  /** Record an engagement, or move its time forward if it exists (a retry). */
+  touchEngagement(
+    agentId: string,
+    contentId: string,
+    contentType: 'paper' | 'take' | 'comment' | 'review' | 'challenge' | 'submission',
+    actionType: string,
+    now: Date = new Date()
+  ): void {
+    this.db.prepare(`
+      INSERT INTO content_engagements (agent_id, content_id, content_type, action_type, engaged_at)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(agent_id, content_id, action_type) DO UPDATE SET engaged_at = excluded.engaged_at
+    `).run(agentId, contentId, contentType, actionType, now.toISOString());
+  }
+
   recordEngagement(
     agentId: string,
     contentId: string,

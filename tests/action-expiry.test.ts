@@ -17,3 +17,18 @@ describe('action queue expiry', () => {
     expect(db.getQueueStats().failed).toBe(1);
   });
 });
+
+describe('review engagement retry', () => {
+  it('treats an old attempt as retryable and a touched one as fresh', () => {
+    const db = createDatabase(join(mkdtempSync(join(tmpdir(), 'fb-eng-')), 'db.sqlite'));
+    (db as unknown as { db: { pragma: (s: string) => void } }).db.pragma('foreign_keys = OFF');
+    const day = 86_400_000;
+    const twoDaysAgo = new Date(Date.now() - 2 * day);
+    expect(db.hasEngagedWithin('a1', 'review_1', 'review_followup', day)).toBe(false);
+    db.touchEngagement('a1', 'review_1', 'review', 'review_followup', twoDaysAgo);
+    expect(db.hasEngaged('a1', 'review_1', 'review_followup')).toBe(true);
+    expect(db.hasEngagedWithin('a1', 'review_1', 'review_followup', day)).toBe(false);
+    db.touchEngagement('a1', 'review_1', 'review', 'review_followup');
+    expect(db.hasEngagedWithin('a1', 'review_1', 'review_followup', day)).toBe(true);
+  });
+});

@@ -30,6 +30,9 @@ import { paperText } from '../utils/own-work.js';
 import { targetTopics } from '../utils/focus.js';
 import { workProfileFor, workLogFields } from '../llm/work-style.js';
 
+/** A review response or follow-up that never posted (expired, endpoint missing) is retried after this. */
+const REVIEW_RETRY_MS = 24 * 60 * 60_000;
+
 const logger = createLogger('proactive');
 
 /** Resolve agent ID to @handle for readable logs. Falls back to last 8 chars of ID. */
@@ -1909,7 +1912,7 @@ export class ProactiveEngine {
           : []) as Agent4ScienceReview[];
         const open = reviews
           .filter(r => r.reviewerAgentId !== agentId && !r.authorResponse && (r.weaknesses?.length ?? 0) > 0
-            && !db.hasEngaged(agentId, r.id, 'review_response'))
+            && !db.hasEngagedWithin(agentId, r.id, 'review_response', REVIEW_RETRY_MS))
           .sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
         const review = open[0];
         if (!review) continue;
@@ -1926,8 +1929,9 @@ export class ProactiveEngine {
           suggestions: review.suggestions,
           verdict: review.verdict,
         });
-        // Mark it either way so a review the model can't answer isn't retried every cycle
-        db.recordEngagement(agentId, review.id, 'review', 'review_response');
+        // Mark it either way so a review the model can't answer isn't retried every
+        // cycle; the site still shows it unanswered, so it is retried after a day.
+        db.touchEngagement(agentId, review.id, 'review', 'review_response');
         if (!payload) {
           logger.info(`${agentName(agentId)} could not write a usable response to review ${review.id}; skipped`);
           continue;
@@ -1961,7 +1965,7 @@ export class ProactiveEngine {
         : []) as Agent4ScienceReview[];
       const review = reviews
         .filter(r => r.reviewerAgentId === agentId && r.authorResponse && !r.reviewerFollowUp
-          && !db.hasEngaged(agentId, r.id, 'review_followup'))
+          && !db.hasEngagedWithin(agentId, r.id, 'review_followup', REVIEW_RETRY_MS))
         .sort((a, b) => String(a.authorResponse?.createdAt ?? '').localeCompare(String(b.authorResponse?.createdAt ?? '')))[0];
       if (!review) return;
 
@@ -1971,7 +1975,7 @@ export class ProactiveEngine {
         { title: paper?.title || review.paper?.title || '', text: paper ? paperText(paper) : '' },
         { id: review.id, summary: review.summary, strengths: review.strengths ?? [], weaknesses: review.weaknesses ?? [], suggestions: review.suggestions, verdict: review.verdict },
         review.authorResponse!);
-      db.recordEngagement(agentId, review.id, 'review', 'review_followup');
+      db.touchEngagement(agentId, review.id, 'review', 'review_followup');
       if (!payload) {
         logger.info(`${agentName(agentId)} could not write a usable follow-up to review ${review.id}; skipped`);
         return;
