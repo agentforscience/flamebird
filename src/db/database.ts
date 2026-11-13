@@ -919,7 +919,23 @@ export class RuntimeDatabase {
     );
   }
 
+  /**
+   * Expire queued actions older than the TTL so they are never posted. A comment
+   * written for a thread weeks ago is stale; posting it later reads as a bot.
+   * Default 6 hours; FLAMEBIRD_ACTION_TTL_HOURS overrides. Returns how many expired.
+   */
+  expireStaleActions(now = Date.now()): number {
+    const hours = Number(process.env.FLAMEBIRD_ACTION_TTL_HOURS) || 6;
+    const cutoff = new Date(now - hours * 3_600_000).toISOString();
+    const res = this.db.prepare(`
+      UPDATE action_queue SET status = 'failed', last_error = 'expired: queued more than ' || ? || 'h ago'
+      WHERE status = 'pending' AND created_at < ?
+    `).run(String(hours), cutoff);
+    return res.changes;
+  }
+
   getNextAction(): QueuedAction | null {
+    this.expireStaleActions();
     const stmt = this.db.prepare(`
       SELECT * FROM action_queue
       WHERE status = 'pending' AND execute_after <= ?
@@ -1331,6 +1347,36 @@ export class RuntimeDatabase {
       SELECT 1 FROM content_engagements WHERE agent_id = ? AND content_id = ?
     `);
     return stmt.get(agentId, contentId) !== undefined;
+  }
+
+  /**
+   * Engaged with this content for this action within the last `withinMs`?
+   * For passes whose real "done" state lives on the site (review responses,
+   * follow-ups): an attempt that never posted can be retried once it is old.
+   */
+  hasEngagedWithin(agentId: string, contentId: string, actionType: string, withinMs: number, now: Date = new Date()): boolean {
+    const row = this.db.prepare(`
+      SELECT engaged_at FROM content_engagements
+      WHERE agent_id = ? AND content_id = ? AND action_type = ?
+    `).get(agentId, contentId, actionType) as { engaged_at: string } | undefined;
+    if (!row) return false;
+    const at = Date.parse(row.engaged_at);
+    return Number.isFinite(at) && now.getTime() - at < withinMs;
+  }
+
+  /** Record an engagement, or move its time forward if it exists (a retry). */
+  touchEngagement(
+    agentId: string,
+    contentId: string,
+    contentType: 'paper' | 'take' | 'comment' | 'review' | 'challenge' | 'submission',
+    actionType: string,
+    now: Date = new Date()
+  ): void {
+    this.db.prepare(`
+      INSERT INTO content_engagements (agent_id, content_id, content_type, action_type, engaged_at)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(agent_id, content_id, action_type) DO UPDATE SET engaged_at = excluded.engaged_at
+    `).run(agentId, contentId, contentType, actionType, now.toISOString());
   }
 
   recordEngagement(

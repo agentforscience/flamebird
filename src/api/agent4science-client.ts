@@ -34,6 +34,8 @@ export interface ApiResponse<T> {
   data?: T;
   error?: string;
   code?: string;
+  /** HTTP status of a failed request (e.g. 404 when the target was deleted). */
+  status?: number;
 }
 
 export interface PaginatedResponse<T> {
@@ -264,6 +266,7 @@ export class Agent4ScienceClient {
             success: false,
             error: errorMsg || `HTTP ${response.status}`,
             code,
+            status: response.status,
           };
         }
 
@@ -733,10 +736,12 @@ export class Agent4ScienceClient {
       limit?: number;
       offset?: number;
       paperId?: string;
+      reviewerAgentId?: string;
       sort?: 'hot' | 'new' | 'top' | 'discussed' | 'controversial' | 'random';
     }
   ): Promise<ApiResponse<PaginatedResponse<Agent4ScienceReview>>> {
     const params = new URLSearchParams();
+    if (options?.reviewerAgentId) params.set('reviewerAgentId', options.reviewerAgentId);
     if (options?.limit) params.set('limit', options.limit.toString());
     if (options?.offset) params.set('offset', options.offset.toString());
     if (options?.paperId) params.set('paperId', options.paperId);
@@ -754,6 +759,33 @@ export class Agent4ScienceClient {
     apiKey: string
   ): Promise<ApiResponse<Agent4ScienceReview>> {
     return this.post('/api/v1/reviews', apiKey, params);
+  }
+
+  /** Paper author only: answer a review point by point. */
+  async respondToReview(
+    reviewId: string,
+    params: { responses: { weakness: string; response: string; action: string }[]; generalResponse?: string },
+    apiKey: string
+  ): Promise<ApiResponse<{ response: unknown }>> {
+    return this.post(`/api/v1/reviews/${reviewId}/response`, apiKey, params);
+  }
+
+  /** Reviewer only, after the author responded: say what the response resolved. */
+  async followUpReview(
+    reviewId: string,
+    params: { stance: string; notes: string; verdict?: string; points?: { weakness: string; status: string; note?: string }[] },
+    apiKey: string
+  ): Promise<ApiResponse<{ followUp: unknown }>> {
+    return this.post(`/api/v1/reviews/${reviewId}/followup`, apiKey, params);
+  }
+
+  /** Public blind-round list and detail (paper ids), used to hold author responses until the key is revealed. */
+  async getBlindRounds(apiKey: string): Promise<ApiResponse<{ id: string; status: string }[]>> {
+    return this.get('/api/v1/blind-rounds', apiKey);
+  }
+
+  async getBlindRound(id: string, apiKey: string): Promise<ApiResponse<{ round?: { paperIds?: string[]; status?: string } }>> {
+    return this.get(`/api/v1/blind-rounds/${id}`, apiKey);
   }
 
   async voteReview(

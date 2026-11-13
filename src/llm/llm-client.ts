@@ -3,6 +3,9 @@
  * Unified interface for LLM providers (OpenRouter, Anthropic, OpenAI)
  */
 
+import { findOwnWork, ownWorkBlock, type OwnWork, type OwnWorkClient } from '../utils/own-work.js';
+import { getAgent4ScienceClient } from '../api/agent4science-client.js';
+import { reviewResponsePrompt, normalizeReviewResponse, followUpPrompt, normalizeFollowUp, type ReviewForResponse, type ReviewResponsePayload, type AuthorResponseForFollowUp, type FollowUpPayload } from '../utils/review-response.js';
 import type { AgentPersona, AgentLLMOverride, AgentWorkingMemory, CommentIntent } from '../types.js';
 import { claudeModel, runClaude } from './claude-cli.js';
 import { calculateSimilarity } from '../utils/similarity.js';
@@ -246,6 +249,8 @@ export class LLMClient {
       existingDiscussion?: string[];
       /** Set when replying to pushback on the agent's own work (adds record and positions when present). */
       pushback?: PushbackContext;
+      /** The agent's own work at the root of this thread. Looked up from rootId when left out; null means not theirs. */
+      ownWork?: OwnWork | null;
     },
     memory?: AgentWorkingMemory,
   ): Promise<GeneratedComment> {
@@ -256,7 +261,10 @@ export class LLMClient {
       rootId: context.rootId,
     } : undefined;
     const systemPrompt = this.buildPersonaPrompt(persona, memory, memoryHints);
-    const userPrompt = this.buildCommentPrompt(context) + pushbackPromptBlock(persona, context.pushback, context.rootId);
+    const own = context.ownWork !== undefined ? context.ownWork : await this.lookupOwnWork(persona, context);
+    const userPrompt = (own ? ownWorkBlock(own) + '\n' : '')
+      + this.buildCommentPrompt({ ...context, isOwnWork: !!own })
+      + pushbackPromptBlock(persona, context.pushback, context.rootId);
     const offeredPositions = context.pushback ? activePositions(persona) : [];
 
     const response = await this.complete([
@@ -273,6 +281,53 @@ export class LLMClient {
     }
 
     return this.parseCommentResponse(response.content, offeredPositions);
+  }
+
+  /**
+   * The author's point-by-point response to a review of its own paper.
+   * Returns null when the answer can't be used (it is not posted then).
+   */
+  async generateReviewResponse(
+    persona: AgentPersona,
+    paper: { title: string; text: string },
+    review: ReviewForResponse,
+  ): Promise<ReviewResponsePayload | null> {
+    const response = await this.complete([
+      { role: 'system', content: this.buildPersonaPrompt(persona, undefined, { currentTopic: paper.title }) },
+      { role: 'user', content: reviewResponsePrompt(paper.title, paper.text, review) },
+    ], 2048);
+    this.trackCost('review_response', response.usage);
+    return normalizeReviewResponse(this.extractJSON(response.content), review.weaknesses);
+  }
+
+  /**
+   * The reviewer's follow-up after the paper's author answered its review.
+   * Returns null when the answer can't be used.
+   */
+  async generateReviewFollowUp(
+    persona: AgentPersona,
+    paper: { title: string; text: string },
+    review: ReviewForResponse,
+    response: AuthorResponseForFollowUp,
+  ): Promise<FollowUpPayload | null> {
+    const out = await this.complete([
+      { role: 'system', content: this.buildPersonaPrompt(persona, undefined, { currentTopic: paper.title }) },
+      { role: 'user', content: followUpPrompt(paper.title, paper.text, review, response) },
+    ], 2048);
+    this.trackCost('review_followup', out.usage);
+    return normalizeFollowUp(this.extractJSON(out.content), review.weaknesses);
+  }
+
+  /** Is this thread's root the agent's own work? Needs the agent id that attachSiteMemory sets. */
+  private async lookupOwnWork(
+    persona: AgentPersona,
+    context: { rootId?: string; rootType?: string; targetType: string },
+  ): Promise<OwnWork | null> {
+    if (!persona.runtimeAgentId || !context.rootId || context.rootType === 'submission' || context.rootType === 'challenge') return null;
+    let client: OwnWorkClient;
+    try { client = getAgent4ScienceClient(); } catch { return null; }
+    const hint = context.rootType ?? (context.targetType !== 'comment' ? context.targetType : undefined);
+    return findOwnWork(client, persona.runtimeAgentId, context.rootId, hint);
   }
 
   /**
@@ -988,6 +1043,8 @@ ${parts.join('\n\n')}`;
     rootTitle?: string;
     rootType?: string;
     existingDiscussion?: string[];
+    /** The root is the agent's own work; ownWorkBlock() comes before this prompt. */
+    isOwnWork?: boolean;
   }): string {
     // For replies to comments, build a structured conversation-aware prompt
     if (context.triggerType === 'reply' && context.threadContext) {
@@ -1093,34 +1150,29 @@ Generate your response in JSON format:
       return prompt;
     }
 
-    // For author replies — the agent is responding to a comment on their own work
+    // For author replies — the agent is responding to a comment on their own work.
+    // ownWorkBlock() (with the work's text) comes before this when the work could be loaded.
     if (context.triggerType === 'author_reply') {
       const rootType = context.rootType || 'paper';
       const rootTitle = context.rootTitle || 'your work';
 
       let prompt = `You are the AUTHOR of this ${rootType}: "${rootTitle}"
-
-Someone commented on your work:
+${context.threadContext ? `\n=== CONVERSATION THREAD ===\n${context.threadContext}\n` : ''}
+Someone (${context.fromAgent ? `@${context.fromAgent}` : 'another researcher'}) commented on your work:
 "${context.targetContent}"
 
-AS THE AUTHOR, you have knowledge the commenter does not — you know why you made certain design choices, what you tried that did not work, what constraints you were operating under, and where you think the real limitations are (as opposed to the ones critics typically focus on).
-
 AUTHOR RESPONSE REQUIREMENTS:
-1. ENGAGE THE SPECIFIC CRITICISM OR QUESTION: Quote or paraphrase the exact point they raised.
-2. RESPOND WITH INSIDER KNOWLEDGE: Share context only the author would know:
-   - Why you chose this approach over alternatives (and what alternatives you considered)
-   - What practical constraints shaped the work (data availability, compute, domain requirements)
-   - What you tried that did not work and what you learned from it
-   - What you would do differently in hindsight
-   - What follow-up work you are planning or think should be done
-3. BE HONEST ABOUT LIMITATIONS: If they identified a real weakness, acknowledge it and explain what it would take to address it. Intellectual honesty builds credibility.
-4. DEFEND WHAT DESERVES DEFENDING: If they mischaracterized your approach or missed important context, correct the record with specifics.
-5. MOVE THE CONVERSATION FORWARD: End with something that invites deeper engagement — a question back to them, a suggestion for what to test, or an area where you genuinely want input.
+1. ENGAGE THE SPECIFIC POINT: Quote or paraphrase the exact criticism or question they raised.
+2. ANSWER FROM WHAT YOU WROTE: Point to the specific claim, number, method or stated limitation in your ${rootType} that bears on their point. Explain why you made the choice the ${rootType} describes, if the ${rootType} gives a reason.
+3. DON'T INVENT: Do not claim experiments, ablations, data, results or history that your ${rootType} doesn't report. If they ask for something you haven't done, say you haven't done it and what it would show.
+4. CONCEDE WHAT IS RIGHT: If they found a real weakness, say so plainly and say what you would change or test. A clear concession builds more credibility than a defensive reply.
+5. DEFEND WHAT DESERVES DEFENDING: If they misread the ${rootType}, correct the record by pointing to the part that shows otherwise.
+6. MOVE IT FORWARD: End with a concrete next step: the check that would settle the disagreement, or a specific question back to them.
 
 Generate your response in JSON format:
 {
   "intent": "challenge" | "support" | "clarify" | "connect" | "question" | "extend" | "probe" | "synthesize",
-  "body": "Your reply as the author (2-4 paragraphs, with insider knowledge and specifics)",
+  "body": "Your reply as the author (1-3 paragraphs, grounded in what your ${rootType} actually says)",
   "confidence": 0.0-1.0,
   "evidenceAnchor": "the specific point from their comment you are responding to"
 }`;
