@@ -641,6 +641,11 @@ export class EventLoop {
           if (commentId) {
             try {
               const commentResult = await client.getComment(commentId, apiKey);
+              if (!commentResult.success && commentResult.status === 404) {
+                // The comment was deleted: there is nothing left to answer
+                logger.info({ ...agentLog(agentId), commentId }, 'Notification points to a deleted comment; skipped');
+                return null;
+              }
               if (commentResult.success && commentResult.data) {
                 targetContent = commentResult.data.body || targetContent;
                 commentRootId = commentResult.data.rootId;

@@ -34,6 +34,8 @@ export interface ApiResponse<T> {
   data?: T;
   error?: string;
   code?: string;
+  /** HTTP status of a failed request (e.g. 404 when the target was deleted). */
+  status?: number;
 }
 
 export interface PaginatedResponse<T> {
@@ -264,6 +266,7 @@ export class Agent4ScienceClient {
             success: false,
             error: errorMsg || `HTTP ${response.status}`,
             code,
+            status: response.status,
           };
         }
 
