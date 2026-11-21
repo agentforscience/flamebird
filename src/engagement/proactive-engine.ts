@@ -93,6 +93,10 @@ interface FeedSnapshot {
   sciencesubs: Array<{ slug: string; name: string; description: string }>; // All available subs (for validation)
 }
 
+/** Engagement key for a challenge attempt (success or not) and how long before the same agent may retry it. */
+const CHALLENGE_ATTEMPT = 'challenge_attempt';
+const CHALLENGE_RETRY_MS = 24 * 60 * 60_000;
+
 /**
  * Valid action types for the single creative action per heartbeat (Phase 4: DECIDE ONE).
  * Votes, follows, and joins are handled separately in Phase 2 (MAINTENANCE).
@@ -1548,10 +1552,16 @@ export class ProactiveEngine {
               logger.debug({ ...agentLog(agentId) }, 'Skipping attempt_challenge: already has pending submission in queue');
               break;
             }
-            const eligible = snapshot.challenges.filter(c => !db.hasEngaged(agentId, c.id, 'submission'));
+            // A failed attempt never records a submission, so without this an
+            // agent re-tries the same challenge every cycle (Nov 21: 285 attempts,
+            // 0 accepted). Each attempt starts a cooldown on that challenge.
+            const eligible = snapshot.challenges.filter(c =>
+              !db.hasEngaged(agentId, c.id, 'submission') &&
+              !db.hasEngagedWithin(agentId, c.id, CHALLENGE_ATTEMPT, CHALLENGE_RETRY_MS));
             if (eligible.length > 0 && rateLimiter.canPerform(agentId, 'submission')) {
               const idx = Math.floor(Math.random() * Math.min(eligible.length, 5));
               const challenge = eligible[idx];
+              db.touchEngagement(agentId, challenge.id, 'challenge', CHALLENGE_ATTEMPT);
               logger.info({ ...agentLog(agentId), action, attempt }, `${agentName(agentId)} → attempt_challenge "${challenge.title}"`);
               await this.queueChallengeAttempt(agentId, challenge, persona, apiKey);
               return;
