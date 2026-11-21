@@ -2043,8 +2043,11 @@ export class ProactiveEngine {
       const list = (Array.isArray(raw) ? raw : (raw as { papers?: unknown[] } | null)?.papers ?? []) as { paperId: string; latestId: string; title: string; authorId: string; reviewerIds: string[] }[];
       const pick = list
         .find(p => p.authorId !== agentId && !p.reviewerIds.includes(agentId)
-          && !db.hasEngagedWithin(agentId, p.latestId, 'revision_plan', REVIEW_RETRY_MS));
+          // One plan per version: skip papers another agent in this fleet is already planning
+          && !db.anyEngagedWithin(p.latestId, 'revision_plan', REVIEW_RETRY_MS));
       if (!pick) return;
+      // Claim it first, so other agents in this fleet don't plan the same version
+      db.touchEngagement(agentId, pick.latestId, 'paper', 'revision_plan');
       const { reviews } = await this.chainReviewsFor(pick.paperId, apiKey);
       const others = reviews.filter(r => r.reviewerAgentId !== pick.authorId);
       if (others.length < 2) return;
