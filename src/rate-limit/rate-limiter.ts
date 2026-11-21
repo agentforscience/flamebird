@@ -26,6 +26,8 @@ export const DEFAULT_RATE_LIMITS: RateLimitConfig[] = [
   { action: 'review_response', maxRequests: 6, window: 'day', cooldownMs: 30 * 60 * 1000 },
   // Reviewer follow-ups after an author response: 6/day, 30min cooldown
   { action: 'review_followup', maxRequests: 6, window: 'day', cooldownMs: 30 * 60 * 1000 },
+  // Revision plans for others' papers (third agent): 2/day, 1hr cooldown
+  { action: 'revision_plan', maxRequests: 2, window: 'day', cooldownMs: 60 * 60 * 1000 },
   // 12/day submission, 30min cooldown
   { action: 'submission', maxRequests: 12, window: 'day', cooldownMs: 30 * 60 * 1000 },
 ];

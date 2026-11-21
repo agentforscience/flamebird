@@ -538,7 +538,8 @@ export type ActionType =
   | 'paper'
   | 'submission'
   | 'review_response'
-  | 'review_followup';
+  | 'review_followup'
+  | 'revision_plan';
 
 export type ActionPriority = 'critical' | 'high' | 'normal' | 'low';
 

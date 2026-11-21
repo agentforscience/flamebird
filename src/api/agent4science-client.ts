@@ -795,11 +795,26 @@ export class Agent4ScienceClient {
     paperId: string,
     params: {
       title?: string; abstract?: string; tldr?: string; hypothesis?: string; experimentPlan?: string; conclusion?: string;
-      claims?: string[]; limitations?: string[]; revisionNote: string; respondingTo: string[];
+      claims?: string[]; limitations?: string[]; revisionNote: string; respondingTo: string[]; planId?: string;
     },
     apiKey: string
   ): Promise<ApiResponse<{ revision: { id: string; revisionOf: string; revisionNumber: number; changedFields: string[] } }>> {
     return this.post(`/api/v1/papers/${paperId}/revisions`, apiKey, params);
+  }
+
+  /** Papers whose latest version needs a revision plan (with authorId and reviewerIds). */
+  async getOpenRevisionPlans(apiKey: string): Promise<ApiResponse<{ papers: { paperId: string; latestId: string; title: string; authorId: string; reviewerIds: string[]; reviewCount: number }[] }>> {
+    return this.get('/api/v1/revision-plans/open', apiKey);
+  }
+
+  /** The latest revision plan for a paper's chain, and whether it is for the current version. */
+  async getRevisionPlan(paperId: string, apiKey: string): Promise<ApiResponse<{ plan: (import('../utils/revision-plan.js').PlanPayload & { id: string; forPaperId: string; forVersion: number; addressedBy?: string | null; items: (import('../utils/revision-plan.js').PlanItemDraft & { id: string; priority: number })[] }) | null; current: boolean; latestVersionId: string }>> {
+    return this.get(`/api/v1/papers/${paperId}/revision-plan`, apiKey);
+  }
+
+  /** A third agent's plan merging all reviewers' requests. */
+  async createRevisionPlan(paperId: string, plan: import('../utils/revision-plan.js').PlanPayload, apiKey: string): Promise<ApiResponse<{ plan: { id: string } }>> {
+    return this.post(`/api/v1/papers/${paperId}/revision-plan`, apiKey, plan);
   }
 
   /** Every version of a paper, oldest first. */

@@ -28,6 +28,7 @@ import { attachSiteMemory, findPushback } from '../utils/site-memory.js';
 import { pushbackContextFor } from '../utils/pushback.js';
 import { paperText } from '../utils/own-work.js';
 import { needsAuthorAnswer, needsReviewerFollowUp, editableFieldsOf, type RevisionForFollowUp } from '../utils/review-response.js';
+import { requestsFor } from '../utils/revision-plan.js';
 import { targetTopics } from '../utils/focus.js';
 import { workProfileFor, workLogFields } from '../llm/work-style.js';
 
@@ -35,7 +36,7 @@ import { workProfileFor, workLogFields } from '../llm/work-style.js';
 const REVIEW_RETRY_MS = 24 * 60 * 60_000;
 
 /** What discovery can lead to; if none is allowed now, discovery is skipped. */
-const DISCOVERY_ACTIONS = ['comment', 'vote', 'take', 'review', 'review_response', 'review_followup', 'follow'] as const;
+const DISCOVERY_ACTIONS = ['comment', 'vote', 'take', 'review', 'review_response', 'review_followup', 'revision_plan', 'follow'] as const;
 
 const logger = createLogger('proactive');
 
@@ -488,6 +489,8 @@ export class ProactiveEngine {
       await this.discoverReviewResponses(agentId, agent.config.persona, apiKey);
       // As a reviewer: follow up when an author answered one of my reviews
       await this.discoverReviewFollowUps(agentId, agent.config.persona, apiKey);
+      // As a third agent: merge others' reviews into one revision plan
+      await this.discoverRevisionPlans(agentId, agent.config.persona, apiKey);
       // Reply to comments on own content (separate social contract)
       await this.discoverAuthorReplyOpportunities(agentId, agent.config.persona, apiKey);
       // Continue threads the agent is already participating in (depth 2+ back-and-forth)
@@ -1917,6 +1920,8 @@ export class ProactiveEngine {
 
       for (const paper of own) {
         if (hidden.has(paper.id)) continue;
+        // A current, unanswered revision plan: answer the whole round at once
+        if (await this.answerPlanRound(agentId, persona, apiKey, paper)) return;
         const res = await client.getReviews(apiKey, { paperId: paper.id, limit: 20 });
         const reviews = (res.success && res.data
           ? (Array.isArray(res.data) ? res.data : (res.data as { reviews?: Agent4ScienceReview[] }).reviews ?? [])
@@ -1963,6 +1968,97 @@ export class ProactiveEngine {
       }
     } catch (error) {
       logger.debug({ err: error, ...agentLog(agentId) }, 'Review response discovery skipped');
+    }
+  }
+
+  /** Every review of every version of a paper's chain. */
+  private async chainReviewsFor(rootId: string, apiKey: string): Promise<{ versionIds: string[]; reviews: Agent4ScienceReview[] }> {
+    const client = getAgent4ScienceClient();
+    const v = await client.getPaperRevisions(rootId, apiKey);
+    const versionIds = v.success && v.data?.versions?.length ? v.data.versions.map(x => x.id) : [rootId];
+    const reviews: Agent4ScienceReview[] = [];
+    for (const id of versionIds) {
+      const res = await client.getReviews(apiKey, { paperId: id, limit: 20 });
+      const list = (res.success && res.data
+        ? (Array.isArray(res.data) ? res.data : (res.data as { reviews?: Agent4ScienceReview[] }).reviews ?? [])
+        : []) as Agent4ScienceReview[];
+      reviews.push(...list);
+    }
+    return { versionIds, reviews };
+  }
+
+  /**
+   * The author answers a current revision plan with one revision for the
+   * round and an answer to every open review. Returns true if it queued one.
+   */
+  private async answerPlanRound(agentId: string, persona: AgentPersona, apiKey: string, paper: Agent4SciencePaper): Promise<boolean> {
+    const client = getAgent4ScienceClient();
+    const db = getDatabase();
+    try {
+      const rootId = paper.revisionOf || paper.id;
+      const planRes = await client.getRevisionPlan(rootId, apiKey);
+      const plan = planRes.success ? planRes.data?.plan : null;
+      if (!plan || !planRes.data?.current || plan.addressedBy) return false;
+      if (db.hasEngagedWithin(agentId, plan.id, 'plan_round', REVIEW_RETRY_MS)) return false;
+      const { reviews } = await this.chainReviewsFor(rootId, apiKey);
+      const open = reviews.filter(r => needsAuthorAnswer(r, agentId)).slice(0, 4);
+      if (open.length === 0) return false;
+
+      const baseId = planRes.data.latestVersionId || rootId;
+      const baseRes = await client.getPaper(baseId, apiKey, { include: 'none' });
+      const base = baseRes.success && baseRes.data ? baseRes.data : paper;
+      const planReviews = open.map(r => ({ id: r.id, reviewer: r.agent?.handle, verdict: r.verdict, summary: r.summary, requests: requestsFor(r) }));
+      const answer = await this.llmFor(agentId).generatePlanAnswer(persona,
+        { title: base.title || paper.title, text: paperText(base), fields: editableFieldsOf(base) },
+        plan, planReviews);
+      db.touchEngagement(agentId, plan.id, 'review', 'plan_round');
+      if (!answer) {
+        logger.info(`${agentName(agentId)} could not write a usable answer to revision plan ${plan.id}; skipped`);
+        return false;
+      }
+      getActionExecutor().queueAction(agentId, 'review_response', rootId, 'paper', {
+        batch: answer.answers,
+        ...(answer.revision ? { revision: answer.revision, revisionBase: base.id || baseId, planId: plan.id } : {}),
+      } as unknown as Record<string, unknown>, 'high');
+      logger.info(`${agentName(agentId)} (author) queued one revision answering plan ${plan.id} and ${open.length} review(s) on "${paper.title.slice(0, 60)}"`);
+      return true;
+    } catch (error) {
+      logger.debug({ err: error, ...agentLog(agentId) }, 'Plan round skipped');
+      return false;
+    }
+  }
+
+  /**
+   * As a third agent (neither author nor reviewer), merge a paper's reviews
+   * into one ranked revision plan. One per cycle.
+   */
+  private async discoverRevisionPlans(agentId: string, persona: AgentPersona, apiKey: string): Promise<void> {
+    const client = getAgent4ScienceClient();
+    const db = getDatabase();
+    if (!getRateLimiter().canPerform(agentId, 'revision_plan')) return;
+    try {
+      const res = await client.getOpenRevisionPlans(apiKey);
+      const pick = (res.success ? res.data?.papers ?? [] : [])
+        .find(p => p.authorId !== agentId && !p.reviewerIds.includes(agentId)
+          && !db.hasEngagedWithin(agentId, p.latestId, 'revision_plan', REVIEW_RETRY_MS));
+      if (!pick) return;
+      const { reviews } = await this.chainReviewsFor(pick.paperId, apiKey);
+      const others = reviews.filter(r => r.reviewerAgentId !== pick.authorId);
+      if (others.length < 2) return;
+      const latest = await client.getPaper(pick.latestId, apiKey, { include: 'none' });
+      const paper = latest.success && latest.data ? latest.data : null;
+      const planReviews = others.slice(0, 6).map(r => ({ id: r.id, reviewer: r.agent?.handle, verdict: r.verdict, summary: r.summary, requests: requestsFor(r) }));
+      const plan = await this.llmFor(agentId).generateRevisionPlan(persona,
+        { title: paper?.title || pick.title, text: paper ? paperText(paper) : '' }, planReviews);
+      db.touchEngagement(agentId, pick.latestId, 'paper', 'revision_plan');
+      if (!plan) {
+        logger.info(`${agentName(agentId)} could not write a usable revision plan for ${pick.paperId}; skipped`);
+        return;
+      }
+      getActionExecutor().queueAction(agentId, 'revision_plan', pick.paperId, 'paper', plan as unknown as Record<string, unknown>, 'high');
+      logger.info(`${agentName(agentId)} (third agent) queued a revision plan (${plan.items.length} items, ${plan.recommendation}) for "${pick.title.slice(0, 60)}"`);
+    } catch (error) {
+      logger.debug({ err: error, ...agentLog(agentId) }, 'Revision plan discovery skipped');
     }
   }
 

@@ -21,6 +21,7 @@ export const DEFAULT_DAILY_CAPS: Record<string, number> = {
   review: 2,
   review_response: 6,
   review_followup: 6,
+  revision_plan: 2,
   submission: 2,
   paper: 1,
 };

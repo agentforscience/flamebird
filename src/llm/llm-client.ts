@@ -5,6 +5,7 @@
 
 import { findOwnWork, ownWorkBlock, type OwnWork, type OwnWorkClient } from '../utils/own-work.js';
 import { getAgent4ScienceClient } from '../api/agent4science-client.js';
+import { revisionPlanPrompt, normalizeRevisionPlan, planResponsePrompt, normalizePlanResponse, type PlanReview, type PlanPayload, type PlanAnswerPayload } from '../utils/revision-plan.js';
 import { REVIEW_REQUEST_FIELDS, parseReviewRequests, parseReviewScores, weaknessesFromRequests, type ReviewRequestDraft, type Scores } from '../utils/review-requests.js';
 import { reviewResponsePrompt, normalizeReviewResponse, followUpPrompt, normalizeFollowUp, type ReviewForResponse, type ReviewResponsePayload, type AuthorResponseForFollowUp, type FollowUpPayload, type EditableFields } from '../utils/review-response.js';
 import type { AgentPersona, AgentLLMOverride, AgentWorkingMemory, CommentIntent } from '../types.js';
@@ -325,6 +326,38 @@ export class LLMClient {
     ], 2048);
     this.trackCost('review_followup', out.usage);
     return normalizeFollowUp(this.extractJSON(out.content), review.weaknesses, review.requests ?? []);
+  }
+
+  /** A third agent's revision plan merging all reviewers' requests. Null when unusable. */
+  async generateRevisionPlan(persona: AgentPersona, paper: { title: string; text: string }, reviews: PlanReview[]): Promise<PlanPayload | null> {
+    const out = await this.complete([
+      { role: 'system', content: this.buildPersonaPrompt(persona, undefined, { currentTopic: paper.title }) },
+      { role: 'user', content: revisionPlanPrompt(paper.title, paper.text, reviews) },
+    ], 4096);
+    this.trackCost('revision_plan', out.usage);
+    return normalizeRevisionPlan(this.extractJSON(out.content), reviews);
+  }
+
+  /** The author's answer to a plan: one revision and an answer per open review. One retry on a refused answer. */
+  async generatePlanAnswer(
+    persona: AgentPersona,
+    paper: { title: string; text: string; fields: EditableFields },
+    plan: Parameters<typeof planResponsePrompt>[3],
+    reviews: PlanReview[],
+  ): Promise<PlanAnswerPayload | null> {
+    let feedback: string | undefined;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const out = await this.complete([
+        { role: 'system', content: this.buildPersonaPrompt(persona, undefined, { currentTopic: paper.title }) },
+        { role: 'user', content: planResponsePrompt(paper.title, paper.text, paper.fields, plan, reviews, feedback) },
+      ], 8192);
+      this.trackCost('review_response', out.usage);
+      const checked = normalizePlanResponse(this.extractJSON(out.content), reviews, paper.fields);
+      if ('payload' in checked) return checked.payload;
+      feedback = checked.problem;
+      logger.info(`Plan answer refused (${checked.problem})${attempt === 0 ? '; retrying once' : ''}`);
+    }
+    return null;
   }
 
   /** Is this thread's root the agent's own work? Needs the agent id that attachSiteMemory sets. */
