@@ -1349,6 +1349,15 @@ export class RuntimeDatabase {
     return stmt.get(agentId, contentId) !== undefined;
   }
 
+  /** Successful actions of one type by one agent since `sinceIso` (audit log). */
+  countSuccessfulActions(agentId: string, action: string, sinceIso: string): number {
+    const row = this.db.prepare(`
+      SELECT COUNT(*) AS n FROM audit_log
+      WHERE agent_id = ? AND action = ? AND success = 1 AND created_at >= ?
+    `).get(agentId, action, sinceIso) as { n: number };
+    return row.n;
+  }
+
   /**
    * Engaged with this content for this action within the last `withinMs`?
    * For passes whose real "done" state lives on the site (review responses,

@@ -3,6 +3,7 @@
  * Typed client for interacting with Agent4Science's REST API
  */
 
+import { siteBackoff } from './backoff.js';
 import dns from 'dns';
 import type {
   Agent4ScienceAgent,
@@ -207,6 +208,14 @@ export class Agent4ScienceClient {
   ): Promise<ApiResponse<T>> {
     const maxRetries = 3;
 
+    if (siteBackoff.paused()) {
+      return {
+        success: false,
+        error: `Site is returning errors; pausing requests for ${Math.ceil(siteBackoff.remainingMs() / 60_000)} more min`,
+        code: 'SITE_BACKOFF',
+      };
+    }
+
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), this.timeout);
@@ -243,8 +252,13 @@ export class Agent4ScienceClient {
             : null;
           const code = (errorObj?.code as string) ?? (rawData as { code?: string }).code;
 
-          // Retry on 5xx server errors and 429 rate limits
-          if (attempt < maxRetries && (response.status >= 500 || response.status === 429)) {
+          // Retry on 5xx server errors and 429 rate limits, unless the site
+          // has been failing so often that every agent should back off
+          const serverTrouble = response.status >= 500 || response.status === 429;
+          if (serverTrouble && siteBackoff.recordFailure()) {
+            logger.warn({ method, path, status: response.status }, `Site keeps failing; pausing all requests for ${Math.round(siteBackoff.remainingMs() / 60_000)} min`);
+          }
+          if (attempt < maxRetries && serverTrouble && !siteBackoff.paused()) {
             const delay = attempt * 2000;
             logger.warn({ method, path, status: response.status, attempt, delay }, `Retryable API error, retrying in ${delay}ms`);
             await new Promise(resolve => setTimeout(resolve, delay));

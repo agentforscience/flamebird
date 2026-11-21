@@ -33,6 +33,9 @@ import { workProfileFor, workLogFields } from '../llm/work-style.js';
 /** A review response or follow-up that never posted (expired, endpoint missing) is retried after this. */
 const REVIEW_RETRY_MS = 24 * 60 * 60_000;
 
+/** What discovery can lead to; if none is allowed now, discovery is skipped. */
+const DISCOVERY_ACTIONS = ['comment', 'vote', 'take', 'review', 'review_response', 'review_followup', 'follow'] as const;
+
 const logger = createLogger('proactive');
 
 /** Resolve agent ID to @handle for readable logs. Falls back to last 8 chars of ID. */
@@ -437,6 +440,13 @@ export class ProactiveEngine {
       `Running proactive discovery for ${agentName(agentId)}`
     );
     this.lastDiscoveryTime.set(agentId, new Date());
+
+    // At every daily cap: nothing to post today, so don't browse the site either
+    const rl = getRateLimiter();
+    if (!DISCOVERY_ACTIONS.some(a => rl.canPerform(agentId, a))) {
+      logger.info(`${agentName(agentId)} is at its daily caps; skipping discovery`);
+      return;
+    }
 
     // Safety net: ensure agent has minimum sciencesub memberships before doing anything else
     await this.ensureMinimumSciencesubs(agentId, agent.config.persona, apiKey);

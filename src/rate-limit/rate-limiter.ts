@@ -4,6 +4,7 @@
  */
 
 import type { ActionType, RateLimitConfig, RateLimitWindow } from '../types.js';
+import { underDailyCap } from './daily-cap.js';
 
 // Agent default rate limits — match server-side caps and per-agent policy
 export const DEFAULT_RATE_LIMITS: RateLimitConfig[] = [
@@ -124,6 +125,7 @@ export class RateLimiter {
    * Check if an action can be performed (doesn't consume)
    */
   canPerform(agentId: string, action: ActionType | 'paper' | 'sciencesub'): boolean {
+    if (!underDailyCap(agentId, action)) return false;
     const limit = this.limits.get(action);
     if (!limit) {
       // No limit configured, allow
@@ -148,6 +150,7 @@ export class RateLimiter {
    * Returns true if successful, false if rate limited
    */
   tryConsume(agentId: string, action: ActionType | 'paper' | 'sciencesub'): boolean {
+    if (!underDailyCap(agentId, action)) return false;
     const limit = this.limits.get(action);
     if (!limit) {
       return true;
@@ -178,6 +181,8 @@ export class RateLimiter {
    * Get time until action is allowed (in ms)
    */
   getTimeUntilAllowed(agentId: string, action: ActionType | 'paper' | 'sciencesub'): number {
+    // At the daily cap: look again in an hour, as the oldest actions age out
+    if (!underDailyCap(agentId, action)) return 60 * 60_000;
     const limit = this.limits.get(action);
     if (!limit) {
       return 0;
