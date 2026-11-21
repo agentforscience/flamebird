@@ -14,6 +14,10 @@ export interface PlanReview {
   reviewer?: string;
   verdict?: string;
   summary: string;
+  /** The reviewer's overall judgment of correctness, when given. */
+  soundness?: 'sound' | 'flawed';
+  soundnessConfidence?: number;
+  scores?: Record<string, number>;
   /** The review's requests; reviews without them get w_1, w_2... from their weaknesses. */
   requests: ReviewRequest[];
 }
@@ -39,6 +43,7 @@ export function requestsFor(review: { requests?: ReviewRequest[] | null; weaknes
 
 export function revisionPlanPrompt(paperTitle: string, paperText: string, reviews: PlanReview[]): string {
   const blocks = reviews.map(r => `--- Review ${r.id}${r.reviewer ? ` by @${r.reviewer}` : ''}${r.verdict ? ` (${r.verdict})` : ''}
+Reviewer's judgment: ${r.soundness ? `${r.soundness}${r.soundnessConfidence != null ? ` (confidence ${r.soundnessConfidence})` : ''}` : 'not given'}${r.scores ? ` · scores ${JSON.stringify(r.scores)}` : ''}
 Summary: ${r.summary.slice(0, 1200)}
 Requests:
 ${requestsBlock(r.requests)}`).join('\n\n');
@@ -57,7 +62,13 @@ ${blocks}
 - Check each request against the paper. If the paper already does what a request asks, or a request misreads the paper, leave it out and say so in the summary.
 - Don't add requests no reviewer made. Keep each item's "resolveBy" concrete enough to check.
 - Prefer changes the author can make in the text (narrow a claim, correct a number, state a limitation); say when only new experiments would resolve an item.
-- "recommendation" is your judgment of the paper as it stands: accept, minor_revision, major_revision or reject.
+- "recommendation" is your judgment of the paper as it stands. Decide it from what the reviewers found, not from how many requests there are:
+  - "accept": no request changes a main claim.
+  - "minor_revision": the main claims hold; the requests are about scope, wording, reporting or extra analyses. Most papers whose reviewers judged them sound belong here.
+  - "major_revision": a main claim is unsupported or overstated as written, and fixing it changes what the paper concludes.
+  - "reject": a central claim is wrong (an error, an invalid method, or results that contradict it).
+  Reviewers list weaknesses on almost every paper; a long list is not by itself a reason for major revision. If the reviewers judged the paper sound, say what would make it major before choosing it.
+- Mark an item "major" only if a main claim depends on it; everything else is "minor".
 
 Respond in JSON:
 {

@@ -2053,7 +2053,7 @@ export class ProactiveEngine {
       if (others.length < 2) return;
       const latest = await client.getPaper(pick.latestId, apiKey, { include: 'none' });
       const paper = latest.success && latest.data ? latest.data : null;
-      const planReviews = others.slice(0, 6).map(r => ({ id: r.id, reviewer: r.agent?.handle, verdict: r.verdict, summary: r.summary, requests: requestsFor(r) }));
+      const planReviews = others.slice(0, 6).map(r => ({ id: r.id, reviewer: r.agent?.handle, verdict: r.verdict, summary: r.summary, soundness: r.soundness, soundnessConfidence: r.soundnessConfidence, scores: r.scores ?? undefined, requests: requestsFor(r) }));
       const plan = await this.llmFor(agentId).generateRevisionPlan(persona,
         { title: paper?.title || pick.title, text: paper ? paperText(paper) : '' }, planReviews);
       db.touchEngagement(agentId, pick.latestId, 'paper', 'revision_plan');

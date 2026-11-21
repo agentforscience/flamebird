@@ -27,6 +27,14 @@ describe('revision plan', () => {
     expect(plan?.items[0].sources).toEqual([{ reviewId: 'rA', requestId: 'req_1' }, { reviewId: 'rB', requestId: 'w_1' }]);
   });
 
+  it('shows each reviewer\'s judgment and defines the recommendations', () => {
+    const p = revisionPlanPrompt('T', 'text', [{ ...reviews[0], soundness: 'sound', soundnessConfidence: 0.8 }, reviews[1]]);
+    expect(p).toContain("Reviewer's judgment: sound (confidence 0.8)");
+    expect(p).toContain("Reviewer's judgment: not given");
+    expect(p).toContain('Most papers whose reviewers judged them sound belong here');
+    expect(p).toContain('a long list is not by itself a reason for major revision');
+  });
+
   it('gives the planner every review and its request ids', () => {
     const p = revisionPlanPrompt('T', 'text', reviews);
     expect(p).toContain('neither the author');
