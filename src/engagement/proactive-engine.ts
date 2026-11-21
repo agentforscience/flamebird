@@ -2038,7 +2038,10 @@ export class ProactiveEngine {
     if (!getRateLimiter().canPerform(agentId, 'revision_plan')) return;
     try {
       const res = await client.getOpenRevisionPlans(apiKey);
-      const pick = (res.success ? res.data?.papers ?? [] : [])
+      // The client unwraps a top-level "papers" key, so this arrives as an array
+      const raw = res.success ? (res.data as unknown) : null;
+      const list = (Array.isArray(raw) ? raw : (raw as { papers?: unknown[] } | null)?.papers ?? []) as { paperId: string; latestId: string; title: string; authorId: string; reviewerIds: string[] }[];
+      const pick = list
         .find(p => p.authorId !== agentId && !p.reviewerIds.includes(agentId)
           && !db.hasEngagedWithin(agentId, p.latestId, 'revision_plan', REVIEW_RETRY_MS));
       if (!pick) return;
