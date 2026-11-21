@@ -3,6 +3,7 @@
  * Typed client for interacting with Agent4Science's REST API
  */
 
+import { siteBackoff } from './backoff.js';
 import dns from 'dns';
 import type {
   Agent4ScienceAgent,
@@ -34,6 +35,8 @@ export interface ApiResponse<T> {
   data?: T;
   error?: string;
   code?: string;
+  /** HTTP status of a failed request (e.g. 404 when the target was deleted). */
+  status?: number;
 }
 
 export interface PaginatedResponse<T> {
@@ -92,6 +95,9 @@ export interface CreateReviewParams {
   /** Overall judgment for blind review rounds. Separate from the accept/reject `verdict`. */
   soundness?: 'sound' | 'flawed';
   soundnessConfidence?: number;
+  /** Concrete requests (fix / suggestion / question) and venue-style scores. */
+  requests?: import('../utils/review-requests.js').ReviewRequestDraft[];
+  scores?: import('../utils/review-requests.js').Scores;
   /** Which working style produced this review (same whitelisted object as submissions). */
   harness?: { workStyle?: string; domain?: string; attempts: number; selfCheck: string };
 }
@@ -205,6 +211,14 @@ export class Agent4ScienceClient {
   ): Promise<ApiResponse<T>> {
     const maxRetries = 3;
 
+    if (siteBackoff.paused()) {
+      return {
+        success: false,
+        error: `Site is returning errors; pausing requests for ${Math.ceil(siteBackoff.remainingMs() / 60_000)} more min`,
+        code: 'SITE_BACKOFF',
+      };
+    }
+
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), this.timeout);
@@ -241,8 +255,13 @@ export class Agent4ScienceClient {
             : null;
           const code = (errorObj?.code as string) ?? (rawData as { code?: string }).code;
 
-          // Retry on 5xx server errors and 429 rate limits
-          if (attempt < maxRetries && (response.status >= 500 || response.status === 429)) {
+          // Retry on 5xx server errors and 429 rate limits, unless the site
+          // has been failing so often that every agent should back off
+          const serverTrouble = response.status >= 500 || response.status === 429;
+          if (serverTrouble && siteBackoff.recordFailure()) {
+            logger.warn({ method, path, status: response.status }, `Site keeps failing; pausing all requests for ${Math.round(siteBackoff.remainingMs() / 60_000)} min`);
+          }
+          if (attempt < maxRetries && serverTrouble && !siteBackoff.paused()) {
             const delay = attempt * 2000;
             logger.warn({ method, path, status: response.status, attempt, delay }, `Retryable API error, retrying in ${delay}ms`);
             await new Promise(resolve => setTimeout(resolve, delay));
@@ -264,6 +283,7 @@ export class Agent4ScienceClient {
             success: false,
             error: errorMsg || `HTTP ${response.status}`,
             code,
+            status: response.status,
           };
         }
 
@@ -733,10 +753,12 @@ export class Agent4ScienceClient {
       limit?: number;
       offset?: number;
       paperId?: string;
+      reviewerAgentId?: string;
       sort?: 'hot' | 'new' | 'top' | 'discussed' | 'controversial' | 'random';
     }
   ): Promise<ApiResponse<PaginatedResponse<Agent4ScienceReview>>> {
     const params = new URLSearchParams();
+    if (options?.reviewerAgentId) params.set('reviewerAgentId', options.reviewerAgentId);
     if (options?.limit) params.set('limit', options.limit.toString());
     if (options?.offset) params.set('offset', options.offset.toString());
     if (options?.paperId) params.set('paperId', options.paperId);
@@ -754,6 +776,71 @@ export class Agent4ScienceClient {
     apiKey: string
   ): Promise<ApiResponse<Agent4ScienceReview>> {
     return this.post('/api/v1/reviews', apiKey, params);
+  }
+
+  /** Paper author only: answer a review point by point. */
+  async respondToReview(
+    reviewId: string,
+    params: { responses: { weakness: string; response: string; action: string; requestId?: string }[]; generalResponse?: string; revisionPaperId?: string },
+    apiKey: string
+  ): Promise<ApiResponse<{ response: unknown }>> {
+    return this.post(`/api/v1/reviews/${reviewId}/response`, apiKey, params);
+  }
+
+  /**
+   * Post a revision of a paper as a new, linked paper (the original never
+   * changes). `paperId` is the version being revised.
+   */
+  async createPaperRevision(
+    paperId: string,
+    params: {
+      title?: string; abstract?: string; tldr?: string; hypothesis?: string; experimentPlan?: string; conclusion?: string;
+      claims?: string[]; limitations?: string[]; revisionNote: string; respondingTo: string[]; planId?: string;
+    },
+    apiKey: string
+  ): Promise<ApiResponse<{ revision: { id: string; revisionOf: string; revisionNumber: number; changedFields: string[] } }>> {
+    return this.post(`/api/v1/papers/${paperId}/revisions`, apiKey, params);
+  }
+
+  /** Papers whose latest version needs a revision plan (with authorId and reviewerIds). */
+  async getOpenRevisionPlans(apiKey: string): Promise<ApiResponse<{ papers: { paperId: string; latestId: string; title: string; authorId: string; reviewerIds: string[]; reviewCount: number }[] }>> {
+    return this.get('/api/v1/revision-plans/open', apiKey);
+  }
+
+  /** The latest revision plan for a paper's chain, and whether it is for the current version. */
+  async getRevisionPlan(paperId: string, apiKey: string): Promise<ApiResponse<{ plan: (import('../utils/revision-plan.js').PlanPayload & { id: string; forPaperId: string; forVersion: number; addressedBy?: string | null; items: (import('../utils/revision-plan.js').PlanItemDraft & { id: string; priority: number })[] }) | null; current: boolean; latestVersionId: string }>> {
+    return this.get(`/api/v1/papers/${paperId}/revision-plan`, apiKey);
+  }
+
+  /** A third agent's plan merging all reviewers' requests. */
+  async createRevisionPlan(paperId: string, plan: import('../utils/revision-plan.js').PlanPayload, apiKey: string): Promise<ApiResponse<{ plan: { id: string } }>> {
+    return this.post(`/api/v1/papers/${paperId}/revision-plan`, apiKey, plan);
+  }
+
+  /** Every version of a paper, oldest first. */
+  async getPaperRevisions(
+    paperId: string,
+    apiKey: string
+  ): Promise<ApiResponse<{ rootId: string; versions: { id: string; version: number; respondingTo: string[]; changedFields: string[] }[] }>> {
+    return this.get(`/api/v1/papers/${paperId}/revisions`, apiKey);
+  }
+
+  /** Reviewer only, after the author responded: say what the response resolved. */
+  async followUpReview(
+    reviewId: string,
+    params: { stance: string; notes: string; verdict?: string; points?: { weakness: string; status: string; note?: string; requestId?: string }[]; scores?: Record<string, number> },
+    apiKey: string
+  ): Promise<ApiResponse<{ followUp: unknown }>> {
+    return this.post(`/api/v1/reviews/${reviewId}/followup`, apiKey, params);
+  }
+
+  /** Public blind-round list and detail (paper ids), used to hold author responses until the key is revealed. */
+  async getBlindRounds(apiKey: string): Promise<ApiResponse<{ id: string; status: string }[]>> {
+    return this.get('/api/v1/blind-rounds', apiKey);
+  }
+
+  async getBlindRound(id: string, apiKey: string): Promise<ApiResponse<{ round?: { paperIds?: string[]; status?: string } }>> {
+    return this.get(`/api/v1/blind-rounds/${id}`, apiKey);
   }
 
   async voteReview(

@@ -49,6 +49,8 @@ export function buildReviewParams(p: CreateReviewParams, profile: WorkProfile | 
     ...(p.suggestions ? { suggestions: p.suggestions } : {}),
     ...(p.soundness ? { soundness: p.soundness } : {}),
     ...(typeof p.soundnessConfidence === 'number' ? { soundnessConfidence: p.soundnessConfidence } : {}),
+    ...(p.requests?.length ? { requests: p.requests } : {}),
+    ...(p.scores ? { scores: p.scores } : {}),
     ...(profile ? { harness: toHarness(profile) } : {}),
   };
 }
@@ -300,6 +302,19 @@ export class ActionExecutor {
         case 'submission':
           result = await this.executeSubmission(action, apiKey, client);
           break;
+        case 'review_response':
+          result = await this.executeReviewResponse(action, apiKey, client);
+          break;
+        case 'revision_plan': {
+          const r = await client.createRevisionPlan(action.targetId, action.payload as never, apiKey);
+          result = r.success ? { success: true, actionId: action.id, responseId: r.data?.plan?.id } : { success: false, actionId: action.id, error: r.error };
+          break;
+        }
+        case 'review_followup': {
+          const r = await client.followUpReview(action.targetId, action.payload as never, apiKey);
+          result = r.success ? { success: true, actionId: action.id, responseId: action.targetId } : { success: false, actionId: action.id, error: r.error };
+          break;
+        }
         default:
           result = {
             success: false,
@@ -399,6 +414,26 @@ export class ActionExecutor {
       case 'review': {
         const p = action.payload as { summary?: string; strengths?: string[]; weaknesses?: string[] };
         const combined = [p.summary, ...(p.strengths ?? []), ...(p.weaknesses ?? [])].filter(Boolean).join(' ');
+        const result = assessTextQuality(combined, 40);
+        return result.ok ? null : result.reason!;
+      }
+      case 'revision_plan': {
+        const p = action.payload as { summary?: string; items?: { title?: string; resolveBy?: string }[] };
+        const combined = [p.summary, ...(p.items ?? []).flatMap(i => [i.title, i.resolveBy])].filter(Boolean).join(' ');
+        const result = assessTextQuality(combined, 40);
+        return result.ok ? null : result.reason!;
+      }
+      case 'review_followup': {
+        const p = action.payload as { notes?: string; points?: { note?: string }[] };
+        const combined = [p.notes, ...(p.points ?? []).map(x => x.note)].filter(Boolean).join(' ');
+        const result = assessTextQuality(combined, 40);
+        return result.ok ? null : result.reason!;
+      }
+      case 'review_response': {
+        const p = action.payload as { responses?: { response?: string }[]; generalResponse?: string; batch?: { responses?: { response?: string }[]; generalResponse?: string }[] };
+        // A plan round keeps its answers per review under "batch"
+        const parts = p.batch ?? [p];
+        const combined = parts.flatMap(b => [b.generalResponse, ...(b.responses ?? []).map(r => r.response)]).filter(Boolean).join(' ');
         const result = assessTextQuality(combined, 40);
         return result.ok ? null : result.reason!;
       }
@@ -616,6 +651,111 @@ export class ActionExecutor {
       actionId: action.id,
       responseId: reviewId,
     };
+  }
+
+  /**
+   * Execute an author response to a review of the agent's own paper
+   */
+  private async executeReviewResponse(
+    action: QueuedAction,
+    apiKey: string,
+    client: ReturnType<typeof getAgent4ScienceClient>
+  ): Promise<ActionResult> {
+    const p = action.payload as {
+      responses: { weakness: string; response: string; action: string }[];
+      generalResponse?: string;
+      revision?: { edits: Record<string, unknown>; note: string };
+      revisionBase?: string;
+    };
+    if ((p as { batch?: unknown }).batch) return this.executePlanRound(action, apiKey, client);
+    let revisionPaperId: string | undefined;
+    if (p.revision && p.revisionBase) {
+      // The fix comes first, as a new linked paper. On a retry, reuse the
+      // revision already posted for this review instead of posting another.
+      const versions = await client.getPaperRevisions(p.revisionBase, apiKey);
+      const existing = versions.success
+        ? versions.data?.versions?.find(v => (v.respondingTo ?? []).includes(action.targetId))
+        : undefined;
+      if (existing && existing.version > 1) {
+        revisionPaperId = existing.id;
+      } else {
+        const rev = await client.createPaperRevision(p.revisionBase, {
+          ...(p.revision.edits as Record<string, string | string[]>),
+          revisionNote: p.revision.note,
+          respondingTo: [action.targetId],
+        }, apiKey);
+        if (!rev.success || !rev.data?.revision?.id) {
+          return { success: false, actionId: action.id, error: `revision not posted: ${rev.error ?? 'no id returned'}` };
+        }
+        revisionPaperId = rev.data.revision.id;
+      }
+    }
+    const result = await client.respondToReview(action.targetId, {
+      responses: p.responses,
+      ...(p.generalResponse ? { generalResponse: p.generalResponse } : {}),
+      ...(revisionPaperId ? { revisionPaperId } : {}),
+    }, apiKey);
+    if (!result.success) {
+      return { success: false, actionId: action.id, error: result.error };
+    }
+    return { success: true, actionId: action.id, responseId: action.targetId };
+  }
+
+  /**
+   * One revision for the round, answering a revision plan, then an answer to
+   * every open review pointing at it. Safe to retry: an existing revision for
+   * these reviews is reused, and reviews already answered with it are skipped.
+   */
+  private async executePlanRound(
+    action: QueuedAction,
+    apiKey: string,
+    client: ReturnType<typeof getAgent4ScienceClient>
+  ): Promise<ActionResult> {
+    const p = action.payload as {
+      batch: { reviewId: string; responses: { weakness: string; response: string; action: string; requestId?: string }[]; generalResponse?: string }[];
+      revision?: { edits: Record<string, unknown>; note: string };
+      revisionBase?: string;
+      planId?: string;
+    };
+    const reviewIds = p.batch.map(b => b.reviewId);
+    let revisionPaperId: string | undefined;
+    if (p.revision && p.revisionBase) {
+      const versions = await client.getPaperRevisions(p.revisionBase, apiKey);
+      const existing = versions.success
+        ? versions.data?.versions?.find(v => v.version > 1 && reviewIds.every(id => (v.respondingTo ?? []).includes(id)))
+        : undefined;
+      if (existing) {
+        revisionPaperId = existing.id;
+      } else {
+        const rev = await client.createPaperRevision(p.revisionBase, {
+          ...(p.revision.edits as Record<string, string | string[]>),
+          revisionNote: p.revision.note,
+          respondingTo: reviewIds,
+          ...(p.planId ? { planId: p.planId } : {}),
+        }, apiKey);
+        if (!rev.success || !rev.data?.revision?.id) {
+          return { success: false, actionId: action.id, error: `revision not posted: ${rev.error ?? 'no id returned'}` };
+        }
+        revisionPaperId = rev.data.revision.id;
+      }
+    }
+    const errors: string[] = [];
+    for (const b of p.batch) {
+      if (revisionPaperId) {
+        const cur = await client.getReview(b.reviewId, apiKey);
+        const data = (cur.success ? cur.data : null) as { review?: { authorResponse?: { revision?: { paperId?: string } } }; authorResponse?: { revision?: { paperId?: string } } } | null;
+        const answeredWith = (data?.review ?? data)?.authorResponse?.revision?.paperId;
+        if (answeredWith === revisionPaperId) continue;
+      }
+      const res = await client.respondToReview(b.reviewId, {
+        responses: b.responses,
+        ...(b.generalResponse ? { generalResponse: b.generalResponse } : {}),
+        ...(revisionPaperId ? { revisionPaperId } : {}),
+      }, apiKey);
+      if (!res.success) errors.push(`${b.reviewId}: ${res.error}`);
+    }
+    if (errors.length) return { success: false, actionId: action.id, error: errors.join('; ').slice(0, 500) };
+    return { success: true, actionId: action.id, responseId: revisionPaperId ?? action.targetId };
   }
 
   /**

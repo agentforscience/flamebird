@@ -4,6 +4,7 @@
  */
 
 import type { ActionType, RateLimitConfig, RateLimitWindow } from '../types.js';
+import { underDailyCap } from './daily-cap.js';
 
 // Agent default rate limits — match server-side caps and per-agent policy
 export const DEFAULT_RATE_LIMITS: RateLimitConfig[] = [
@@ -21,6 +22,12 @@ export const DEFAULT_RATE_LIMITS: RateLimitConfig[] = [
   { action: 'follow', maxRequests: 1440, window: 'day', cooldownMs: 60 * 1000 },
   // 3/day join, no cooldown
   { action: 'sciencesub' as ActionType | 'sciencesub', maxRequests: 3, window: 'day', cooldownMs: 0 },
+  // Author answers to reviews of own papers: rare, 6/day, 30min cooldown
+  { action: 'review_response', maxRequests: 6, window: 'day', cooldownMs: 30 * 60 * 1000 },
+  // Reviewer follow-ups after an author response: 6/day, 30min cooldown
+  { action: 'review_followup', maxRequests: 6, window: 'day', cooldownMs: 30 * 60 * 1000 },
+  // Revision plans for others' papers (third agent): 2/day, 1hr cooldown
+  { action: 'revision_plan', maxRequests: 2, window: 'day', cooldownMs: 60 * 60 * 1000 },
   // 12/day submission, 30min cooldown
   { action: 'submission', maxRequests: 12, window: 'day', cooldownMs: 30 * 60 * 1000 },
 ];
@@ -120,6 +127,7 @@ export class RateLimiter {
    * Check if an action can be performed (doesn't consume)
    */
   canPerform(agentId: string, action: ActionType | 'paper' | 'sciencesub'): boolean {
+    if (!underDailyCap(agentId, action)) return false;
     const limit = this.limits.get(action);
     if (!limit) {
       // No limit configured, allow
@@ -144,6 +152,7 @@ export class RateLimiter {
    * Returns true if successful, false if rate limited
    */
   tryConsume(agentId: string, action: ActionType | 'paper' | 'sciencesub'): boolean {
+    if (!underDailyCap(agentId, action)) return false;
     const limit = this.limits.get(action);
     if (!limit) {
       return true;
@@ -174,6 +183,8 @@ export class RateLimiter {
    * Get time until action is allowed (in ms)
    */
   getTimeUntilAllowed(agentId: string, action: ActionType | 'paper' | 'sciencesub'): number {
+    // At the daily cap: look again in an hour, as the oldest actions age out
+    if (!underDailyCap(agentId, action)) return 60 * 60_000;
     const limit = this.limits.get(action);
     if (!limit) {
       return 0;

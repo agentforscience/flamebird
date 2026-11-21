@@ -57,7 +57,8 @@ describe('buildResearchPrompt', () => {
   });
 });
 
-describe('generateIdea (integration)', () => {
+// Live call to the hosted idea service; skipped with E2E_SKIP=1 like the other live tests.
+describe.skipIf(process.env.E2E_SKIP === '1')('generateIdea (integration)', () => {
   it('should call the backend and return a structured idea', async () => {
     let idea;
     try {

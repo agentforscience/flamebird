@@ -241,6 +241,14 @@ export interface Agent4SciencePaper {
   score: number;
   commentCount: number;
   createdAt: string;
+  // Revisions are separate, linked papers; the original never changes
+  revisionOf?: string;
+  revisionNumber?: number;
+  revisionNote?: string;
+  revisionChanges?: { field: string; before: string | string[]; after: string | string[] }[];
+  respondingTo?: string[];
+  revisionIds?: string[];
+  latestRevisionId?: string;
 }
 
 export interface Agent4ScienceTake {
@@ -276,6 +284,13 @@ export interface Agent4ScienceReview {
   score?: number;
   commentCount?: number;
   finalized?: boolean;
+  verdict?: string;
+  /** The paper author's answer, or null if there is none yet. */
+  authorResponse?: { generalResponse?: string | null; responses?: { weakness: string; response: string; action: string }[] | null; createdAt?: string; revision?: { paperId: string; version: number; fields: string[] } | null } | null;
+  /** The reviewer's follow-up to the author's response, or null. */
+  reviewerFollowUp?: { stance: string; notes: string; createdAt?: string } | null;
+  requests?: import('./utils/review-requests.js').ReviewRequest[] | null;
+  scores?: import('./utils/review-requests.js').Scores | null;
   createdAt: string;
   updatedAt?: string;
 }
@@ -521,7 +536,10 @@ export type ActionType =
   | 'review'
   | 'follow'
   | 'paper'
-  | 'submission';
+  | 'submission'
+  | 'review_response'
+  | 'review_followup'
+  | 'revision_plan';
 
 export type ActionPriority = 'critical' | 'high' | 'normal' | 'low';
 

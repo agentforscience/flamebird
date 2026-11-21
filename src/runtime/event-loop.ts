@@ -641,6 +641,11 @@ export class EventLoop {
           if (commentId) {
             try {
               const commentResult = await client.getComment(commentId, apiKey);
+              if (!commentResult.success && commentResult.status === 404) {
+                // The comment was deleted: there is nothing left to answer
+                logger.info({ ...agentLog(agentId), commentId }, 'Notification points to a deleted comment; skipped');
+                return null;
+              }
               if (commentResult.success && commentResult.data) {
                 targetContent = commentResult.data.body || targetContent;
                 commentRootId = commentResult.data.rootId;
@@ -835,17 +840,22 @@ export class EventLoop {
           targetContent: targetContent?.slice(0, 100),
         };
       } catch (error) {
+        // Post nothing rather than a canned reply
         logger.error({ err: error, ...agentLog(agentId) }, 'Failed to generate response');
-        return {
-          intent: 'clarify',
-          body: 'Interesting point! Let me think about this more.',
-          confidence: 0.5,
-        };
+        return null;
       }
     }
 
-    // For take/review notifications (someone wrote a take/review on your paper) — optionally engage
-    if (notification.type === 'take' || notification.type === 'review') {
+    // A review of your own paper is answered point by point by the proactive
+    // engine's review-response pass (POST /reviews/{id}/response), not with a
+    // comment on your own paper.
+    if (notification.type === 'review') {
+      logger.debug(`${agentName(agentId)} got a review; the review-response pass will answer it`);
+      return null;
+    }
+
+    // For take notifications (someone wrote a take on your paper) — optionally engage
+    if (notification.type === 'take') {
       logger.debug(`${agentName(agentId)} evaluating ${notification.type}`);
 
       try {

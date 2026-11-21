@@ -3,6 +3,11 @@
  * Unified interface for LLM providers (OpenRouter, Anthropic, OpenAI)
  */
 
+import { findOwnWork, ownWorkBlock, type OwnWork, type OwnWorkClient } from '../utils/own-work.js';
+import { getAgent4ScienceClient } from '../api/agent4science-client.js';
+import { revisionPlanPrompt, normalizeRevisionPlan, planResponsePrompt, normalizePlanResponse, type PlanReview, type PlanPayload, type PlanAnswerPayload } from '../utils/revision-plan.js';
+import { REVIEW_REQUEST_FIELDS, parseReviewRequests, parseReviewScores, weaknessesFromRequests, type ReviewRequestDraft, type Scores } from '../utils/review-requests.js';
+import { reviewResponsePrompt, normalizeReviewResponse, followUpPrompt, normalizeFollowUp, type ReviewForResponse, type ReviewResponsePayload, type AuthorResponseForFollowUp, type FollowUpPayload, type EditableFields } from '../utils/review-response.js';
 import type { AgentPersona, AgentLLMOverride, AgentWorkingMemory, CommentIntent } from '../types.js';
 import { claudeModel, runClaude } from './claude-cli.js';
 import { calculateSimilarity } from '../utils/similarity.js';
@@ -246,6 +251,8 @@ export class LLMClient {
       existingDiscussion?: string[];
       /** Set when replying to pushback on the agent's own work (adds record and positions when present). */
       pushback?: PushbackContext;
+      /** The agent's own work at the root of this thread. Looked up from rootId when left out; null means not theirs. */
+      ownWork?: OwnWork | null;
     },
     memory?: AgentWorkingMemory,
   ): Promise<GeneratedComment> {
@@ -256,7 +263,10 @@ export class LLMClient {
       rootId: context.rootId,
     } : undefined;
     const systemPrompt = this.buildPersonaPrompt(persona, memory, memoryHints);
-    const userPrompt = this.buildCommentPrompt(context) + pushbackPromptBlock(persona, context.pushback, context.rootId);
+    const own = context.ownWork !== undefined ? context.ownWork : await this.lookupOwnWork(persona, context);
+    const userPrompt = (own ? ownWorkBlock(own) + '\n' : '')
+      + this.buildCommentPrompt({ ...context, isOwnWork: !!own })
+      + pushbackPromptBlock(persona, context.pushback, context.rootId);
     const offeredPositions = context.pushback ? activePositions(persona) : [];
 
     const response = await this.complete([
@@ -273,6 +283,93 @@ export class LLMClient {
     }
 
     return this.parseCommentResponse(response.content, offeredPositions);
+  }
+
+  /**
+   * The author's point-by-point response to a review of its own paper.
+   * Returns null when the answer can't be used (it is not posted then).
+   */
+  async generateReviewResponse(
+    persona: AgentPersona,
+    paper: { title: string; text: string; fields?: EditableFields },
+    review: ReviewForResponse,
+  ): Promise<ReviewResponsePayload | null> {
+    // One retry with the reason, e.g. a promise or an "accepted" with no edit
+    let feedback: string | undefined;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const response = await this.complete([
+        { role: 'system', content: this.buildPersonaPrompt(persona, undefined, { currentTopic: paper.title }) },
+        { role: 'user', content: reviewResponsePrompt(paper.title, paper.text, review, paper.fields, feedback) },
+      ], 4096);
+      this.trackCost('review_response', response.usage);
+      const out = normalizeReviewResponse(this.extractJSON(response.content), review.weaknesses, paper.fields ?? {}, review.requests ?? []);
+      if ('payload' in out) return out.payload;
+      feedback = out.problem;
+      logger.info(`Review response for ${review.id} refused (${out.problem})${attempt === 0 ? '; retrying once' : ''}`);
+    }
+    return null;
+  }
+
+  /**
+   * The reviewer's follow-up after the paper's author answered its review.
+   * Returns null when the answer can't be used.
+   */
+  async generateReviewFollowUp(
+    persona: AgentPersona,
+    paper: { title: string; text: string },
+    review: ReviewForResponse & { scores?: Scores },
+    response: AuthorResponseForFollowUp,
+  ): Promise<FollowUpPayload | null> {
+    const out = await this.complete([
+      { role: 'system', content: this.buildPersonaPrompt(persona, undefined, { currentTopic: paper.title }) },
+      { role: 'user', content: followUpPrompt(paper.title, paper.text, review, response) },
+    ], 2048);
+    this.trackCost('review_followup', out.usage);
+    return normalizeFollowUp(this.extractJSON(out.content), review.weaknesses, review.requests ?? []);
+  }
+
+  /** A third agent's revision plan merging all reviewers' requests. Null when unusable. */
+  async generateRevisionPlan(persona: AgentPersona, paper: { title: string; text: string }, reviews: PlanReview[]): Promise<PlanPayload | null> {
+    const out = await this.complete([
+      { role: 'system', content: this.buildPersonaPrompt(persona, undefined, { currentTopic: paper.title }) },
+      { role: 'user', content: revisionPlanPrompt(paper.title, paper.text, reviews) },
+    ], 4096);
+    this.trackCost('revision_plan', out.usage);
+    return normalizeRevisionPlan(this.extractJSON(out.content), reviews);
+  }
+
+  /** The author's answer to a plan: one revision and an answer per open review. One retry on a refused answer. */
+  async generatePlanAnswer(
+    persona: AgentPersona,
+    paper: { title: string; text: string; fields: EditableFields },
+    plan: Parameters<typeof planResponsePrompt>[3],
+    reviews: PlanReview[],
+  ): Promise<PlanAnswerPayload | null> {
+    let feedback: string | undefined;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const out = await this.complete([
+        { role: 'system', content: this.buildPersonaPrompt(persona, undefined, { currentTopic: paper.title }) },
+        { role: 'user', content: planResponsePrompt(paper.title, paper.text, paper.fields, plan, reviews, feedback) },
+      ], 8192);
+      this.trackCost('review_response', out.usage);
+      const checked = normalizePlanResponse(this.extractJSON(out.content), reviews, paper.fields);
+      if ('payload' in checked) return checked.payload;
+      feedback = checked.problem;
+      logger.info(`Plan answer refused (${checked.problem})${attempt === 0 ? '; retrying once' : ''}`);
+    }
+    return null;
+  }
+
+  /** Is this thread's root the agent's own work? Needs the agent id that attachSiteMemory sets. */
+  private async lookupOwnWork(
+    persona: AgentPersona,
+    context: { rootId?: string; rootType?: string; targetType: string },
+  ): Promise<OwnWork | null> {
+    if (!persona.runtimeAgentId || !context.rootId || context.rootType === 'submission' || context.rootType === 'challenge') return null;
+    let client: OwnWorkClient;
+    try { client = getAgent4ScienceClient(); } catch { return null; }
+    const hint = context.rootType ?? (context.targetType !== 'comment' ? context.targetType : undefined);
+    return findOwnWork(client, persona.runtimeAgentId, context.rootId, hint);
   }
 
   /**
@@ -514,17 +611,19 @@ Write a take that reflects your unique viewpoint. Be opinionated and substantive
     suggestions?: string;
     soundness?: 'sound' | 'flawed';
     soundnessConfidence?: number;
+    requests?: ReviewRequestDraft[];
+    scores?: Scores;
     position?: PositionProposal;
   }> {
     const systemPrompt = this.buildPersonaPrompt(persona) + `
 
-You are writing a structured peer review of a research paper. Be rigorous and specific.
+You are writing a structured peer review of a research paper. Be rigorous and specific. Write it as an improvement plan: the author will answer each request, fix what they can in a revision, and you will check the result.
 Respond in JSON format with these fields:
 - title: string (a concise review title, min 10 chars, e.g. "Strong methodology but limited evaluation on ${paper.title}")
 - summary: string (a thorough, detailed assessment of what the paper does, its methodology, contributions, and your overall evaluation — MUST be at least 1500 characters long, this is a HARD MINIMUM enforced by the API. Write 4-6 substantial paragraphs covering: (1) what the paper does and why it matters, (2) methodology analysis, (3) key results and their significance, (4) limitations and concerns, (5) comparison to related work, (6) overall assessment. Aim for 2000+ characters.)
 - strengths: string[] (3-4 specific strengths of the paper, each at least 80 characters with concrete details)
-- weaknesses: string[] (3-4 specific weaknesses or concerns, each at least 80 characters with concrete details)
-- suggestions: string (optional constructive suggestions for improvement)${REVIEW_SOUNDNESS_FIELDS}${positionFieldLine(persona, 'review')}
+${REVIEW_REQUEST_FIELDS}
+- suggestions: string (optional, anything that doesn't fit a request)${REVIEW_SOUNDNESS_FIELDS}${positionFieldLine(persona, 'review')}
 
 CRITICAL: You MUST complete every field fully. Do NOT leave any sentence unfinished or cut off mid-thought. Finish every sentence and every paragraph completely before moving to the next field. If you are running low on space, be more concise rather than leaving text incomplete.${reviewWorkBlock(persona)}`;
 
@@ -565,57 +664,38 @@ Stated Limitations: ${paper.limitations.join('; ')}${reviewSections(paper)}`;
           if (!repaired) throw new Error('JSON repair failed');
           parsed = JSON.parse(repaired);
         }
-        let summary = smartTruncate(parsed.summary || '', 5000);
-
-        // Production API requires at least 1200 chars — pad if LLM fell short
-        if (summary.length < 1200) {
-          const extras = [
-            `\n\nIn examining the methodology of "${paper.title}", the approach taken raises several important considerations for the field.`,
-            ` The claims presented — ${paper.claims.slice(0, 3).join('; ')} — warrant careful scrutiny in terms of both novelty and empirical support.`,
-            ` The authors acknowledge limitations including ${paper.limitations.slice(0, 2).join(' and ')}, which is commendable but also highlights areas needing further development.`,
-            ` Overall, this work contributes to our understanding of the topic, though additional validation would strengthen the conclusions drawn.`,
-            ` The experimental design and evaluation framework would benefit from broader comparison with state-of-the-art baselines.`,
-            ` Future work could explore the generalizability of these findings across different domains and datasets to strengthen the empirical foundation.`,
-          ];
-          for (const extra of extras) {
-            if (summary.length >= 1200) break;
-            summary += extra;
-          }
-          // Final safety net: repeat filler until hard minimum is met
-          while (summary.length < 1200) {
-            summary += ` Further analysis of the methodological choices and their implications for reproducibility would strengthen this contribution.`;
-          }
+        const summary = smartTruncate(parsed.summary || '', 5000);
+        const requests = parseReviewRequests(parsed.requests);
+        const fromRequests = weaknessesFromRequests(requests);
+        const listed = Array.isArray(parsed.weaknesses)
+          ? parsed.weaknesses.map((w: unknown) => smartTruncate(String(w), 500)).filter((w: string) => w.length >= 50)
+          : [];
+        const weaknesses = (fromRequests.length >= 2 ? fromRequests : listed).slice(0, 15);
+        const strengths = Array.isArray(parsed.strengths)
+          ? parsed.strengths.map((x: unknown) => smartTruncate(String(x), 500)).filter((x: string) => x.length >= 50).slice(0, 4)
+          : [];
+        // No filler: a review the model didn't actually write is not posted
+        if (summary.length < 200 || strengths.length < 2 || weaknesses.length < 2) {
+          throw new Error(`review unusable (summary ${summary.length} chars, ${strengths.length} strengths, ${weaknesses.length} weaknesses)`);
         }
-
+        const scores = parseReviewScores(parsed.scores);
         return {
           title: smartTruncate(parsed.title || `Review of: ${paper.title}`, 200),
           paperUrl: paper.pdfUrl || `https://agent4science.org/papers/${paper.id || 'unknown'}`,
           summary,
-          strengths: Array.isArray(parsed.strengths) && parsed.strengths.length >= 2
-            ? parsed.strengths.slice(0, 4).map((s: string) => smartTruncate(String(s), 500))
-            : ['Novel approach to the research question with clear methodology', 'Clear articulation of objectives and experimental design'],
-          weaknesses: Array.isArray(parsed.weaknesses) && parsed.weaknesses.length >= 2
-            ? parsed.weaknesses.slice(0, 4).map((w: string) => smartTruncate(String(w), 500))
-            : ['Limited evaluation across diverse scenarios and datasets', 'Needs more empirical evidence to support central claims'],
+          strengths,
+          weaknesses,
           suggestions: parsed.suggestions ? smartTruncate(String(parsed.suggestions), 2000) : undefined,
           ...parseSoundness(parsed),
+          ...(requests.length ? { requests } : {}),
+          ...(scores ? { scores } : {}),
           ...withPosition(parsed),
         };
       }
-    } catch {
-      // fall through to default
+    } catch (err) {
+      throw err instanceof Error && err.message.startsWith('review unusable') ? err : new Error(`review unusable: ${err instanceof Error ? err.message : String(err)}`);
     }
-
-    // Fallback: construct a review from the raw LLM response
-    const fallbackSummary = `This paper, "${paper.title}", presents research that merits careful examination. ${smartTruncate(paper.abstract, 500)} The key claims include: ${paper.claims.slice(0, 3).join('; ')}. The authors note limitations such as ${paper.limitations.slice(0, 2).join(' and ')}. While the work makes a meaningful contribution, additional empirical validation and broader evaluation would strengthen the overall impact. The methodology shows promise but would benefit from comparison with existing approaches in the field. Further work should address the noted limitations and explore the generalizability of the findings to related domains.`;
-    return {
-      title: smartTruncate(`Review of: ${paper.title}`, 200),
-      paperUrl: paper.pdfUrl || `https://agent4science.org/papers/${paper.id || 'unknown'}`,
-      summary: smartTruncate(fallbackSummary, 5000),
-      strengths: ['Novel approach to the research question', 'Clear articulation of methodology and objectives'],
-      weaknesses: ['Limited evaluation across diverse scenarios', 'Needs more empirical evidence to support central claims'],
-      suggestions: smartTruncate(response.content, 2000),
-    };
+    throw new Error('review unusable: no JSON in the answer');
   }
 
   /**
@@ -988,6 +1068,8 @@ ${parts.join('\n\n')}`;
     rootTitle?: string;
     rootType?: string;
     existingDiscussion?: string[];
+    /** The root is the agent's own work; ownWorkBlock() comes before this prompt. */
+    isOwnWork?: boolean;
   }): string {
     // For replies to comments, build a structured conversation-aware prompt
     if (context.triggerType === 'reply' && context.threadContext) {
@@ -1093,34 +1175,29 @@ Generate your response in JSON format:
       return prompt;
     }
 
-    // For author replies — the agent is responding to a comment on their own work
+    // For author replies — the agent is responding to a comment on their own work.
+    // ownWorkBlock() (with the work's text) comes before this when the work could be loaded.
     if (context.triggerType === 'author_reply') {
       const rootType = context.rootType || 'paper';
       const rootTitle = context.rootTitle || 'your work';
 
       let prompt = `You are the AUTHOR of this ${rootType}: "${rootTitle}"
-
-Someone commented on your work:
+${context.threadContext ? `\n=== CONVERSATION THREAD ===\n${context.threadContext}\n` : ''}
+Someone (${context.fromAgent ? `@${context.fromAgent}` : 'another researcher'}) commented on your work:
 "${context.targetContent}"
 
-AS THE AUTHOR, you have knowledge the commenter does not — you know why you made certain design choices, what you tried that did not work, what constraints you were operating under, and where you think the real limitations are (as opposed to the ones critics typically focus on).
-
 AUTHOR RESPONSE REQUIREMENTS:
-1. ENGAGE THE SPECIFIC CRITICISM OR QUESTION: Quote or paraphrase the exact point they raised.
-2. RESPOND WITH INSIDER KNOWLEDGE: Share context only the author would know:
-   - Why you chose this approach over alternatives (and what alternatives you considered)
-   - What practical constraints shaped the work (data availability, compute, domain requirements)
-   - What you tried that did not work and what you learned from it
-   - What you would do differently in hindsight
-   - What follow-up work you are planning or think should be done
-3. BE HONEST ABOUT LIMITATIONS: If they identified a real weakness, acknowledge it and explain what it would take to address it. Intellectual honesty builds credibility.
-4. DEFEND WHAT DESERVES DEFENDING: If they mischaracterized your approach or missed important context, correct the record with specifics.
-5. MOVE THE CONVERSATION FORWARD: End with something that invites deeper engagement — a question back to them, a suggestion for what to test, or an area where you genuinely want input.
+1. ENGAGE THE SPECIFIC POINT: Quote or paraphrase the exact criticism or question they raised.
+2. ANSWER FROM WHAT YOU WROTE: Point to the specific claim, number, method or stated limitation in your ${rootType} that bears on their point. Explain why you made the choice the ${rootType} describes, if the ${rootType} gives a reason.
+3. DON'T INVENT: Do not claim experiments, ablations, data, results or history that your ${rootType} doesn't report. If they ask for something you haven't done, say you haven't done it and what it would show.
+4. CONCEDE WHAT IS RIGHT: If they found a real weakness, say so plainly and say what you would change or test. A clear concession builds more credibility than a defensive reply.
+5. DEFEND WHAT DESERVES DEFENDING: If they misread the ${rootType}, correct the record by pointing to the part that shows otherwise.
+6. MOVE IT FORWARD: End with a concrete next step: the check that would settle the disagreement, or a specific question back to them.
 
 Generate your response in JSON format:
 {
   "intent": "challenge" | "support" | "clarify" | "connect" | "question" | "extend" | "probe" | "synthesize",
-  "body": "Your reply as the author (2-4 paragraphs, with insider knowledge and specifics)",
+  "body": "Your reply as the author (1-3 paragraphs, grounded in what your ${rootType} actually says)",
   "confidence": 0.0-1.0,
   "evidenceAnchor": "the specific point from their comment you are responding to"
 }`;
