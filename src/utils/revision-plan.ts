@@ -62,17 +62,11 @@ ${blocks}
 - Check each request against the paper. If the paper already does what a request asks, or a request misreads the paper, leave it out and say so in the summary.
 - Don't add requests no reviewer made. Keep each item's "resolveBy" concrete enough to check.
 - Prefer changes the author can make in the text (narrow a claim, correct a number, state a limitation); say when only new experiments would resolve an item.
-- "recommendation" is your judgment of the paper as it stands. Decide it from what the reviewers found, not from how many requests there are:
-  - "accept": no request changes a main claim.
-  - "minor_revision": the main claims hold; the requests are about scope, wording, reporting or extra analyses. Most papers whose reviewers judged them sound belong here.
-  - "major_revision": a main claim is unsupported or overstated as written, and fixing it changes what the paper concludes.
-  - "reject": a central claim is wrong (an error, an invalid method, or results that contradict it).
-  Reviewers list weaknesses on almost every paper; a long list is not by itself a reason for major revision. If the reviewers judged the paper sound, say what would make it major before choosing it.
+- Don't give a verdict. The recommendation is set from the reviewers' own judgments; your job is to merge and rank what they asked for.
 - Mark an item "major" only if a main claim depends on it; everything else is "minor".
 
 Respond in JSON:
 {
-  "recommendation": "accept" | "minor_revision" | "major_revision" | "reject",
   "summary": "<3-5 sentences: where reviewers agree, where they differ, what matters most, and any request you left out and why>",
   "items": [
     { "title": "<the change, 20+ characters>", "severity": "major" | "minor", "resolveBy": "<what would resolve it>",
@@ -81,12 +75,26 @@ Respond in JSON:
 }`;
 }
 
+/**
+ * The plan's recommendation follows the reviewers' own soundness judgments,
+ * by a rule anyone can check. The planner merges and ranks requests; it does
+ * not add a verdict of its own. (In the first live cycle, planner-chosen
+ * recommendations did not track the blind-round answer key at all: clean
+ * papers got major revision, a flawed one got minor.)
+ */
+export function recommendationFromReviews(reviews: Pick<PlanReview, 'soundness'>[]): PlanPayload['recommendation'] {
+  const judged = reviews.filter(r => r.soundness);
+  const flawed = judged.filter(r => r.soundness === 'flawed').length;
+  if (judged.length > 0 && flawed > judged.length / 2) return 'reject';
+  if (flawed > 0) return 'major_revision';
+  return 'minor_revision';
+}
+
 /** Keep a plan the site will accept: real sources, concrete items, at most 12. */
 export function normalizeRevisionPlan(raw: unknown, reviews: PlanReview[]): PlanPayload | null {
   if (!raw || typeof raw !== 'object') return null;
   const r = raw as { recommendation?: unknown; summary?: unknown; items?: unknown };
-  const recommendation = String(r.recommendation ?? '').trim().toLowerCase().replace(/[\s-]+/g, '_');
-  if (!(RECOMMENDATIONS as readonly string[]).includes(recommendation)) return null;
+  const recommendation = recommendationFromReviews(reviews);
   const summary = typeof r.summary === 'string' ? r.summary.trim().slice(0, 3000) : '';
   if (summary.length < 100) return null;
   const known = new Map(reviews.map(rv => [rv.id, new Set(rv.requests.map(q => q.id))]));
@@ -104,7 +112,7 @@ export function normalizeRevisionPlan(raw: unknown, reviews: PlanReview[]): Plan
     items.push({ title, severity, resolveBy, sources });
   }
   if (items.length === 0) return null;
-  return { recommendation: recommendation as PlanPayload['recommendation'], summary, items: items.slice(0, 12) };
+  return { recommendation, summary, items: items.slice(0, 12) };
 }
 
 /** The plan as the author's response prompt shows it. */
