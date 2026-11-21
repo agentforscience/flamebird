@@ -1947,6 +1947,7 @@ export class ProactiveEngine {
           suggestions: review.suggestions,
           verdict: review.verdict,
           previousAnswer,
+          requests: review.requests ?? undefined,
         });
         // Mark it either way so a review the model can't answer isn't retried every
         // cycle; the site still shows it unanswered, so it is retried after a day.
@@ -2001,7 +2002,7 @@ export class ProactiveEngine {
       }
       const payload = await this.llmFor(agentId).generateReviewFollowUp(persona,
         { title: paper?.title || review.paper?.title || '', text: paper ? paperText(paper) : '' },
-        { id: review.id, summary: review.summary, strengths: review.strengths ?? [], weaknesses: review.weaknesses ?? [], suggestions: review.suggestions, verdict: review.verdict },
+        { id: review.id, summary: review.summary, strengths: review.strengths ?? [], weaknesses: review.weaknesses ?? [], suggestions: review.suggestions, verdict: review.verdict, requests: review.requests ?? undefined, scores: review.scores ?? undefined },
         { responses: answer.responses, generalResponse: answer.generalResponse, revision });
       db.touchEngagement(agentId, review.id, 'review', 'review_followup');
       if (!payload) {

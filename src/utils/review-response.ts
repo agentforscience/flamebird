@@ -10,11 +10,13 @@
  * none of 14 responses changed anything.
  */
 
-export const RESPONSE_ACTIONS = ['accepted', 'partially_accepted', 'rejected', 'deferred'] as const;
+import { requestsBlock, parseReviewScores, type ReviewRequest, type Scores } from './review-requests.js';
+
+export const RESPONSE_ACTIONS = ['accepted', 'partially_accepted', 'rejected', 'deferred', 'answered'] as const;
 export type ResponseAction = typeof RESPONSE_ACTIONS[number];
 const CHANGE_ACTIONS: readonly string[] = ['accepted', 'partially_accepted'];
 
-export interface PointResponse { weakness: string; response: string; action: ResponseAction }
+export interface PointResponse { weakness: string; response: string; action: ResponseAction; requestId?: string }
 
 /** The fields a revision may change, as the site accepts them. */
 export interface EditableFields {
@@ -49,6 +51,8 @@ export interface ReviewForResponse {
   verdict?: string;
   /** The author's earlier answer, when it accepted points but changed nothing. */
   previousAnswer?: string;
+  /** Structured requests, when the review has them (answered by id). */
+  requests?: ReviewRequest[];
 }
 
 // Same rule as the site (scibook lib/paper-revisions): first-person promises.
@@ -80,8 +84,7 @@ ${review.verdict ? `Verdict: ${review.verdict}\n` : ''}Summary: ${review.summary
 Strengths:
 ${review.strengths.map(s => `- ${s}`).join('\n')}
 
-Weaknesses:
-${weaknesses}
+${review.requests?.length ? `Requests (answer each one by its id):\n${requestsBlock(review.requests)}` : `Weaknesses:\n${weaknesses}`}
 ${review.suggestions ? `\nSuggestions: ${review.suggestions}\n` : ''}${review.previousAnswer ? `
 === YOUR EARLIER ANSWER ===
 ${review.previousAnswer}
@@ -90,11 +93,11 @@ It marked points accepted, but nothing in the paper changed. Answer again, truth
 === HOW TO RESPOND ===
 Your paper is published and does not change. If the reviewer is right about something you can fix in the text, you fix it now in a revision: a new version posted beside the original. Your response then says what the revision changed.
 
-First check each weakness against the paper text above. Then answer every weakness, in order, as the author ("we" or "I"):
+First check each ${review.requests?.length ? 'request' : 'weakness'} against the paper text above. Then answer every one, in order, as the author ("we" or "I"):
 - "accepted": the reviewer is right, and your revision fixes it in the text (narrow the claim, correct the number, reword the abstract, add the limitation). Say what the revision changed.
 - "partially_accepted": part of it is right; the revision fixes that part. Say which part, what changed, and why the rest doesn't hold.
 - "rejected": the reviewer misread the paper or is wrong. Quote or point to the specific claim, number or method in the paper that shows it.
-- "deferred": the reviewer is right, but fixing it needs work you haven't done (new runs, new data). Say plainly that it is not done. You may add it to the limitations in the revision.
+- "deferred": the reviewer is right, but fixing it needs work you haven't done (new runs, new data). Say plainly that it is not done. You may add it to the limitations in the revision.${review.requests?.some(r => r.type === 'question') ? '\n- "answered": only for a request of type question. Answer it from the paper; it needs no revision.' : ''}
 
 Rules:
 - Write only about what is done. Never promise: no "we will", "we'll", "I plan to". Past or present tense only.
@@ -107,7 +110,7 @@ ${feedback ? `\nYOUR LAST ATTEMPT WAS REFUSED: ${feedback}\nFix that and answer 
 Respond in JSON:
 {
   "responses": [
-    { "weakness": "<the weakness, quoted or closely paraphrased>", "response": "<your answer, 1-4 sentences>", "action": "accepted" | "partially_accepted" | "rejected" | "deferred" }
+    { ${review.requests?.length ? '"requestId": "<req_1, req_2, ...>", ' : ''}"weakness": "<the ${review.requests?.length ? 'request' : 'weakness'}, quoted or closely paraphrased>", "response": "<your answer, 1-4 sentences>", "action": "accepted" | "partially_accepted" | "rejected" | "deferred"${review.requests?.some(r => r.type === 'question') ? ' | "answered"' : ''} }
   ],
   "generalResponse": "<2-4 sentences: what the revision changed, what is not done, and what you dispute>",
   "revision": {
@@ -145,7 +148,10 @@ function cleanEdits(raw: unknown, current: EditableFields): EditableFields {
  * Keeps the reviewer's wording for each weakness so readers can line the
  * answers up with the review.
  */
-export function normalizeReviewResponse(raw: unknown, weaknesses: string[], current: EditableFields = {}): NormalizedResponse {
+export function normalizeReviewResponse(raw: unknown, weaknesses: string[], current: EditableFields = {}, requests: ReviewRequest[] = []): NormalizedResponse {
+  // With structured requests, the answers are matched to them by id (or by position)
+  if (requests.length) weaknesses = requests.map(q => q.issue);
+  const byReqId = new Map(requests.map(q => [q.id, q]));
   if (!raw || typeof raw !== 'object') return { problem: 'the answer was not a JSON object' };
   const r = raw as { responses?: unknown; generalResponse?: unknown; revision?: unknown };
   const items = Array.isArray(r.responses) ? r.responses : [];
@@ -154,14 +160,22 @@ export function normalizeReviewResponse(raw: unknown, weaknesses: string[], curr
   const byPosition = items.length === weaknesses.length;
   items.forEach((item, i) => {
     if (!item || typeof item !== 'object') return;
-    const it = item as { weakness?: unknown; response?: unknown; action?: unknown };
+    const it = item as { weakness?: unknown; response?: unknown; action?: unknown; requestId?: unknown };
     const response = typeof it.response === 'string' ? it.response.trim() : '';
     const action = String(it.action ?? '').trim().toLowerCase().replace(/[\s-]+/g, '_');
     if (response.length < 20 || !(RESPONSE_ACTIONS as readonly string[]).includes(action)) return;
+    // An explicit id must exist; position is only a fallback when no id was given
+    const req = requests.length
+      ? (it.requestId != null && it.requestId !== '' ? byReqId.get(String(it.requestId)) : (byPosition ? requests[i] : undefined))
+      : undefined;
+    if (requests.length && !req) return;
+    // "answered" only answers a question; anything else needs a real action
+    if (action === 'answered' && req?.type !== 'question') return;
     const own = typeof it.weakness === 'string' ? it.weakness : '';
-    const weakness = ((byPosition ? weaknesses[i] : own) || own).trim();
+    const weakness = (req?.issue ?? ((byPosition ? weaknesses[i] : own) || own)).trim();
     if (!weakness) return;
-    responses.push({ weakness: weakness.slice(0, 500), response: response.slice(0, 1000), action: action as ResponseAction });
+    if (req && responses.some(r => r.requestId === req.id)) return;
+    responses.push({ weakness: weakness.slice(0, 500), response: response.slice(0, 1000), action: action as ResponseAction, ...(req ? { requestId: req.id } : {}) });
   });
   // Every weakness should be answered; allow one miss on long reviews.
   const needed = Math.max(1, weaknesses.length - (weaknesses.length > 3 ? 1 : 0));
@@ -245,7 +259,9 @@ export interface FollowUpPayload {
   stance: typeof FOLLOWUP_STANCES[number];
   notes: string;
   verdict?: typeof VERDICTS[number];
-  points: { weakness: string; status: typeof POINT_STATUSES[number]; note?: string }[];
+  points: { weakness: string; status: typeof POINT_STATUSES[number]; note?: string; requestId?: string }[];
+  /** Updated scores, when the response changed the assessment. */
+  scores?: Scores;
 }
 
 export interface RevisionForFollowUp {
@@ -255,7 +271,7 @@ export interface RevisionForFollowUp {
 }
 
 export interface AuthorResponseForFollowUp {
-  responses?: { weakness: string; response: string; action: string }[] | null;
+  responses?: { weakness: string; response: string; action: string; requestId?: string }[] | null;
   generalResponse?: string | null;
   /** The revision the author posted, with what it changed (fetched by the caller). */
   revision?: RevisionForFollowUp | null;
@@ -269,8 +285,8 @@ function revisionBlock(r: RevisionForFollowUp | null | undefined): string {
   return `Revision v${r.version}${r.note ? `: ${r.note}` : ''}\n${parts.join('\n\n') || '(no changes listed)'}`;
 }
 
-export function followUpPrompt(paperTitle: string, paperText: string, review: ReviewForResponse, response: AuthorResponseForFollowUp): string {
-  const answers = (response.responses ?? []).map((r, i) => `${i + 1}. Your concern: ${r.weakness}\n   Author (${r.action.replace(/_/g, ' ')}): ${r.response}`).join('\n');
+export function followUpPrompt(paperTitle: string, paperText: string, review: ReviewForResponse & { scores?: Scores }, response: AuthorResponseForFollowUp): string {
+  const answers = (response.responses ?? []).map((r, i) => `${r.requestId ?? i + 1}. Your ${review.requests?.length ? 'request' : 'concern'}: ${r.weakness}\n   Author (${r.action.replace(/_/g, ' ')}): ${r.response}`).join('\n');
   return `=== YOU REVIEWED THIS PAPER ===
 You wrote a review of "${paperTitle}". The paper's author has now responded. Write your follow-up as the reviewer.
 
@@ -279,8 +295,7 @@ ${paperText || '(paper text unavailable)'}
 
 === YOUR REVIEW ===
 ${review.verdict ? `Verdict: ${review.verdict}\n` : ''}Summary: ${review.summary}
-Weaknesses you raised:
-${review.weaknesses.map((w, i) => `${i + 1}. ${w}`).join('\n')}
+${review.requests?.length ? `Your requests:\n${requestsBlock(review.requests)}` : `Weaknesses you raised:\n${review.weaknesses.map((w, i) => `${i + 1}. ${w}`).join('\n')}`}${review.scores ? `\nYour scores: ${JSON.stringify(review.scores)}` : ''}
 
 === THE AUTHOR'S RESPONSE ===
 ${response.generalResponse ? `Overall: ${response.generalResponse}\n` : ''}${answers || '(no point-by-point answers)'}
@@ -310,13 +325,17 @@ Respond in JSON:
   "stance": "maintained" | "revised" | "concerns_resolved",
   "notes": "<2-5 sentences: what the response settled, what it did not, and why>",
   "verdict": "accept" | "weak_accept" | "borderline" | "weak_reject" | "reject" | null,
-  "points": [ { "weakness": "<your concern>", "status": "resolved" | "partly_resolved" | "unresolved", "note": "<one sentence>" } ]
-}`;
+  "points": [ { ${review.requests?.length ? '"requestId": "<req_1, ...>", ' : ''}"weakness": "<your ${review.requests?.length ? 'request' : 'concern'}>", "status": "resolved" | "partly_resolved" | "unresolved", "note": "<one sentence>" } ],
+  "scores": ${review.scores ? '<your scores now, same keys and scale as before; change only what the response or revision justifies>' : 'null'}
+}
+${review.requests?.length ? 'Give one point per request, with its requestId. A question the author answered is "resolved" if the answer settles it.' : ''}`;
 }
 
-export function normalizeFollowUp(raw: unknown, weaknesses: string[]): FollowUpPayload | null {
+export function normalizeFollowUp(raw: unknown, weaknesses: string[], requests: ReviewRequest[] = []): FollowUpPayload | null {
   if (!raw || typeof raw !== 'object') return null;
-  const r = raw as { stance?: unknown; notes?: unknown; verdict?: unknown; points?: unknown };
+  if (requests.length) weaknesses = requests.map(q => q.issue);
+  const byReqId = new Map(requests.map(q => [q.id, q]));
+  const r = raw as { stance?: unknown; notes?: unknown; verdict?: unknown; points?: unknown; scores?: unknown };
   const norm = (v: unknown) => String(v ?? '').trim().toLowerCase().replace(/[\s-]+/g, '_');
   const stance = norm(r.stance);
   const notes = typeof r.notes === 'string' ? r.notes.trim().slice(0, 3000) : '';
@@ -327,18 +346,24 @@ export function normalizeFollowUp(raw: unknown, weaknesses: string[]): FollowUpP
   const points: FollowUpPayload['points'] = [];
   items.forEach((item, i) => {
     if (!item || typeof item !== 'object') return;
-    const it = item as { weakness?: unknown; status?: unknown; note?: unknown };
+    const it = item as { weakness?: unknown; status?: unknown; note?: unknown; requestId?: unknown };
     const status = norm(it.status);
+    const req = requests.length
+      ? (it.requestId != null && it.requestId !== '' ? byReqId.get(String(it.requestId)) : (byPosition ? requests[i] : undefined))
+      : undefined;
+    if (requests.length && !req) return;
     const own = typeof it.weakness === 'string' ? it.weakness : '';
-    const weakness = ((byPosition ? weaknesses[i] : own) || own).trim().slice(0, 500);
+    const weakness = (req?.issue ?? ((byPosition ? weaknesses[i] : own) || own)).trim().slice(0, 500);
     if (!weakness || !(POINT_STATUSES as readonly string[]).includes(status)) return;
+    if (req && points.some(p => p.requestId === req.id)) return;
     const note = typeof it.note === 'string' && it.note.trim() ? it.note.trim().slice(0, 1000) : undefined;
-    points.push({ weakness, status: status as FollowUpPayload['points'][number]['status'], ...(note ? { note } : {}) });
+    points.push({ weakness, status: status as FollowUpPayload['points'][number]['status'], ...(note ? { note } : {}), ...(req ? { requestId: req.id } : {}) });
   });
   return {
     stance: stance as FollowUpPayload['stance'],
     notes,
     ...((VERDICTS as readonly string[]).includes(verdict) ? { verdict: verdict as FollowUpPayload['verdict'] } : {}),
     points: points.slice(0, 20),
+    ...(parseReviewScores(r.scores) ? { scores: parseReviewScores(r.scores) } : {}),
   };
 }

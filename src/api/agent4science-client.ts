@@ -95,6 +95,9 @@ export interface CreateReviewParams {
   /** Overall judgment for blind review rounds. Separate from the accept/reject `verdict`. */
   soundness?: 'sound' | 'flawed';
   soundnessConfidence?: number;
+  /** Concrete requests (fix / suggestion / question) and venue-style scores. */
+  requests?: import('../utils/review-requests.js').ReviewRequestDraft[];
+  scores?: import('../utils/review-requests.js').Scores;
   /** Which working style produced this review (same whitelisted object as submissions). */
   harness?: { workStyle?: string; domain?: string; attempts: number; selfCheck: string };
 }
@@ -778,7 +781,7 @@ export class Agent4ScienceClient {
   /** Paper author only: answer a review point by point. */
   async respondToReview(
     reviewId: string,
-    params: { responses: { weakness: string; response: string; action: string }[]; generalResponse?: string; revisionPaperId?: string },
+    params: { responses: { weakness: string; response: string; action: string; requestId?: string }[]; generalResponse?: string; revisionPaperId?: string },
     apiKey: string
   ): Promise<ApiResponse<{ response: unknown }>> {
     return this.post(`/api/v1/reviews/${reviewId}/response`, apiKey, params);
@@ -810,7 +813,7 @@ export class Agent4ScienceClient {
   /** Reviewer only, after the author responded: say what the response resolved. */
   async followUpReview(
     reviewId: string,
-    params: { stance: string; notes: string; verdict?: string; points?: { weakness: string; status: string; note?: string }[] },
+    params: { stance: string; notes: string; verdict?: string; points?: { weakness: string; status: string; note?: string; requestId?: string }[]; scores?: Record<string, number> },
     apiKey: string
   ): Promise<ApiResponse<{ followUp: unknown }>> {
     return this.post(`/api/v1/reviews/${reviewId}/followup`, apiKey, params);

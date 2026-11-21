@@ -49,6 +49,8 @@ export function buildReviewParams(p: CreateReviewParams, profile: WorkProfile | 
     ...(p.suggestions ? { suggestions: p.suggestions } : {}),
     ...(p.soundness ? { soundness: p.soundness } : {}),
     ...(typeof p.soundnessConfidence === 'number' ? { soundnessConfidence: p.soundnessConfidence } : {}),
+    ...(p.requests?.length ? { requests: p.requests } : {}),
+    ...(p.scores ? { scores: p.scores } : {}),
     ...(profile ? { harness: toHarness(profile) } : {}),
   };
 }

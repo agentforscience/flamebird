@@ -22,6 +22,7 @@ vi.mock('../src/execution/code-sandbox.js', () => ({
 }));
 
 import { LLMClient, createLLMClient, REVIEW_SOUNDNESS_FIELDS, parseSoundness, type LLMMessage } from '../src/llm/llm-client.js';
+import { REVIEW_REQUEST_FIELDS } from '../src/utils/review-requests.js';
 import { runSolverCode, runVerifierCode } from '../src/execution/code-sandbox.js';
 import { WORK_STYLES, WORK_STYLE_NAMES, harnessFor, resolveWorkSettings, parseWorkStyle } from '../src/llm/work-style.js';
 import { formatSiteMemory, getSiteMemoryBlock, clearSiteMemoryCache } from '../src/utils/site-memory.js';
@@ -49,7 +50,7 @@ function stubComplete() {
       ? JSON.stringify({ verdict: verdicts.shift() ?? 'correct', issues: [] })
       : sys.includes('Python optimization expert')
         ? 'import json\nprint(json.dumps({"x": [1, 2, 3]}))\n# padding padding padding'
-        : JSON.stringify({ title: 'A title for this', body: BODY, approach: 'An approach summary here', summary: 'S'.repeat(1300), strengths: ['a', 'b'], weaknesses: ['c', 'd'], intent: 'challenge', confidence: 0.5, shouldAttempt: true, reason: 'r', ...(sys.includes('structured peer review') ? { soundness: 'flawed', soundnessConfidence: 0.7 } : {}) });
+        : JSON.stringify({ title: 'A title for this', body: BODY, approach: 'An approach summary here', summary: 'S'.repeat(1300), strengths: ['a', 'b'], weaknesses: ['c', 'd'], intent: 'challenge', confidence: 0.5, shouldAttempt: true, reason: 'r', ...(sys.includes('structured peer review') ? { soundness: 'flawed', soundnessConfidence: 0.7, strengths: ['S1 '.repeat(20), 'S2 '.repeat(20)], weaknesses: ['W1 '.repeat(20), 'W2 '.repeat(20)] } : {}) });
     return { content, model: 'stub', usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 } };
   });
 }
@@ -121,13 +122,25 @@ function asOld(content: string): string {
     .replace(/- Occasional expressions \(rare flavor only: at most one in about eight posts, and never as your opening\): /g, '- Signature expressions: ');
 }
 
+/**
+ * Undo the 0.1.41 review-as-improvement-plan change (requests and scores in
+ * place of free-text weaknesses), so the rest of the review prompt can still
+ * be compared with 0.1.39.
+ */
+function asOldReview(content: string): string {
+  return content
+    .replace(' Write it as an improvement plan: the author will answer each request, fix what they can in a revision, and you will check the result.', '')
+    .replace(REVIEW_REQUEST_FIELDS + '\n- suggestions: string (optional, anything that doesn\'t fit a request)',
+      '- weaknesses: string[] (3-4 specific weaknesses or concerns, each at least 80 characters with concrete details)\n- suggestions: string (optional constructive suggestions for improvement)');
+}
+
 function oldComments(msgs: LLMMessage[][]): LLMMessage[][] {
   return msgs.map(c => c.map(m => ({ ...m, content: asOld(m.content) })));
 }
 
 function withoutSoundness(prompts: Record<string, LLMMessage[][]>) {
   const copy = JSON.parse(JSON.stringify(prompts)) as Record<string, LLMMessage[][]>;
-  for (const m of copy.review.flat()) m.content = m.content.replace(REVIEW_SOUNDNESS_FIELDS, '');
+  for (const m of copy.review.flat()) m.content = asOldReview(m.content.replace(REVIEW_SOUNDNESS_FIELDS, ''));
   for (const k of Object.keys(copy)) copy[k] = oldComments(copy[k]);
   return copy;
 }

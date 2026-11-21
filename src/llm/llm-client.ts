@@ -5,6 +5,7 @@
 
 import { findOwnWork, ownWorkBlock, type OwnWork, type OwnWorkClient } from '../utils/own-work.js';
 import { getAgent4ScienceClient } from '../api/agent4science-client.js';
+import { REVIEW_REQUEST_FIELDS, parseReviewRequests, parseReviewScores, weaknessesFromRequests, type ReviewRequestDraft, type Scores } from '../utils/review-requests.js';
 import { reviewResponsePrompt, normalizeReviewResponse, followUpPrompt, normalizeFollowUp, type ReviewForResponse, type ReviewResponsePayload, type AuthorResponseForFollowUp, type FollowUpPayload, type EditableFields } from '../utils/review-response.js';
 import type { AgentPersona, AgentLLMOverride, AgentWorkingMemory, CommentIntent } from '../types.js';
 import { claudeModel, runClaude } from './claude-cli.js';
@@ -300,7 +301,7 @@ export class LLMClient {
         { role: 'user', content: reviewResponsePrompt(paper.title, paper.text, review, paper.fields, feedback) },
       ], 4096);
       this.trackCost('review_response', response.usage);
-      const out = normalizeReviewResponse(this.extractJSON(response.content), review.weaknesses, paper.fields ?? {});
+      const out = normalizeReviewResponse(this.extractJSON(response.content), review.weaknesses, paper.fields ?? {}, review.requests ?? []);
       if ('payload' in out) return out.payload;
       feedback = out.problem;
       logger.info(`Review response for ${review.id} refused (${out.problem})${attempt === 0 ? '; retrying once' : ''}`);
@@ -315,7 +316,7 @@ export class LLMClient {
   async generateReviewFollowUp(
     persona: AgentPersona,
     paper: { title: string; text: string },
-    review: ReviewForResponse,
+    review: ReviewForResponse & { scores?: Scores },
     response: AuthorResponseForFollowUp,
   ): Promise<FollowUpPayload | null> {
     const out = await this.complete([
@@ -323,7 +324,7 @@ export class LLMClient {
       { role: 'user', content: followUpPrompt(paper.title, paper.text, review, response) },
     ], 2048);
     this.trackCost('review_followup', out.usage);
-    return normalizeFollowUp(this.extractJSON(out.content), review.weaknesses);
+    return normalizeFollowUp(this.extractJSON(out.content), review.weaknesses, review.requests ?? []);
   }
 
   /** Is this thread's root the agent's own work? Needs the agent id that attachSiteMemory sets. */
@@ -577,17 +578,19 @@ Write a take that reflects your unique viewpoint. Be opinionated and substantive
     suggestions?: string;
     soundness?: 'sound' | 'flawed';
     soundnessConfidence?: number;
+    requests?: ReviewRequestDraft[];
+    scores?: Scores;
     position?: PositionProposal;
   }> {
     const systemPrompt = this.buildPersonaPrompt(persona) + `
 
-You are writing a structured peer review of a research paper. Be rigorous and specific.
+You are writing a structured peer review of a research paper. Be rigorous and specific. Write it as an improvement plan: the author will answer each request, fix what they can in a revision, and you will check the result.
 Respond in JSON format with these fields:
 - title: string (a concise review title, min 10 chars, e.g. "Strong methodology but limited evaluation on ${paper.title}")
 - summary: string (a thorough, detailed assessment of what the paper does, its methodology, contributions, and your overall evaluation — MUST be at least 1500 characters long, this is a HARD MINIMUM enforced by the API. Write 4-6 substantial paragraphs covering: (1) what the paper does and why it matters, (2) methodology analysis, (3) key results and their significance, (4) limitations and concerns, (5) comparison to related work, (6) overall assessment. Aim for 2000+ characters.)
 - strengths: string[] (3-4 specific strengths of the paper, each at least 80 characters with concrete details)
-- weaknesses: string[] (3-4 specific weaknesses or concerns, each at least 80 characters with concrete details)
-- suggestions: string (optional constructive suggestions for improvement)${REVIEW_SOUNDNESS_FIELDS}${positionFieldLine(persona, 'review')}
+${REVIEW_REQUEST_FIELDS}
+- suggestions: string (optional, anything that doesn't fit a request)${REVIEW_SOUNDNESS_FIELDS}${positionFieldLine(persona, 'review')}
 
 CRITICAL: You MUST complete every field fully. Do NOT leave any sentence unfinished or cut off mid-thought. Finish every sentence and every paragraph completely before moving to the next field. If you are running low on space, be more concise rather than leaving text incomplete.${reviewWorkBlock(persona)}`;
 
@@ -628,57 +631,38 @@ Stated Limitations: ${paper.limitations.join('; ')}${reviewSections(paper)}`;
           if (!repaired) throw new Error('JSON repair failed');
           parsed = JSON.parse(repaired);
         }
-        let summary = smartTruncate(parsed.summary || '', 5000);
-
-        // Production API requires at least 1200 chars — pad if LLM fell short
-        if (summary.length < 1200) {
-          const extras = [
-            `\n\nIn examining the methodology of "${paper.title}", the approach taken raises several important considerations for the field.`,
-            ` The claims presented — ${paper.claims.slice(0, 3).join('; ')} — warrant careful scrutiny in terms of both novelty and empirical support.`,
-            ` The authors acknowledge limitations including ${paper.limitations.slice(0, 2).join(' and ')}, which is commendable but also highlights areas needing further development.`,
-            ` Overall, this work contributes to our understanding of the topic, though additional validation would strengthen the conclusions drawn.`,
-            ` The experimental design and evaluation framework would benefit from broader comparison with state-of-the-art baselines.`,
-            ` Future work could explore the generalizability of these findings across different domains and datasets to strengthen the empirical foundation.`,
-          ];
-          for (const extra of extras) {
-            if (summary.length >= 1200) break;
-            summary += extra;
-          }
-          // Final safety net: repeat filler until hard minimum is met
-          while (summary.length < 1200) {
-            summary += ` Further analysis of the methodological choices and their implications for reproducibility would strengthen this contribution.`;
-          }
+        const summary = smartTruncate(parsed.summary || '', 5000);
+        const requests = parseReviewRequests(parsed.requests);
+        const fromRequests = weaknessesFromRequests(requests);
+        const listed = Array.isArray(parsed.weaknesses)
+          ? parsed.weaknesses.map((w: unknown) => smartTruncate(String(w), 500)).filter((w: string) => w.length >= 50)
+          : [];
+        const weaknesses = (fromRequests.length >= 2 ? fromRequests : listed).slice(0, 15);
+        const strengths = Array.isArray(parsed.strengths)
+          ? parsed.strengths.map((x: unknown) => smartTruncate(String(x), 500)).filter((x: string) => x.length >= 50).slice(0, 4)
+          : [];
+        // No filler: a review the model didn't actually write is not posted
+        if (summary.length < 200 || strengths.length < 2 || weaknesses.length < 2) {
+          throw new Error(`review unusable (summary ${summary.length} chars, ${strengths.length} strengths, ${weaknesses.length} weaknesses)`);
         }
-
+        const scores = parseReviewScores(parsed.scores);
         return {
           title: smartTruncate(parsed.title || `Review of: ${paper.title}`, 200),
           paperUrl: paper.pdfUrl || `https://agent4science.org/papers/${paper.id || 'unknown'}`,
           summary,
-          strengths: Array.isArray(parsed.strengths) && parsed.strengths.length >= 2
-            ? parsed.strengths.slice(0, 4).map((s: string) => smartTruncate(String(s), 500))
-            : ['Novel approach to the research question with clear methodology', 'Clear articulation of objectives and experimental design'],
-          weaknesses: Array.isArray(parsed.weaknesses) && parsed.weaknesses.length >= 2
-            ? parsed.weaknesses.slice(0, 4).map((w: string) => smartTruncate(String(w), 500))
-            : ['Limited evaluation across diverse scenarios and datasets', 'Needs more empirical evidence to support central claims'],
+          strengths,
+          weaknesses,
           suggestions: parsed.suggestions ? smartTruncate(String(parsed.suggestions), 2000) : undefined,
           ...parseSoundness(parsed),
+          ...(requests.length ? { requests } : {}),
+          ...(scores ? { scores } : {}),
           ...withPosition(parsed),
         };
       }
-    } catch {
-      // fall through to default
+    } catch (err) {
+      throw err instanceof Error && err.message.startsWith('review unusable') ? err : new Error(`review unusable: ${err instanceof Error ? err.message : String(err)}`);
     }
-
-    // Fallback: construct a review from the raw LLM response
-    const fallbackSummary = `This paper, "${paper.title}", presents research that merits careful examination. ${smartTruncate(paper.abstract, 500)} The key claims include: ${paper.claims.slice(0, 3).join('; ')}. The authors note limitations such as ${paper.limitations.slice(0, 2).join(' and ')}. While the work makes a meaningful contribution, additional empirical validation and broader evaluation would strengthen the overall impact. The methodology shows promise but would benefit from comparison with existing approaches in the field. Further work should address the noted limitations and explore the generalizability of the findings to related domains.`;
-    return {
-      title: smartTruncate(`Review of: ${paper.title}`, 200),
-      paperUrl: paper.pdfUrl || `https://agent4science.org/papers/${paper.id || 'unknown'}`,
-      summary: smartTruncate(fallbackSummary, 5000),
-      strengths: ['Novel approach to the research question', 'Clear articulation of methodology and objectives'],
-      weaknesses: ['Limited evaluation across diverse scenarios', 'Needs more empirical evidence to support central claims'],
-      suggestions: smartTruncate(response.content, 2000),
-    };
+    throw new Error('review unusable: no JSON in the answer');
   }
 
   /**
