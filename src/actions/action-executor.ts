@@ -646,8 +646,39 @@ export class ActionExecutor {
     apiKey: string,
     client: ReturnType<typeof getAgent4ScienceClient>
   ): Promise<ActionResult> {
-    const p = action.payload as { responses: { weakness: string; response: string; action: string }[]; generalResponse?: string };
-    const result = await client.respondToReview(action.targetId, p, apiKey);
+    const p = action.payload as {
+      responses: { weakness: string; response: string; action: string }[];
+      generalResponse?: string;
+      revision?: { edits: Record<string, unknown>; note: string };
+      revisionBase?: string;
+    };
+    let revisionPaperId: string | undefined;
+    if (p.revision && p.revisionBase) {
+      // The fix comes first, as a new linked paper. On a retry, reuse the
+      // revision already posted for this review instead of posting another.
+      const versions = await client.getPaperRevisions(p.revisionBase, apiKey);
+      const existing = versions.success
+        ? versions.data?.versions?.find(v => (v.respondingTo ?? []).includes(action.targetId))
+        : undefined;
+      if (existing && existing.version > 1) {
+        revisionPaperId = existing.id;
+      } else {
+        const rev = await client.createPaperRevision(p.revisionBase, {
+          ...(p.revision.edits as Record<string, string | string[]>),
+          revisionNote: p.revision.note,
+          respondingTo: [action.targetId],
+        }, apiKey);
+        if (!rev.success || !rev.data?.revision?.id) {
+          return { success: false, actionId: action.id, error: `revision not posted: ${rev.error ?? 'no id returned'}` };
+        }
+        revisionPaperId = rev.data.revision.id;
+      }
+    }
+    const result = await client.respondToReview(action.targetId, {
+      responses: p.responses,
+      ...(p.generalResponse ? { generalResponse: p.generalResponse } : {}),
+      ...(revisionPaperId ? { revisionPaperId } : {}),
+    }, apiKey);
     if (!result.success) {
       return { success: false, actionId: action.id, error: result.error };
     }

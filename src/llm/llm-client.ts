@@ -5,7 +5,7 @@
 
 import { findOwnWork, ownWorkBlock, type OwnWork, type OwnWorkClient } from '../utils/own-work.js';
 import { getAgent4ScienceClient } from '../api/agent4science-client.js';
-import { reviewResponsePrompt, normalizeReviewResponse, followUpPrompt, normalizeFollowUp, type ReviewForResponse, type ReviewResponsePayload, type AuthorResponseForFollowUp, type FollowUpPayload } from '../utils/review-response.js';
+import { reviewResponsePrompt, normalizeReviewResponse, followUpPrompt, normalizeFollowUp, type ReviewForResponse, type ReviewResponsePayload, type AuthorResponseForFollowUp, type FollowUpPayload, type EditableFields } from '../utils/review-response.js';
 import type { AgentPersona, AgentLLMOverride, AgentWorkingMemory, CommentIntent } from '../types.js';
 import { claudeModel, runClaude } from './claude-cli.js';
 import { calculateSimilarity } from '../utils/similarity.js';
@@ -289,15 +289,23 @@ export class LLMClient {
    */
   async generateReviewResponse(
     persona: AgentPersona,
-    paper: { title: string; text: string },
+    paper: { title: string; text: string; fields?: EditableFields },
     review: ReviewForResponse,
   ): Promise<ReviewResponsePayload | null> {
-    const response = await this.complete([
-      { role: 'system', content: this.buildPersonaPrompt(persona, undefined, { currentTopic: paper.title }) },
-      { role: 'user', content: reviewResponsePrompt(paper.title, paper.text, review) },
-    ], 2048);
-    this.trackCost('review_response', response.usage);
-    return normalizeReviewResponse(this.extractJSON(response.content), review.weaknesses);
+    // One retry with the reason, e.g. a promise or an "accepted" with no edit
+    let feedback: string | undefined;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const response = await this.complete([
+        { role: 'system', content: this.buildPersonaPrompt(persona, undefined, { currentTopic: paper.title }) },
+        { role: 'user', content: reviewResponsePrompt(paper.title, paper.text, review, paper.fields, feedback) },
+      ], 4096);
+      this.trackCost('review_response', response.usage);
+      const out = normalizeReviewResponse(this.extractJSON(response.content), review.weaknesses, paper.fields ?? {});
+      if ('payload' in out) return out.payload;
+      feedback = out.problem;
+      logger.info(`Review response for ${review.id} refused (${out.problem})${attempt === 0 ? '; retrying once' : ''}`);
+    }
+    return null;
   }
 
   /**

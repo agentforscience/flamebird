@@ -27,6 +27,7 @@ import { assessTextQuality } from '../utils/content-quality.js';
 import { attachSiteMemory, findPushback } from '../utils/site-memory.js';
 import { pushbackContextFor } from '../utils/pushback.js';
 import { paperText } from '../utils/own-work.js';
+import { needsAuthorAnswer, needsReviewerFollowUp, editableFieldsOf, type RevisionForFollowUp } from '../utils/review-response.js';
 import { targetTopics } from '../utils/focus.js';
 import { workProfileFor, workLogFields } from '../llm/work-style.js';
 
@@ -1920,17 +1921,24 @@ export class ProactiveEngine {
         const reviews = (res.success && res.data
           ? (Array.isArray(res.data) ? res.data : (res.data as { reviews?: Agent4ScienceReview[] }).reviews ?? [])
           : []) as Agent4ScienceReview[];
+        // New reviews first; then answers that accepted points but changed nothing
         const open = reviews
-          .filter(r => r.reviewerAgentId !== agentId && !r.authorResponse && (r.weaknesses?.length ?? 0) > 0
-            && !db.hasEngagedWithin(agentId, r.id, 'review_response', REVIEW_RETRY_MS))
-          .sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
-        const review = open[0];
-        if (!review) continue;
+          .map(r => ({ r, kind: needsAuthorAnswer(r, agentId) }))
+          .filter(x => x.kind && !db.hasEngagedWithin(agentId, x.r.id, 'review_response', REVIEW_RETRY_MS))
+          .sort((a, b) => (a.kind === b.kind ? 0 : a.kind === 'new' ? -1 : 1) || String(a.r.createdAt).localeCompare(String(b.r.createdAt)));
+        if (open.length === 0) continue;
+        const { r: review, kind } = open[0];
 
-        // Full paper text, so the response cites what the paper says
-        const full = await client.getPaper(paper.id, apiKey, { include: 'none' });
-        const text = paperText(full.success && full.data ? full.data : paper);
-        const payload = await this.llmFor(agentId).generateReviewResponse(persona, { title: paper.title, text }, {
+        // Revise from the latest version in the chain, and answer from its text
+        const rootId = paper.revisionOf || paper.id;
+        const rootRes = await client.getPaper(rootId, apiKey, { include: 'none' });
+        const baseId = (rootRes.success && rootRes.data?.latestRevisionId) || rootId;
+        const baseRes = baseId === rootId ? rootRes : await client.getPaper(baseId, apiKey, { include: 'none' });
+        const base = baseRes.success && baseRes.data ? baseRes.data : paper;
+        const previousAnswer = kind === 'reanswer'
+          ? [review.authorResponse?.generalResponse, ...(review.authorResponse?.responses ?? []).map(p => `(${p.action}) ${p.response}`)].filter(Boolean).join('\n')
+          : undefined;
+        const payload = await this.llmFor(agentId).generateReviewResponse(persona, { title: base.title || paper.title, text: paperText(base), fields: editableFieldsOf(base) }, {
           id: review.id,
           reviewer: review.agent?.handle,
           summary: review.summary,
@@ -1938,6 +1946,7 @@ export class ProactiveEngine {
           weaknesses: review.weaknesses ?? [],
           suggestions: review.suggestions,
           verdict: review.verdict,
+          previousAnswer,
         });
         // Mark it either way so a review the model can't answer isn't retried every
         // cycle; the site still shows it unanswered, so it is retried after a day.
@@ -1946,8 +1955,9 @@ export class ProactiveEngine {
           logger.info(`${agentName(agentId)} could not write a usable response to review ${review.id}; skipped`);
           continue;
         }
-        executor.queueAction(agentId, 'review_response', review.id, 'review', payload as unknown as Record<string, unknown>, 'high');
-        logger.info(`${agentName(agentId)} (author) queued a response to review ${review.id} on "${paper.title.slice(0, 60)}"`);
+        const queued = { ...payload, ...(payload.revision ? { revisionBase: base.id || baseId } : {}) };
+        executor.queueAction(agentId, 'review_response', review.id, 'review', queued as unknown as Record<string, unknown>, 'high');
+        logger.info(`${agentName(agentId)} (author) queued a ${kind === 'reanswer' ? 'truthful re-answer' : 'response'}${payload.revision ? ` with a revision (${Object.keys(payload.revision.edits).join(', ')})` : ''} to review ${review.id} on "${paper.title.slice(0, 60)}"`);
         return; // one per cycle
       }
     } catch (error) {
@@ -1974,17 +1984,25 @@ export class ProactiveEngine {
         ? (Array.isArray(res.data) ? res.data : (res.data as { reviews?: Agent4ScienceReview[] }).reviews ?? [])
         : []) as Agent4ScienceReview[];
       const review = reviews
-        .filter(r => r.reviewerAgentId === agentId && r.authorResponse && !r.reviewerFollowUp
+        .filter(r => needsReviewerFollowUp(r, agentId)
           && !db.hasEngagedWithin(agentId, r.id, 'review_followup', REVIEW_RETRY_MS))
         .sort((a, b) => String(a.authorResponse?.createdAt ?? '').localeCompare(String(b.authorResponse?.createdAt ?? '')))[0];
       if (!review) return;
 
       const full = await client.getPaper(review.paperId, apiKey, { include: 'none' });
       const paper = full.success && full.data ? full.data : null;
+      // What the author actually changed: the revision's before/after text
+      const answer = review.authorResponse!;
+      let revision: RevisionForFollowUp | null = null;
+      if (answer.revision?.paperId) {
+        const revRes = await client.getPaper(answer.revision.paperId, apiKey, { include: 'none' });
+        const rev = revRes.success && revRes.data ? revRes.data : null;
+        if (rev) revision = { version: rev.revisionNumber ?? answer.revision.version, note: rev.revisionNote ?? null, changes: rev.revisionChanges ?? [] };
+      }
       const payload = await this.llmFor(agentId).generateReviewFollowUp(persona,
         { title: paper?.title || review.paper?.title || '', text: paper ? paperText(paper) : '' },
         { id: review.id, summary: review.summary, strengths: review.strengths ?? [], weaknesses: review.weaknesses ?? [], suggestions: review.suggestions, verdict: review.verdict },
-        review.authorResponse!);
+        { responses: answer.responses, generalResponse: answer.generalResponse, revision });
       db.touchEngagement(agentId, review.id, 'review', 'review_followup');
       if (!payload) {
         logger.info(`${agentName(agentId)} could not write a usable follow-up to review ${review.id}; skipped`);

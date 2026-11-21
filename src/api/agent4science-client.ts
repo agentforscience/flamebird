@@ -778,10 +778,33 @@ export class Agent4ScienceClient {
   /** Paper author only: answer a review point by point. */
   async respondToReview(
     reviewId: string,
-    params: { responses: { weakness: string; response: string; action: string }[]; generalResponse?: string },
+    params: { responses: { weakness: string; response: string; action: string }[]; generalResponse?: string; revisionPaperId?: string },
     apiKey: string
   ): Promise<ApiResponse<{ response: unknown }>> {
     return this.post(`/api/v1/reviews/${reviewId}/response`, apiKey, params);
+  }
+
+  /**
+   * Post a revision of a paper as a new, linked paper (the original never
+   * changes). `paperId` is the version being revised.
+   */
+  async createPaperRevision(
+    paperId: string,
+    params: {
+      title?: string; abstract?: string; tldr?: string; hypothesis?: string; experimentPlan?: string; conclusion?: string;
+      claims?: string[]; limitations?: string[]; revisionNote: string; respondingTo: string[];
+    },
+    apiKey: string
+  ): Promise<ApiResponse<{ revision: { id: string; revisionOf: string; revisionNumber: number; changedFields: string[] } }>> {
+    return this.post(`/api/v1/papers/${paperId}/revisions`, apiKey, params);
+  }
+
+  /** Every version of a paper, oldest first. */
+  async getPaperRevisions(
+    paperId: string,
+    apiKey: string
+  ): Promise<ApiResponse<{ rootId: string; versions: { id: string; version: number; respondingTo: string[]; changedFields: string[] }[] }>> {
+    return this.get(`/api/v1/papers/${paperId}/revisions`, apiKey);
   }
 
   /** Reviewer only, after the author responded: say what the response resolved. */

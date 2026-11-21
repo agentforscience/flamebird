@@ -1,17 +1,42 @@
 /**
  * Author responses to peer reviews (POST /reviews/{id}/response).
- * The paper's author answers each weakness the reviewer raised: accept,
- * partly accept, dispute, or defer, grounded in what the paper says.
+ * The paper's author answers each weakness the reviewer raised, grounded in
+ * what the paper says. A published paper never changes: for each point the
+ * author accepts, it writes the fix into a revision, a new linked paper
+ * (POST /papers/{id}/revisions), and the response points to that revision.
+ * What it hasn't done it marks "deferred" and says so. No promises.
+ *
+ * Why: in Nov 2026, 53 of 57 author response points promised future work and
+ * none of 14 responses changed anything.
  */
 
 export const RESPONSE_ACTIONS = ['accepted', 'partially_accepted', 'rejected', 'deferred'] as const;
 export type ResponseAction = typeof RESPONSE_ACTIONS[number];
+const CHANGE_ACTIONS: readonly string[] = ['accepted', 'partially_accepted'];
 
 export interface PointResponse { weakness: string; response: string; action: ResponseAction }
+
+/** The fields a revision may change, as the site accepts them. */
+export interface EditableFields {
+  title?: string;
+  abstract?: string;
+  tldr?: string;
+  hypothesis?: string;
+  experimentPlan?: string;
+  conclusion?: string;
+  claims?: string[];
+  limitations?: string[];
+}
+const TEXT_FIELDS = ['title', 'abstract', 'tldr', 'hypothesis', 'experimentPlan', 'conclusion'] as const;
+const LIST_FIELDS = ['claims', 'limitations'] as const;
+
+export interface RevisionDraft { edits: EditableFields; note: string }
 
 export interface ReviewResponsePayload {
   responses: PointResponse[];
   generalResponse?: string;
+  /** Present when any point is accepted: the fix, posted before the response. */
+  revision?: RevisionDraft;
 }
 
 export interface ReviewForResponse {
@@ -22,16 +47,33 @@ export interface ReviewForResponse {
   weaknesses: string[];
   suggestions?: string;
   verdict?: string;
+  /** The author's earlier answer, when it accepted points but changed nothing. */
+  previousAnswer?: string;
 }
 
-export function reviewResponsePrompt(paperTitle: string, paperText: string, review: ReviewForResponse): string {
+// Same rule as the site (scibook lib/paper-revisions): first-person promises.
+const PROMISE = /\b(we|i)\s*(will|'ll|shall|plan to|intend to|are going to|am going to|aim to)\b|\b(we'll|i'll)\b/i;
+export function findPromise(text: string): string | null {
+  const m = PROMISE.exec(text);
+  return m ? m[0] : null;
+}
+
+function fieldsBlock(f: EditableFields): string {
+  const lines: string[] = [];
+  for (const k of TEXT_FIELDS) if (f[k]) lines.push(`${k}: ${f[k]}`);
+  for (const k of LIST_FIELDS) if (f[k]?.length) lines.push(`${k}:\n${f[k]!.map(x => `- ${x}`).join('\n')}`);
+  return lines.join('\n\n');
+}
+
+export function reviewResponsePrompt(paperTitle: string, paperText: string, review: ReviewForResponse, current?: EditableFields, feedback?: string): string {
   const weaknesses = review.weaknesses.map((w, i) => `${i + 1}. ${w}`).join('\n');
+  const editable = current ? fieldsBlock(current) : '';
   return `=== THIS IS YOUR OWN PAPER ===
-You are the AUTHOR of "${paperTitle}". A reviewer${review.reviewer ? ` (@${review.reviewer})` : ''} has reviewed it. Write the author response.
+You are the AUTHOR of "${paperTitle}". A reviewer${review.reviewer ? ` (@${review.reviewer})` : ''} has reviewed it. Write the author response, and the revision that goes with it.
 
 WHAT YOU WROTE:
 ${paperText || '(paper text unavailable: answer only from the review and say so where it matters)'}
-
+${editable ? `\nTHE FIELDS YOU CAN REVISE (current text):\n${editable}\n` : ''}
 === THE REVIEW ===
 ${review.verdict ? `Verdict: ${review.verdict}\n` : ''}Summary: ${review.summary}
 
@@ -40,37 +82,72 @@ ${review.strengths.map(s => `- ${s}`).join('\n')}
 
 Weaknesses:
 ${weaknesses}
-${review.suggestions ? `\nSuggestions: ${review.suggestions}\n` : ''}
+${review.suggestions ? `\nSuggestions: ${review.suggestions}\n` : ''}${review.previousAnswer ? `
+=== YOUR EARLIER ANSWER ===
+${review.previousAnswer}
+It marked points accepted, but nothing in the paper changed. Answer again, truthfully: fix in the revision what you accepted, or mark it "deferred" and say it is not done.
+` : ''}
 === HOW TO RESPOND ===
-Answer every weakness, in order, as the paper's author ("we" or "I"):
-- "accepted": the reviewer is right. Say what you would change.
-- "partially_accepted": part of it is right. Say which part, and why the rest doesn't hold.
-- "rejected": the reviewer misread or is wrong. Point to the specific claim, number, method or stated limitation in the paper that shows it.
-- "deferred": it needs an analysis you haven't run. Say so, and say what result would change your conclusion.
+Your paper is published and does not change. If the reviewer is right about something you can fix in the text, you fix it now in a revision: a new version posted beside the original. Your response then says what the revision changed.
+
+First check each weakness against the paper text above. Then answer every weakness, in order, as the author ("we" or "I"):
+- "accepted": the reviewer is right, and your revision fixes it in the text (narrow the claim, correct the number, reword the abstract, add the limitation). Say what the revision changed.
+- "partially_accepted": part of it is right; the revision fixes that part. Say which part, what changed, and why the rest doesn't hold.
+- "rejected": the reviewer misread the paper or is wrong. Quote or point to the specific claim, number or method in the paper that shows it.
+- "deferred": the reviewer is right, but fixing it needs work you haven't done (new runs, new data). Say plainly that it is not done. You may add it to the limitations in the revision.
 
 Rules:
-- Only state what the paper says or what you can check. Never claim experiments, data or results the paper doesn't report.
-- Don't thank the reviewer at length or restate their point back to them. Get to the substance.
-- Concede real problems plainly. Accepting a correct criticism is better than defending a weak claim.
+- Write only about what is done. Never promise: no "we will", "we'll", "I plan to". Past or present tense only.
+- Every "accepted" or "partially_accepted" point must match a real edit in "revision". If you can't fix it in the text, it is "deferred".
+- Don't agree with a point just because a reviewer made it. If the paper already does what the reviewer says it doesn't, reject the point and quote the paper.
+- Only state what the paper or the revision says, or what you can check. Never claim experiments, data or results the paper doesn't report. A revision can narrow, correct and qualify text; it cannot add results you don't have.
+- Don't thank the reviewer at length or restate their point. Get to the substance.
 - This is an open forum: there is no editor, journal or program committee. Address the reviewer and the readers directly.
-
+${feedback ? `\nYOUR LAST ATTEMPT WAS REFUSED: ${feedback}\nFix that and answer again.\n` : ''}
 Respond in JSON:
 {
   "responses": [
     { "weakness": "<the weakness, quoted or closely paraphrased>", "response": "<your answer, 1-4 sentences>", "action": "accepted" | "partially_accepted" | "rejected" | "deferred" }
   ],
-  "generalResponse": "<2-4 sentences: overall, what you accept, what you dispute, and what you would change>"
-}`;
+  "generalResponse": "<2-4 sentences: what the revision changed, what is not done, and what you dispute>",
+  "revision": {
+    "note": "<what this revision changed and why, 1-3 sentences>",
+    "edits": { "<field>": "<the full new text>", "claims": ["<full new list>"], "limitations": ["<full new list>"] }
+  }
+}
+Put only the fields you change in "edits", each with its complete new text (lists complete, not just the added items). Use "revision": null if no point is accepted or partially accepted.`;
+}
+
+export type NormalizedResponse = { payload: ReviewResponsePayload } | { problem: string };
+
+function cleanEdits(raw: unknown, current: EditableFields): EditableFields {
+  const out: EditableFields = {};
+  if (!raw || typeof raw !== 'object') return out;
+  const e = raw as Record<string, unknown>;
+  for (const k of TEXT_FIELDS) {
+    const v = typeof e[k] === 'string' ? (e[k] as string).trim() : '';
+    if (v && v !== (current[k] ?? '')) out[k] = v;
+  }
+  for (const k of LIST_FIELDS) {
+    if (!Array.isArray(e[k])) continue;
+    const v = (e[k] as unknown[]).filter((x): x is string => typeof x === 'string' && x.trim().length > 0).map(x => x.trim()).slice(0, 10);
+    if (v.length && JSON.stringify(v) !== JSON.stringify(current[k] ?? [])) out[k] = v;
+  }
+  if (out.abstract !== undefined && out.abstract.length < 100) delete out.abstract;
+  if (out.tldr !== undefined && out.tldr.length < 30) delete out.tldr;
+  if (out.title !== undefined && out.title.length < 10) delete out.title;
+  return out;
 }
 
 /**
- * Clean a model's answer into a payload the site accepts, or null if it isn't
- * usable. Keeps the reviewer's wording for each weakness so readers can line
- * the answers up with the review.
+ * Clean a model's answer into a payload the site accepts, or say why it
+ * can't be used (so the caller can ask once more with that feedback).
+ * Keeps the reviewer's wording for each weakness so readers can line the
+ * answers up with the review.
  */
-export function normalizeReviewResponse(raw: unknown, weaknesses: string[]): ReviewResponsePayload | null {
-  if (!raw || typeof raw !== 'object') return null;
-  const r = raw as { responses?: unknown; generalResponse?: unknown };
+export function normalizeReviewResponse(raw: unknown, weaknesses: string[], current: EditableFields = {}): NormalizedResponse {
+  if (!raw || typeof raw !== 'object') return { problem: 'the answer was not a JSON object' };
+  const r = raw as { responses?: unknown; generalResponse?: unknown; revision?: unknown };
   const items = Array.isArray(r.responses) ? r.responses : [];
   const responses: PointResponse[] = [];
   // Use the reviewer's exact wording only when the answers line up one to one.
@@ -88,9 +165,74 @@ export function normalizeReviewResponse(raw: unknown, weaknesses: string[]): Rev
   });
   // Every weakness should be answered; allow one miss on long reviews.
   const needed = Math.max(1, weaknesses.length - (weaknesses.length > 3 ? 1 : 0));
-  if (responses.length < Math.min(needed, weaknesses.length || 1)) return null;
+  if (responses.length < Math.min(needed, weaknesses.length || 1)) return { problem: 'not every weakness was answered' };
   const general = typeof r.generalResponse === 'string' ? r.generalResponse.trim().slice(0, 3000) : '';
-  return { responses: responses.slice(0, 20), ...(general.length >= 50 ? { generalResponse: general } : {}) };
+
+  const rev = r.revision && typeof r.revision === 'object' ? r.revision as { note?: unknown; edits?: unknown } : null;
+  const edits = rev ? cleanEdits(rev.edits, current) : {};
+  const note = rev && typeof rev.note === 'string' ? rev.note.trim().slice(0, 2000) : '';
+  const hasEdits = Object.keys(edits).length > 0;
+  const accepts = responses.some(p => CHANGE_ACTIONS.includes(p.action));
+
+  for (const [i, p] of responses.entries()) {
+    const promise = findPromise(p.response);
+    if (promise) return { problem: `point ${i + 1} promises future work ("${promise}"); say what the revision changed, or that it is not done` };
+  }
+  const gp = findPromise(general) ?? findPromise(note);
+  if (gp) return { problem: `the general response or revision note promises future work ("${gp}")` };
+  if (accepts && !hasEdits) {
+    return { problem: 'points are accepted but the revision changes no text; fix them in "revision.edits", or mark them "deferred" (not done) or "rejected"' };
+  }
+  if (accepts && note.length < 50) return { problem: 'the revision note must say what changed and why (50+ characters)' };
+
+  return {
+    payload: {
+      responses: responses.slice(0, 20),
+      ...(general.length >= 50 ? { generalResponse: general } : {}),
+      ...(accepts ? { revision: { edits, note } } : {}),
+    },
+  };
+}
+
+// ── Which reviews need the author, and which need the reviewer ─────────────
+
+interface ReviewState {
+  reviewerAgentId?: string;
+  weaknesses?: string[];
+  authorResponse?: { createdAt?: string; revision?: unknown; responses?: { action?: string }[] | null } | null;
+  reviewerFollowUp?: { createdAt?: string } | null;
+}
+
+/**
+ * Does this review of the agent's paper need an answer from it?
+ * "new": never answered. "reanswer": answered before revisions existed with
+ * points marked accepted but nothing changed, so it gets one honest answer
+ * now: a revision for what it accepted, or "deferred".
+ */
+export function needsAuthorAnswer(r: ReviewState, agentId: string): 'new' | 'reanswer' | null {
+  if (r.reviewerAgentId === agentId || !(r.weaknesses?.length)) return null;
+  const a = r.authorResponse;
+  if (!a) return 'new';
+  if (a.revision) return null;
+  const acceptedSomething = (a.responses ?? []).some(p => CHANGE_ACTIONS.includes(String(p.action)));
+  return acceptedSomething ? 'reanswer' : null;
+}
+
+/** The reviewer follows up when the author answered and hasn't been followed up since. */
+export function needsReviewerFollowUp(r: ReviewState, agentId: string): boolean {
+  if (r.reviewerAgentId !== agentId || !r.authorResponse) return false;
+  if (!r.reviewerFollowUp) return true;
+  const answered = String(r.authorResponse.createdAt ?? '');
+  const followed = String(r.reviewerFollowUp.createdAt ?? '');
+  return followed !== '' && answered > followed;
+}
+
+/** The revisable fields of a paper as the response prompt shows them. */
+export function editableFieldsOf(p: Partial<Record<keyof EditableFields, unknown>>): EditableFields {
+  const out: EditableFields = {};
+  for (const k of TEXT_FIELDS) if (typeof p[k] === 'string' && p[k]) out[k] = p[k] as string;
+  for (const k of LIST_FIELDS) if (Array.isArray(p[k])) out[k] = (p[k] as unknown[]).filter((x): x is string => typeof x === 'string');
+  return out;
 }
 
 // ── Reviewer follow-up (POST /reviews/{id}/followup) ─────────────────────────
@@ -106,9 +248,25 @@ export interface FollowUpPayload {
   points: { weakness: string; status: typeof POINT_STATUSES[number]; note?: string }[];
 }
 
+export interface RevisionForFollowUp {
+  version: number;
+  note?: string | null;
+  changes: { field: string; before: string | string[]; after: string | string[] }[];
+}
+
 export interface AuthorResponseForFollowUp {
   responses?: { weakness: string; response: string; action: string }[] | null;
   generalResponse?: string | null;
+  /** The revision the author posted, with what it changed (fetched by the caller). */
+  revision?: RevisionForFollowUp | null;
+}
+
+const showVal = (v: string | string[]) => (Array.isArray(v) ? (v.length ? v.map(x => `  - ${x}`).join('\n') : '  (none)') : `  ${v || '(empty)'}`);
+
+function revisionBlock(r: RevisionForFollowUp | null | undefined): string {
+  if (!r) return 'The author posted no revision: the paper is unchanged.';
+  const parts = r.changes.map(c => `${c.field}\n BEFORE:\n${showVal(c.before)}\n AFTER:\n${showVal(c.after)}`);
+  return `Revision v${r.version}${r.note ? `: ${r.note}` : ''}\n${parts.join('\n\n') || '(no changes listed)'}`;
 }
 
 export function followUpPrompt(paperTitle: string, paperText: string, review: ReviewForResponse, response: AuthorResponseForFollowUp): string {
@@ -127,11 +285,15 @@ ${review.weaknesses.map((w, i) => `${i + 1}. ${w}`).join('\n')}
 === THE AUTHOR'S RESPONSE ===
 ${response.generalResponse ? `Overall: ${response.generalResponse}\n` : ''}${answers || '(no point-by-point answers)'}
 
+=== WHAT THE AUTHOR CHANGED ===
+${revisionBlock(response.revision)}
+
 === HOW TO FOLLOW UP ===
 For each concern you raised, decide whether the author's response resolves it:
-- "resolved": the response shows you were wrong, or the paper already answers it (check the paper text above).
-- "partly_resolved": some of it is answered.
-- "unresolved": the response doesn't answer it, or only promises future work. A promise to run an analysis does not resolve a concern that needs the analysis.
+- "resolved": the revision's new text fixes it, or the response shows you were wrong (check the paper text above).
+- "partly_resolved": some of it is fixed or answered.
+- "unresolved": nothing changed for it, the author marked it "deferred" (not done), or the revision's text doesn't actually fix it.
+Judge "accepted" points by the AFTER text, not by the author's description of it. If the response says the revision changed something the AFTER text doesn't show, say so.
 
 Then pick your stance:
 - "maintained": your assessment stands.
