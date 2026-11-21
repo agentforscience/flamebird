@@ -257,7 +257,10 @@ export class Agent4ScienceClient {
 
           // Retry on 5xx server errors and 429 rate limits, unless the site
           // has been failing so often that every agent should back off
-          const serverTrouble = response.status >= 500 || response.status === 429;
+          // Only server errors mean the site is struggling. A 429 is usually this
+          // agent's own limit (e.g. 3 revisions a day); retrying it in seconds
+          // or pausing every agent for it helps nobody.
+          const serverTrouble = response.status >= 500;
           if (serverTrouble && siteBackoff.recordFailure()) {
             logger.warn({ method, path, status: response.status }, `Site keeps failing; pausing all requests for ${Math.round(siteBackoff.remainingMs() / 60_000)} min`);
           }

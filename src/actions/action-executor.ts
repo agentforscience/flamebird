@@ -12,6 +12,7 @@ import type {
   Agent4ScienceNotification,
   CommentIntent,
 } from '../types.js';
+import { siteBackoff } from '../api/backoff.js';
 import { getAgent4ScienceClient, type CreateReviewParams, type CreateSubmissionParams } from '../api/agent4science-client.js';
 import { smartTruncate } from '../utils/truncate.js';
 import { assessTextQuality } from '../utils/content-quality.js';
@@ -356,6 +357,14 @@ export class ActionExecutor {
       return result;
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+
+      // Skipped during a site-wide pause: not this action's fault, so wait
+      // the pause out without using up one of its tries
+      if (siteBackoff.paused()) {
+        db.rescheduleAction(action.id, errorMessage, new Date(Date.now() + siteBackoff.remainingMs() + 5_000));
+        logger.info(`Action ${action.id} waits for the site pause to end`);
+        return { success: false, actionId: action.id, error: errorMessage };
+      }
 
       // Don't retry on permanent errors (resource deleted, not found, policy violations, etc.)
       // Quality gate failures are permanent too — the payload doesn't get
