@@ -6,6 +6,7 @@
 import { findOwnWork, ownWorkBlock, type OwnWork, type OwnWorkClient } from '../utils/own-work.js';
 import { getAgent4ScienceClient } from '../api/agent4science-client.js';
 import { revisionPlanPrompt, normalizeRevisionPlan, planResponsePrompt, normalizePlanResponse, type PlanReview, type PlanPayload, type PlanAnswerPayload } from '../utils/revision-plan.js';
+import { claimsBlock, commentClaimsBlock, validClaimId } from '../utils/claims.js';
 import { REVIEW_REQUEST_FIELDS, parseReviewRequests, parseReviewScores, weaknessesFromRequests, type ReviewRequestDraft, type Scores } from '../utils/review-requests.js';
 import { reviewResponsePrompt, normalizeReviewResponse, followUpPrompt, normalizeFollowUp, type ReviewForResponse, type ReviewResponsePayload, type AuthorResponseForFollowUp, type FollowUpPayload, type EditableFields } from '../utils/review-response.js';
 import type { AgentPersona, AgentLLMOverride, AgentWorkingMemory, CommentIntent } from '../types.js';
@@ -59,6 +60,8 @@ export interface GeneratedComment {
   confidence: number;
   evidenceAnchor?: string;
   replyToComment?: string;
+  /** The paper claim the comment is about (paper comments only, checked against the paper). */
+  claimId?: string;
   /** Optional confidence change on one of the agent's positions (replies to pushback only). */
   positionUpdate?: PositionUpdate;
 }
@@ -253,6 +256,8 @@ export class LLMClient {
       pushback?: PushbackContext;
       /** The agent's own work at the root of this thread. Looked up from rootId when left out; null means not theirs. */
       ownWork?: OwnWork | null;
+      /** A paper's claims, so a top-level comment can name the one it is about (claimId). */
+      claims?: string[];
     },
     memory?: AgentWorkingMemory,
   ): Promise<GeneratedComment> {
@@ -266,7 +271,8 @@ export class LLMClient {
     const own = context.ownWork !== undefined ? context.ownWork : await this.lookupOwnWork(persona, context);
     const userPrompt = (own ? ownWorkBlock(own) + '\n' : '')
       + this.buildCommentPrompt({ ...context, isOwnWork: !!own })
-      + pushbackPromptBlock(persona, context.pushback, context.rootId);
+      + pushbackPromptBlock(persona, context.pushback, context.rootId)
+      + (context.targetType === 'paper' && context.claims?.length ? commentClaimsBlock(context.claims) : '');
     const offeredPositions = context.pushback ? activePositions(persona) : [];
 
     const response = await this.complete([
@@ -282,7 +288,9 @@ export class LLMClient {
       // Cost tracker not initialized - that's okay
     }
 
-    return this.parseCommentResponse(response.content, offeredPositions);
+    const parsed = this.parseCommentResponse(response.content, offeredPositions);
+    const claimId = context.targetType === 'paper' ? validClaimId(parsed.claimId, context.claims?.length ?? 0) : undefined;
+    return { ...parsed, claimId };
   }
 
   /**
@@ -631,7 +639,8 @@ CRITICAL: You MUST complete every field fully. Do NOT leave any sentence unfinis
 
 Title: ${paper.title}
 Abstract: ${paper.abstract}
-Key Claims: ${paper.claims.join('; ')}
+Key Claims (cite them by id in requests):
+${claimsBlock(paper.claims)}
 Stated Limitations: ${paper.limitations.join('; ')}${reviewSections(paper)}`;
 
     const response = await this.complete([
@@ -665,7 +674,7 @@ Stated Limitations: ${paper.limitations.join('; ')}${reviewSections(paper)}`;
           parsed = JSON.parse(repaired);
         }
         const summary = smartTruncate(parsed.summary || '', 5000);
-        const requests = parseReviewRequests(parsed.requests);
+        const requests = parseReviewRequests(parsed.requests, paper.claims.length);
         const fromRequests = weaknessesFromRequests(requests);
         const listed = Array.isArray(parsed.weaknesses)
           ? parsed.weaknesses.map((w: unknown) => smartTruncate(String(w), 500)).filter((w: string) => w.length >= 50)
@@ -1309,6 +1318,7 @@ Generate your response in JSON format:
           confidence: parsed.confidence ?? 0.7,
           evidenceAnchor: parsed.evidenceAnchor,
           replyToComment: (replyTo && replyTo !== 'null' && replyTo !== '') ? replyTo.replace(/^@/, '') : undefined,
+          ...(typeof parsed.claimId === 'string' ? { claimId: parsed.claimId } : {}),
           ...(offeredPositions.length ? withPositionUpdate(parsed, offeredPositions) : {}),
         };
       }

@@ -5,6 +5,8 @@
  * them, and follow-ups check them, so the paper page shows one checklist.
  */
 
+import { validClaimId } from './claims.js';
+
 export const REQUEST_TYPES = ['fix', 'suggestion', 'question'] as const;
 export type RequestType = typeof REQUEST_TYPES[number];
 
@@ -13,6 +15,8 @@ export interface ReviewRequestDraft {
   severity?: 'major' | 'minor';
   issue: string;
   resolveBy?: string;
+  /** The paper claim it is about (claim_N), when the reviewer named one. */
+  claimId?: string;
 }
 
 /** A request as the site stores it, with its id. */
@@ -29,13 +33,17 @@ export const REVIEW_REQUEST_FIELDS = `
   { "type": "fix", "severity": "major" | "minor", "issue": "<the specific problem: claim, number, table or method; 50+ characters>", "resolveBy": "<the change that would resolve it, concrete enough to check>" }
   { "type": "suggestion", "severity": "minor" | "major", "issue": "<50+ characters>", "resolveBy": "<what to do>" }
   { "type": "question", "issue": "<something only the author can answer>" }
+  Add "claimId": "claim_N" to a request that is about one of the paper's listed claims.
   "fix": the paper is wrong or a claim is unsupported without it. "major" means a main claim depends on it. "suggestion": the paper would be better with it. Write "resolveBy" so someone can check whether it was done ("report run-level bootstrap intervals", not "improve the statistics"). Prefer changes the author can make in the text (narrow a claim, correct a number, state a limitation) and say when only new experiments would resolve it.
 - scores: { "soundness": 1-4, "presentation": 1-4, "contribution": 1-4, "overall": 1-10, "confidence": 1-5 } (integers; confidence is how sure you are)`;
 
 const clip = (s: string, n: number) => (s.length > n ? s.slice(0, n).replace(/\s+\S*$/, '') : s);
 
-/** Keep the requests the site will accept; drop the rest. */
-export function parseReviewRequests(raw: unknown): ReviewRequestDraft[] {
+/**
+ * Keep the requests the site will accept; drop the rest. A claimId is kept
+ * only when the paper has that claim (`claimCount` claims).
+ */
+export function parseReviewRequests(raw: unknown, claimCount = 0): ReviewRequestDraft[] {
   if (!Array.isArray(raw)) return [];
   const out: ReviewRequestDraft[] = [];
   for (const item of raw) {
@@ -45,11 +53,13 @@ export function parseReviewRequests(raw: unknown): ReviewRequestDraft[] {
     if (!(REQUEST_TYPES as readonly string[]).includes(type)) continue;
     const issue = clip(String(r.issue ?? '').trim(), 1000);
     if (issue.length < (type === 'question' ? 30 : 50)) continue;
-    if (type === 'question') { out.push({ type, issue }); continue; }
+    const claimId = validClaimId(r.claimId, claimCount);
+    const onClaim = claimId ? { claimId } : {};
+    if (type === 'question') { out.push({ type, issue, ...onClaim }); continue; }
     const resolveBy = clip(String(r.resolveBy ?? '').trim(), 600);
     if (resolveBy.length < 15) continue;
     const severity = String(r.severity ?? 'minor').toLowerCase() === 'major' ? 'major' : 'minor';
-    out.push({ type, severity, issue, resolveBy });
+    out.push({ type, severity, issue, resolveBy, ...onClaim });
   }
   return out.slice(0, 15);
 }

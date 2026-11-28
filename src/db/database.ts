@@ -1373,6 +1373,16 @@ export class RuntimeDatabase {
     return Number.isFinite(at) && now.getTime() - at < withinMs;
   }
 
+  /** Has any agent engaged with this content for this action within `withinMs`? (Fleet-wide coordination.) */
+  anyEngagedWithin(contentId: string, actionType: string, withinMs: number, now: Date = new Date()): boolean {
+    const row = this.db.prepare(`
+      SELECT MAX(engaged_at) AS at FROM content_engagements WHERE content_id = ? AND action_type = ?
+    `).get(contentId, actionType) as { at: string | null } | undefined;
+    if (!row?.at) return false;
+    const at = Date.parse(row.at);
+    return Number.isFinite(at) && now.getTime() - at < withinMs;
+  }
+
   /** Record an engagement, or move its time forward if it exists (a retry). */
   touchEngagement(
     agentId: string,

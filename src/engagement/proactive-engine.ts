@@ -93,6 +93,10 @@ interface FeedSnapshot {
   sciencesubs: Array<{ slug: string; name: string; description: string }>; // All available subs (for validation)
 }
 
+/** Engagement key for a challenge attempt (success or not) and how long before the same agent may retry it. */
+const CHALLENGE_ATTEMPT = 'challenge_attempt';
+const CHALLENGE_RETRY_MS = 24 * 60 * 60_000;
+
 /**
  * Valid action types for the single creative action per heartbeat (Phase 4: DECIDE ONE).
  * Votes, follows, and joins are handled separately in Phase 2 (MAINTENANCE).
@@ -1548,10 +1552,17 @@ export class ProactiveEngine {
               logger.debug({ ...agentLog(agentId) }, 'Skipping attempt_challenge: already has pending submission in queue');
               break;
             }
-            const eligible = snapshot.challenges.filter(c => !db.hasEngaged(agentId, c.id, 'submission'));
+            // A failed attempt never records a submission, so without this an
+            // agent re-tries the same challenge every cycle (Nov 21: 285 of the
+            // last 300 actions chosen, 0 accepted). Each attempt starts a
+            // cooldown on that challenge.
+            const eligible = snapshot.challenges.filter(c =>
+              !db.hasEngaged(agentId, c.id, 'submission') &&
+              !db.hasEngagedWithin(agentId, c.id, CHALLENGE_ATTEMPT, CHALLENGE_RETRY_MS));
             if (eligible.length > 0 && rateLimiter.canPerform(agentId, 'submission')) {
               const idx = Math.floor(Math.random() * Math.min(eligible.length, 5));
               const challenge = eligible[idx];
+              db.touchEngagement(agentId, challenge.id, 'challenge', CHALLENGE_ATTEMPT);
               logger.info({ ...agentLog(agentId), action, attempt }, `${agentName(agentId)} → attempt_challenge "${challenge.title}"`);
               await this.queueChallengeAttempt(agentId, challenge, persona, apiKey);
               return;
@@ -2038,16 +2049,22 @@ export class ProactiveEngine {
     if (!getRateLimiter().canPerform(agentId, 'revision_plan')) return;
     try {
       const res = await client.getOpenRevisionPlans(apiKey);
-      const pick = (res.success ? res.data?.papers ?? [] : [])
+      // The client unwraps a top-level "papers" key, so this arrives as an array
+      const raw = res.success ? (res.data as unknown) : null;
+      const list = (Array.isArray(raw) ? raw : (raw as { papers?: unknown[] } | null)?.papers ?? []) as { paperId: string; latestId: string; title: string; authorId: string; reviewerIds: string[] }[];
+      const pick = list
         .find(p => p.authorId !== agentId && !p.reviewerIds.includes(agentId)
-          && !db.hasEngagedWithin(agentId, p.latestId, 'revision_plan', REVIEW_RETRY_MS));
+          // One plan per version: skip papers another agent in this fleet is already planning
+          && !db.anyEngagedWithin(p.latestId, 'revision_plan', REVIEW_RETRY_MS));
       if (!pick) return;
+      // Claim it first, so other agents in this fleet don't plan the same version
+      db.touchEngagement(agentId, pick.latestId, 'paper', 'revision_plan');
       const { reviews } = await this.chainReviewsFor(pick.paperId, apiKey);
       const others = reviews.filter(r => r.reviewerAgentId !== pick.authorId);
       if (others.length < 2) return;
       const latest = await client.getPaper(pick.latestId, apiKey, { include: 'none' });
       const paper = latest.success && latest.data ? latest.data : null;
-      const planReviews = others.slice(0, 6).map(r => ({ id: r.id, reviewer: r.agent?.handle, verdict: r.verdict, summary: r.summary, requests: requestsFor(r) }));
+      const planReviews = others.slice(0, 6).map(r => ({ id: r.id, reviewer: r.agent?.handle, verdict: r.verdict, summary: r.summary, soundness: r.soundness, soundnessConfidence: r.soundnessConfidence, scores: r.scores ?? undefined, requests: requestsFor(r) }));
       const plan = await this.llmFor(agentId).generateRevisionPlan(persona,
         { title: paper?.title || pick.title, text: paper ? paperText(paper) : '' }, planReviews);
       db.touchEngagement(agentId, pick.latestId, 'paper', 'revision_plan');
@@ -2935,6 +2952,7 @@ export class ProactiveEngine {
         triggerType: 'new_content',
         rootId: paper.id,
         existingDiscussion,
+        claims: Array.isArray(paper.claims) ? paper.claims : [],
       }, this.memoryFor(agentId));
 
       // If the LLM wants to reply to a specific commenter, thread it

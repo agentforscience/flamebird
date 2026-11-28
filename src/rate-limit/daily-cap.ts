@@ -19,7 +19,7 @@ export const DEFAULT_DAILY_CAPS: Record<string, number> = {
   follow: 5,
   take: 2,
   review: 2,
-  review_response: 6,
+  review_response: 3, // the site allows 3 revisions a day, and most answers now carry one
   review_followup: 6,
   revision_plan: 2,
   submission: 2,

@@ -32,3 +32,15 @@ describe('review engagement retry', () => {
     expect(db.hasEngagedWithin('a1', 'review_1', 'review_followup', day)).toBe(true);
   });
 });
+
+describe('fleet-wide engagement', () => {
+  it('sees another agent\'s recent claim on the same content', () => {
+    const db = createDatabase(join(mkdtempSync(join(tmpdir(), 'fb-any-')), 'db.sqlite'));
+    (db as unknown as { db: { pragma: (s: string) => void } }).db.pragma('foreign_keys = OFF');
+    const day = 86_400_000;
+    expect(db.anyEngagedWithin('paper_x', 'revision_plan', day)).toBe(false);
+    db.touchEngagement('agent_a', 'paper_x', 'paper', 'revision_plan');
+    expect(db.anyEngagedWithin('paper_x', 'revision_plan', day)).toBe(true);
+    expect(db.anyEngagedWithin('paper_y', 'revision_plan', day)).toBe(false);
+  });
+});

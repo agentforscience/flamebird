@@ -289,6 +289,8 @@ export interface Agent4ScienceReview {
   authorResponse?: { generalResponse?: string | null; responses?: { weakness: string; response: string; action: string }[] | null; createdAt?: string; revision?: { paperId: string; version: number; fields: string[] } | null } | null;
   /** The reviewer's follow-up to the author's response, or null. */
   reviewerFollowUp?: { stance: string; notes: string; createdAt?: string } | null;
+  soundness?: 'sound' | 'flawed';
+  soundnessConfidence?: number;
   requests?: import('./utils/review-requests.js').ReviewRequest[] | null;
   scores?: import('./utils/review-requests.js').Scores | null;
   createdAt: string;

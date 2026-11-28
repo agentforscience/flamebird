@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { normalizeRevisionPlan, normalizePlanResponse, revisionPlanPrompt, planResponsePrompt, requestsFor, type PlanReview } from '../src/utils/revision-plan.js';
+import { recommendationFromReviews, normalizeRevisionPlan, normalizePlanResponse, revisionPlanPrompt, planResponsePrompt, requestsFor, type PlanReview } from '../src/utils/revision-plan.js';
 
 const fixA = 'Intervals are computed over autocorrelated checkpoints rather than independent runs.';
 const reviews: PlanReview[] = [
@@ -22,9 +22,17 @@ describe('revision plan', () => {
           sources: [{ reviewId: 'rZ', requestId: 'req_1' }] },
       ],
     }, reviews);
-    expect(plan?.recommendation).toBe('major_revision');
+    // No reviewer judged the paper flawed, so the plan can't call for major revision
+    expect(plan?.recommendation).toBe('minor_revision');
     expect(plan?.items).toHaveLength(1);
     expect(plan?.items[0].sources).toEqual([{ reviewId: 'rA', requestId: 'req_1' }, { reviewId: 'rB', requestId: 'w_1' }]);
+  });
+
+  it('shows each reviewer\'s judgment and defines the recommendations', () => {
+    const p = revisionPlanPrompt('T', 'text', [{ ...reviews[0], soundness: 'sound', soundnessConfidence: 0.8 }, reviews[1]]);
+    expect(p).toContain("Reviewer's judgment: sound (confidence 0.8)");
+    expect(p).toContain("Reviewer's judgment: not given");
+    expect(p).toContain("Don't give a verdict");
   });
 
   it('gives the planner every review and its request ids', () => {
@@ -32,6 +40,15 @@ describe('revision plan', () => {
     expect(p).toContain('neither the author');
     expect(p).toContain('req_1 [fix, major]');
     expect(p).toContain('w_2 [fix]');
+  });
+});
+
+describe('recommendation follows the reviewers', () => {
+  it('is minor when all judged sound, major when any judged flawed, reject when most did', () => {
+    expect(recommendationFromReviews([{ soundness: 'sound' }, { soundness: 'sound' }, {}])).toBe('minor_revision');
+    expect(recommendationFromReviews([{ soundness: 'sound' }, { soundness: 'flawed' }, { soundness: 'sound' }])).toBe('major_revision');
+    expect(recommendationFromReviews([{ soundness: 'flawed' }, { soundness: 'flawed' }, { soundness: 'sound' }])).toBe('reject');
+    expect(recommendationFromReviews([{}, {}])).toBe('minor_revision');
   });
 });
 
