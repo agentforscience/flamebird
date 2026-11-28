@@ -306,6 +306,11 @@ export class ActionExecutor {
         case 'review_response':
           result = await this.executeReviewResponse(action, apiKey, client);
           break;
+        case 'claim_check': {
+          const r = await client.checkClaim(action.targetId, action.payload as never, apiKey);
+          result = r.success ? { success: true, actionId: action.id, responseId: r.data?.check?.id } : { success: false, actionId: action.id, error: r.error };
+          break;
+        }
         case 'revision_plan': {
           const r = await client.createRevisionPlan(action.targetId, action.payload as never, apiKey);
           result = r.success ? { success: true, actionId: action.id, responseId: r.data?.plan?.id } : { success: false, actionId: action.id, error: r.error };
@@ -424,6 +429,11 @@ export class ActionExecutor {
         const p = action.payload as { summary?: string; strengths?: string[]; weaknesses?: string[] };
         const combined = [p.summary, ...(p.strengths ?? []), ...(p.weaknesses ?? [])].filter(Boolean).join(' ');
         const result = assessTextQuality(combined, 40);
+        return result.ok ? null : result.reason!;
+      }
+      case 'claim_check': {
+        const p = action.payload as { method?: string; finding?: string };
+        const result = assessTextQuality([p.method, p.finding].filter(Boolean).join(' '), 40);
         return result.ok ? null : result.reason!;
       }
       case 'revision_plan': {

@@ -7,6 +7,7 @@ import { findOwnWork, ownWorkBlock, type OwnWork, type OwnWorkClient } from '../
 import { getAgent4ScienceClient } from '../api/agent4science-client.js';
 import { revisionPlanPrompt, normalizeRevisionPlan, planResponsePrompt, normalizePlanResponse, type PlanReview, type PlanPayload, type PlanAnswerPayload } from '../utils/revision-plan.js';
 import { claimsBlock, commentClaimsBlock, validClaimId } from '../utils/claims.js';
+import { claimCheckPrompt, normalizeClaimChecks, type CheckCandidate, type ClaimCheckPayload, type ElsewhereIssue } from '../utils/claim-check.js';
 import { REVIEW_REQUEST_FIELDS, parseReviewRequests, parseReviewScores, weaknessesFromRequests, type ReviewRequestDraft, type Scores } from '../utils/review-requests.js';
 import { reviewResponsePrompt, normalizeReviewResponse, followUpPrompt, normalizeFollowUp, type ReviewForResponse, type ReviewResponsePayload, type AuthorResponseForFollowUp, type FollowUpPayload, type EditableFields } from '../utils/review-response.js';
 import type { AgentPersona, AgentLLMOverride, AgentWorkingMemory, CommentIntent } from '../types.js';
@@ -334,6 +335,26 @@ export class LLMClient {
     ], 2048);
     this.trackCost('review_followup', out.usage);
     return normalizeFollowUp(this.extractJSON(out.content), review.weaknesses, review.requests ?? []);
+  }
+
+  /**
+   * Check every offered claim against the paper's own numbers, and list number
+   * problems found elsewhere. One retry when no check is usable.
+   */
+  async generateClaimChecks(persona: AgentPersona, paper: { title: string; text: string }, candidates: CheckCandidate[]): Promise<{ checks: ClaimCheckPayload[]; elsewhere: ElsewhereIssue[] }> {
+    const messages: LLMMessage[] = [
+      { role: 'system', content: this.buildPersonaPrompt(persona, undefined, { currentTopic: paper.title }) },
+      { role: 'user', content: claimCheckPrompt(paper.title, paper.text, candidates) },
+    ];
+    let result = { checks: [] as ClaimCheckPayload[], elsewhere: [] as ElsewhereIssue[], problems: [] as string[] };
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const out = await this.complete(messages, 6144);
+      this.trackCost('claim_check', out.usage);
+      result = normalizeClaimChecks(this.extractJSON(out.content), candidates);
+      if (result.checks.length) break;
+      messages.push({ role: 'assistant', content: out.content }, { role: 'user', content: `No check can be posted: ${result.problems.join('; ') || 'no checks'}. Return the corrected JSON only.` });
+    }
+    return { checks: result.checks, elsewhere: result.elsewhere };
   }
 
   /** A third agent's revision plan merging all reviewers' requests. Null when unusable. */

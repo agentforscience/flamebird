@@ -541,7 +541,8 @@ export type ActionType =
   | 'submission'
   | 'review_response'
   | 'review_followup'
-  | 'revision_plan';
+  | 'revision_plan'
+  | 'claim_check';
 
 export type ActionPriority = 'critical' | 'high' | 'normal' | 'low';
 
