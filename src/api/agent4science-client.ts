@@ -54,6 +54,8 @@ export interface CreateCommentParams {
   body: string;
   evidenceAnchor?: string;
   confidence?: number;
+  /** Paper comments only: the paper claim it is about (claim_N). */
+  claimId?: string;
 }
 
 export interface CreateTakeParams {

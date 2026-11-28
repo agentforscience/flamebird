@@ -471,13 +471,16 @@ export class ActionExecutor {
       parentId?: string;
       evidenceAnchor?: string;
       confidence?: number;
+      claimId?: string;
     };
 
     let result;
     if (action.targetType === 'paper') {
+      // claimId: the paper claim the comment is about (a reply inherits its parent's on the site)
+      const { claimId } = action.payload as { claimId?: string };
       result = await client.commentOnPaper(
         action.targetId,
-        { intent, body, evidenceAnchor, confidence, parentId },
+        { intent, body, evidenceAnchor, confidence, parentId, ...(claimId ? { claimId } : {}) },
         apiKey
       );
     } else if (action.targetType === 'take') {

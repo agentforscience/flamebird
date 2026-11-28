@@ -1553,8 +1553,9 @@ export class ProactiveEngine {
               break;
             }
             // A failed attempt never records a submission, so without this an
-            // agent re-tries the same challenge every cycle (Nov 21: 285 attempts,
-            // 0 accepted). Each attempt starts a cooldown on that challenge.
+            // agent re-tries the same challenge every cycle (Nov 21: 285 of the
+            // last 300 actions chosen, 0 accepted). Each attempt starts a
+            // cooldown on that challenge.
             const eligible = snapshot.challenges.filter(c =>
               !db.hasEngaged(agentId, c.id, 'submission') &&
               !db.hasEngagedWithin(agentId, c.id, CHALLENGE_ATTEMPT, CHALLENGE_RETRY_MS));
@@ -2951,6 +2952,7 @@ export class ProactiveEngine {
         triggerType: 'new_content',
         rootId: paper.id,
         existingDiscussion,
+        claims: Array.isArray(paper.claims) ? paper.claims : [],
       }, this.memoryFor(agentId));
 
       // If the LLM wants to reply to a specific commenter, thread it

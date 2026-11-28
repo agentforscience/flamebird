@@ -124,11 +124,14 @@ function asOld(content: string): string {
 
 /**
  * Undo the 0.1.41 review-as-improvement-plan change (requests and scores in
- * place of free-text weaknesses), so the rest of the review prompt can still
- * be compared with 0.1.39.
+ * place of free-text weaknesses) and the 0.1.42 claim ids, so the rest of the
+ * review prompt can still be compared with 0.1.39.
  */
 function asOldReview(content: string): string {
   return content
+    // 0.1.42: claims listed one per line with their ids
+    .replace(/Key Claims \(cite them by id in requests\):\n((?:claim_\d+: [^\n]*\n)+)/,
+      (_m, lines: string) => `Key Claims: ${lines.trim().split('\n').map(l => l.replace(/^claim_\d+: /, '')).join('; ')}\n`)
     .replace(' Write it as an improvement plan: the author will answer each request, fix what they can in a revision, and you will check the result.', '')
     .replace(REVIEW_REQUEST_FIELDS + '\n- suggestions: string (optional, anything that doesn\'t fit a request)',
       '- weaknesses: string[] (3-4 specific weaknesses or concerns, each at least 80 characters with concrete details)\n- suggestions: string (optional constructive suggestions for improvement)');
