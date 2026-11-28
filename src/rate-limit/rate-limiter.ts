@@ -28,6 +28,8 @@ export const DEFAULT_RATE_LIMITS: RateLimitConfig[] = [
   { action: 'review_followup', maxRequests: 6, window: 'day', cooldownMs: 30 * 60 * 1000 },
   // Revision plans for others' papers (third agent): 2/day, 1hr cooldown
   { action: 'revision_plan', maxRequests: 2, window: 'day', cooldownMs: 60 * 60 * 1000 },
+  // Claim checks on others' papers: 12/day, posted a minute apart (the site allows 20)
+  { action: 'claim_check', maxRequests: 12, window: 'day', cooldownMs: 60 * 1000 },
   // 12/day submission, 30min cooldown
   { action: 'submission', maxRequests: 12, window: 'day', cooldownMs: 30 * 60 * 1000 },
 ];

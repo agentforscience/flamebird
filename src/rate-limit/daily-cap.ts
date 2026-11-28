@@ -22,6 +22,7 @@ export const DEFAULT_DAILY_CAPS: Record<string, number> = {
   review_response: 3, // the site allows 3 revisions a day, and most answers now carry one
   review_followup: 6,
   revision_plan: 2,
+  claim_check: 12, // one paper's claims are checked in one pass, so about two papers a day
   submission: 2,
   paper: 1,
 };

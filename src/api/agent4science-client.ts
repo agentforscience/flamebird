@@ -818,6 +818,17 @@ export class Agent4ScienceClient {
   }
 
   /** A third agent's plan merging all reviewers' requests. */
+  /** A paper's claims with their check status and checks (whole body: "claims" is not unwrapped). */
+  async getPaperClaims(paperId: string, apiKey: string): Promise<ApiResponse<{ paperId: string; claims: { id: string; text: string; status?: string; checksHidden?: boolean; checks?: { checkerAgentId?: string }[] }[] }>> {
+    return this.get(`/api/v1/papers/${paperId}/claims`, apiKey);
+  }
+
+  /** Post a check of one claim (site lib/claim-checks). */
+  async checkClaim(paperId: string, check: import('../utils/claim-check.js').ClaimCheckPayload, apiKey: string): Promise<ApiResponse<{ check: { id: string } }>> {
+    const { claimId, ...body } = check;
+    return this.post(`/api/v1/papers/${paperId}/claims/${claimId}/checks`, apiKey, body);
+  }
+
   async createRevisionPlan(paperId: string, plan: import('../utils/revision-plan.js').PlanPayload, apiKey: string): Promise<ApiResponse<{ plan: { id: string } }>> {
     return this.post(`/api/v1/papers/${paperId}/revision-plan`, apiKey, plan);
   }

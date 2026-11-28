@@ -27,6 +27,7 @@ import { assessTextQuality } from '../utils/content-quality.js';
 import { attachSiteMemory, findPushback } from '../utils/site-memory.js';
 import { pushbackContextFor } from '../utils/pushback.js';
 import { paperText } from '../utils/own-work.js';
+import { checkCandidates, checkText, elsewhereComment } from '../utils/claim-check.js';
 import { needsAuthorAnswer, needsReviewerFollowUp, editableFieldsOf, type RevisionForFollowUp } from '../utils/review-response.js';
 import { requestsFor } from '../utils/revision-plan.js';
 import { targetTopics } from '../utils/focus.js';
@@ -36,7 +37,7 @@ import { workProfileFor, workLogFields } from '../llm/work-style.js';
 const REVIEW_RETRY_MS = 24 * 60 * 60_000;
 
 /** What discovery can lead to; if none is allowed now, discovery is skipped. */
-const DISCOVERY_ACTIONS = ['comment', 'vote', 'take', 'review', 'review_response', 'review_followup', 'revision_plan', 'follow'] as const;
+const DISCOVERY_ACTIONS = ['comment', 'vote', 'take', 'review', 'review_response', 'review_followup', 'revision_plan', 'claim_check', 'follow'] as const;
 
 const logger = createLogger('proactive');
 
@@ -94,6 +95,9 @@ interface FeedSnapshot {
 }
 
 /** Engagement key for a challenge attempt (success or not) and how long before the same agent may retry it. */
+/** A claim-check agent leaves a paper for a week; the fleet leaves it for 6 hours after any check, so checks spread across papers. */
+const CLAIM_CHECK_AGAIN_MS = 7 * 24 * 60 * 60_000;
+const CLAIM_CHECK_SPREAD_MS = 6 * 60 * 60_000;
 const CHALLENGE_ATTEMPT = 'challenge_attempt';
 const CHALLENGE_RETRY_MS = 24 * 60 * 60_000;
 
@@ -495,6 +499,8 @@ export class ProactiveEngine {
       await this.discoverReviewFollowUps(agentId, agent.config.persona, apiKey);
       // As a third agent: merge others' reviews into one revision plan
       await this.discoverRevisionPlans(agentId, agent.config.persona, apiKey);
+      // Check one claim of someone else's paper against the paper's own numbers
+      await this.discoverClaimChecks(agentId, agent.config.persona, apiKey, snapshot);
       // Reply to comments on own content (separate social contract)
       await this.discoverAuthorReplyOpportunities(agentId, agent.config.persona, apiKey);
       // Continue threads the agent is already participating in (depth 2+ back-and-forth)
@@ -2036,6 +2042,47 @@ export class ProactiveEngine {
     } catch (error) {
       logger.debug({ err: error, ...agentLog(agentId) }, 'Plan round skipped');
       return false;
+    }
+  }
+
+  /**
+   * Check the claims of a recent paper by someone else against the paper's
+   * own numbers (held / failed / couldn't check), one model call per paper,
+   * and comment on number problems found elsewhere in it. One paper per cycle;
+   * a paper this fleet checked in the last 6 hours is left for later.
+   */
+  private async discoverClaimChecks(agentId: string, persona: AgentPersona, apiKey: string, snapshot: FeedSnapshot): Promise<void> {
+    const client = getAgent4ScienceClient();
+    const db = getDatabase();
+    if (!getRateLimiter().canPerform(agentId, 'claim_check')) return;
+    try {
+      const pick = snapshot.papers.find(p => p.agentId !== agentId
+        && Array.isArray(p.claims) && p.claims.some(c => /\d/.test(c))
+        && !db.hasEngagedWithin(agentId, p.id, 'claim_check', CLAIM_CHECK_AGAIN_MS)
+        && !db.anyEngagedWithin(p.id, 'claim_check', CLAIM_CHECK_SPREAD_MS));
+      if (!pick) return;
+      db.touchEngagement(agentId, pick.id, 'paper', 'claim_check');
+      const res = await client.getPaperClaims(pick.id, apiKey);
+      const claims = res.success && res.data ? res.data.claims ?? [] : [];
+      const candidates = checkCandidates(claims, agentId);
+      if (candidates.length === 0) return;
+      const full = await client.getPaper(pick.id, apiKey, { include: 'none' });
+      const paper = full.success && full.data ? full.data : pick;
+      const { checks, elsewhere } = await this.llmFor(agentId).generateClaimChecks(persona, { title: paper.title, text: checkText(paper) }, candidates);
+      if (!checks.length) {
+        logger.info(`${agentName(agentId)} could not write a usable claim check for ${pick.id}; skipped`);
+        return;
+      }
+      for (const check of checks) {
+        getActionExecutor().queueAction(agentId, 'claim_check', pick.id, 'paper', check as unknown as Record<string, unknown>, 'normal');
+      }
+      // Number problems outside the checked claims go in a comment: a claim's status comes only from checks of that claim
+      const note = elsewhereComment(elsewhere);
+      if (note) getActionExecutor().queueAction(agentId, 'comment', pick.id, 'paper', note as unknown as Record<string, unknown>, 'normal');
+      const tally = checks.map(c => `${c.claimId} ${c.outcome}`).join(', ');
+      logger.info(`${agentName(agentId)} queued ${checks.length} claim checks (${tally})${note ? ' and a comment on numbers elsewhere' : ''} on "${pick.title.slice(0, 60)}"`);
+    } catch (error) {
+      logger.debug({ err: error, ...agentLog(agentId) }, 'Claim check discovery skipped');
     }
   }
 
